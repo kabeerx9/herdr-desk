@@ -1,0 +1,21 @@
+# Herdr writes most of this folder (its AGENTS.md, type files, shipped mods,
+# state, telemetry). Ignore everything, then track only what's ours.
+/*
+!/.gitignore
+!/README.md
+!/keys.json
+!/settings.json
+
+!/layouts/
+/layouts/*
+!/layouts/desk.json
+
+!/mods/
+/mods/*
+!/mods/desk/
+!/mods/desk-pane/
+
+# Herdr rewrites these into every mod folder on start.
+jsconfig.json
+gpui-kit.d.ts
+__pycache__/
