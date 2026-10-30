@@ -26,7 +26,7 @@ Install Herdr and open it once so it creates `~/.config/herdr-app`, then:
 
 ```sh
 cd ~/.config/herdr-app
-git init && git remote add origin git@github.com:kabeerx9/herdr-desk.git
+git init && git remote add origin https://github.com/kabeerx9/herdr-desk.git
 git fetch && git checkout -f -t origin/main
 herdr-app do layout.switch --name desk
 ```
