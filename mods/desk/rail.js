@@ -3,6 +3,7 @@ import { v_flex } from "gpui-base";
 import { theme, shared } from "herdr";
 import { TABS, currentTab, isOpen, setOpen, choose } from "./tabs.js";
 import { fetchUsage, railMeters, openLimits } from "./usage.js";
+import { inboxCount } from "./inbox.js";
 
 // The always-visible edge of the Desk: one icon per tab, a badge for counts.
 export class Rail {
@@ -24,10 +25,10 @@ export class Rail {
   }
 
   render() {
-    const t = theme(), open = isOpen(), active = currentTab(), counts = shared("desk.counts") ?? {};
+    const t = theme(), open = isOpen(), active = currentTab(), counts = shared("desk.counts") ?? {}, inbox = inboxCount();
     return v_flex().id("desk-rail").size_full().pt(10).gap(4).items_center().bg(t.chrome)
       .children(TABS.map((tab) => {
-        const on = open && tab.id === active, n = counts[tab.id], hovered = this.hovered === tab.id;
+        const on = open && tab.id === active, n = tab.id === "inbox" ? inbox.n : counts[tab.id], hovered = this.hovered === tab.id;
         return div().id(`rail-${tab.id}`).relative().size(34).flex().items_center().justify_center().rounded(8).cursor_pointer()
           .bg(on ? t.selected : hovered ? t.hover : "#00000000")
           .text_color(on ? t.foreground : hovered ? t.foreground : t.muted)
@@ -37,7 +38,7 @@ export class Rail {
           .child(svg(`mods/desk/icons/${tab.icon}.svg`).size(17))
           .when(on, (el) => el.child(div().absolute().right(-7).top(9).w(3).h(16).rounded(2).bg(t.accent)))
           .when(Boolean(n), (el) => el.child(div().absolute().top(2).right(1).min_w(14).h(14).px(3).rounded(7)
-            .flex().items_center().justify_center().bg(tab.id === "git" ? t.blocked : t.accent)
+            .flex().items_center().justify_center().bg(tab.id === "git" || (tab.id === "inbox" && inbox.blocked) ? t.blocked : tab.id === "inbox" ? t.done : t.accent)
             .text_color(t.accent_foreground).text_size(9).font_semibold().child(n > 99 ? "99+" : String(n))));
       }))
       .child(div().flex_1())

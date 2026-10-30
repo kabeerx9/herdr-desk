@@ -5,6 +5,7 @@ import { icon, tileColor, ago, pill, button, section, empty, card } from "./ui.j
 import { GitPanel } from "./git.js";
 import { TABS, currentTab, setOpen } from "./tabs.js";
 import { Rail } from "./rail.js";
+import { inboxView } from "./inbox.js";
 import { UsagePopover } from "./usage.js";
 
 const ME = "kabeerx9";
@@ -392,7 +393,7 @@ class Panel {
 
   render(cx) {
     const t = theme();
-    const view = { projects: () => this.projectsView(t), prs: () => this.prsView(t),
+    const view = { inbox: () => inboxView(this, t), projects: () => this.projectsView(t), prs: () => this.prsView(t),
       issues: () => this.issuesView(t), git: () => this.git.render(t, cx), pages: () => this.pagesView(t) }[this.tab];
     return v_flex().id("desk").size_full().bg(t.chrome).text_color(t.foreground)
       .child(this.header(t))
