@@ -25,7 +25,7 @@
               "id": "spaces",
               "type": "block",
               "content": {
-                "mod": "spaces"
+                "mod": "desk-spaces"
               },
               "size": {
                 "weight": 1

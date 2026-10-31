@@ -14,6 +14,7 @@
 /mods/*
 !/mods/desk/
 !/mods/desk-pane/
+!/mods/desk-spaces/
 
 # Herdr rewrites these into every mod folder on start.
 jsconfig.json
