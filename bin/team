@@ -167,7 +167,7 @@ def digest_for(slug, address, limit=20):
         return ""
     lines = [chat_line(r, 500) for r in new[-limit:]]
     more = f" ({len(new) - limit} earlier not shown; `{SELF} inbox --all` has everything)" if len(new) > limit else ""
-    return "\n\nNew in the desk chat since you last looked" + more + ":\n" + "\n".join(lines)
+    return "\n\nAlso new in the chat" + more + ":\n" + "\n".join(lines)
 
 
 def desk_members(slug):
@@ -410,9 +410,7 @@ def ask(args):
     qid = "q" + secrets.token_hex(3)
     delivered, failed = [], []
     for t in targets:
-        why = send_text(t["address"], f"[{who} asks you, in the desk chat] {text}\n\n"
-                        f"(Answer once with `{SELF} answer {qid} \"...\"` (Markdown renders; short, or a file path for long material). "
-                        "It's a question: don't start new work for it unless it quotes Kabeer asking.)")
+        why = send_text(t["address"], f"[desk chat] {who} asks you ({qid}): {text}")
         (failed.append({"role": t["labels"]["role"], "why": why}) if why else delivered.append(t["address"]))
     rec = chat_append(slug, {"from": who, "address": ME, "kind": "ask", "id": qid, "to": [targets[0]["labels"]["role"]],
                              "text": text, "delivered_to": delivered, "failed": failed})
@@ -425,7 +423,7 @@ def answer(args):
     q = next((r for r in reversed(chat_read(slug)) if r.get("kind") == "ask" and r.get("id") == args.id), None)
     if not q:
         die(f"no question {args.id} in this desk's chat")
-    note = f"[{who} answers your question {args.id}] {text}"
+    note = f"[desk chat] {who} answers {args.id}: {text}"
     asker = q.get("address")
     if (terminal(asker).get("labels") or {}).get("role") == "cto":
         note += digest_for(slug, asker)
@@ -458,13 +456,10 @@ def post(args):
     names = ", ".join(r for _, r in targets)
     delivered, delivered_to, failed = [], [], []
     for addr, role in targets:
-        note = f"Kabeer, in the desk chat (to {names}): {text}\n\n"
+        # Just a tag: how to answer is in every agent's system prompt (roles/protocol.md).
+        note = f"[desk chat] Kabeer{f' (to {names})' if len(targets) > 1 else ''}: {text}"
         if role == "cto":
-            note += (f"(Answer Kabeer in the chat with `{SELF} say \"...\"` (Markdown renders). If an engineer knows better, "
-                     f"read their worktree first; ask only about intent: `{SELF} ask <role> \"...\"`, and their answer comes back to you.)")
             note += digest_for(args.task, addr)
-        else:
-            note += f"(Answer in the chat with `{SELF} say \"...\"` (Markdown renders), then do what's asked.)"
         why = send_text(addr, note)
         if why:
             failed.append({"role": role, "why": why})
