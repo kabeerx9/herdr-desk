@@ -1,6 +1,6 @@
 import { div, svg, image } from "gpui-kit";
 import { h_flex, v_flex } from "gpui-base";
-import { agents, theme, run, layout, setAgentOrder } from "herdr";
+import { agents, theme, run, layout, setAgentOrder, shared } from "herdr";
 import { Roles, sessions, startRole, roleTile } from "./roles.js";
 
 // The sidebar's agent list: the team's roles (each with its own status), then any
@@ -88,25 +88,27 @@ export class Sidebar {
       return v_flex().size_full().min_h(0).pt(6).bg(t.chrome).border_t(1).border_color(t.border)
         .child(v_flex().id("ag-list").flex_1().min_h(0).px(4).gap(2).overflow_y_scrollbar()
           .children(team.map(({ role, live }) => tile(`rr-${role.name}`, roleTile(div, svg, t, role, 22, !live.length), live[0]?.status,
-            live[0] ? focus(live[0]) : () => startRole(role), live[0] ? role.name : `Start ${role.name}`)))
+            live[0] ? focus(live[0]) : () => startRole(role, { roles: this.roles.list }), live[0] ? role.name : `Start ${role.name}`)))
           .children(others.map((a) => tile(`ro-${a.address}`, programIcon(a.program, 16), a.status, focus(a), `${a.space_name} · ${a.tab_name}`))));
     }
 
+    const briefs = shared("desk.counts")?.team ?? 0;
     const rows = [this.header(t, "h-team", "Team")];
     for (const { role, live } of team) {
       const top = live[0], id = `r-${role.name}`;
       const start = div().id(`${id}-start`).flex_none().p(3).rounded(5).text_color(t.dim).cursor_pointer()
         .hover((s) => s.bg(t.raised).text_color(t.foreground)).tooltip(top ? `Start another ${role.name}` : `Start ${role.name}`)
-        .on_click((_e, cx) => { cx.stop_propagation(); startRole(role); })
+        .on_click((_e, cx) => { cx.stop_propagation(); startRole(role, { roles: this.roles.list }); })
         .child(svg("mods/desk/icons/plus.svg").size(12));
       rows.push(this.row(t, id, {
         lead: roleTile(div, svg, t, role, 22, !top),
         name: role.name,
-        detail: top ? (live.length > 1 ? `${live.length} running` : top.space_name) : role.label ?? role.model,
+        detail: role.id === "cto" && briefs ? `${briefs} brief${briefs > 1 ? "s" : ""} waiting`
+          : top ? (live.length > 1 ? `${live.length} running` : top.space_name) : role.label ?? role.model,
         status: top && this.status(t, top.status, false),
         focused: live.some((a) => a.focused),
         dim: !top,
-        onClick: top ? focus(top) : () => startRole(role),
+        onClick: top ? focus(top) : () => startRole(role, { roles: this.roles.list }),
         hoverChild: start,
       }));
       // More than one of a role: each one under it, by where it runs.

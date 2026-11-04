@@ -1,5 +1,5 @@
 {
-  "_help": "Team roles for the Desk's Team tab. cli: claude | codex (or give a full argv). model: what that CLI's --model / -m takes. prompt: a file in roles/ added to the agent's system prompt. icon: an svg in icons/, without .svg. Saved edits show within a few seconds.",
+  "_help": "Team roles for the Desk's Team tab and sidebar. cli: claude | codex (or give a full argv). model: what that CLI's --model / -m takes. prompt: a file in roles/ added to the agent's system prompt. icon: an svg in icons/, without .svg. worktree: true for roles that edit code; such a role gets its own git worktree when another agent is already working in that checkout. Saved edits show within a few seconds.",
   "roles": [
     {
       "id": "cto",
@@ -10,7 +10,8 @@
       "label": "Opus 5.5",
       "prompt": "roles/cto.md",
       "color": "ansi5",
-      "icon": "roles/cto"
+      "icon": "roles/cto",
+      "worktree": false
     },
     {
       "id": "frontend",
@@ -21,7 +22,8 @@
       "label": "Opus 5.5",
       "prompt": "roles/frontend.md",
       "color": "ansi4",
-      "icon": "roles/frontend"
+      "icon": "roles/frontend",
+      "worktree": true
     },
     {
       "id": "backend",
@@ -32,7 +34,8 @@
       "label": "GPT-6.1 Sol",
       "prompt": "roles/backend.md",
       "color": "ansi2",
-      "icon": "roles/backend"
+      "icon": "roles/backend",
+      "worktree": true
     },
     {
       "id": "reviewer",
@@ -47,7 +50,8 @@
       ],
       "prompt": "roles/reviewer.md",
       "color": "ansi3",
-      "icon": "roles/reviewer"
+      "icon": "roles/reviewer",
+      "worktree": false
     },
     {
       "id": "qa",
@@ -58,7 +62,8 @@
       "label": "Sonnet 5.5",
       "prompt": "roles/qa.md",
       "color": "ansi6",
-      "icon": "roles/qa"
+      "icon": "roles/qa",
+      "worktree": true
     }
   ]
 }

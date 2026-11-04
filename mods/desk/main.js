@@ -8,6 +8,7 @@ import { Rail } from "./rail.js";
 import { inboxView } from "./inbox.js";
 import { Team } from "./team.js";
 import { Sidebar } from "./sidebar.js";
+import { startRole } from "./roles.js";
 import { UsagePopover } from "./usage.js";
 
 const ME = "kabeerx9";
@@ -210,6 +211,13 @@ class Panel {
     notify({ title: name, body: p.name, level: "info", timeout: 2500 });
   }
 
+  // Reviews go to the Reviewer role (its own model and prompt) when roles.json has one.
+  review(p, repo, pr) {
+    const reviewer = this.team.roles.byId("reviewer");
+    if (!reviewer) return this.agent(p, `review #${pr.number}`, REVIEW(repo, pr));
+    startRole(reviewer, { project: p, space: this.spaceFor(p), task: REVIEW(repo, pr), roles: this.team.roles.list });
+  }
+
   select(tab, cx) {
     setShared("desk.tab", tab);
     if (tab === "git") this.git.refresh(cx);
@@ -338,7 +346,7 @@ class Panel {
             .when(Boolean(pr.isDraft), (el) => el.child(pill(t, "draft", t.dim)))
             .child(div().flex_1())
             .when(hovered && Boolean(project), (el) => el.child(review
-              ? button(t, `${id}-a`, "Review", () => this.agent(project, `review #${pr.number}`, REVIEW(repo, pr)), { iconName: "sparkles" })
+              ? button(t, `${id}-a`, "Review", () => this.review(project, repo, pr), { iconName: "sparkles" })
               : button(t, `${id}-a`, "Follow up", () => this.agent(project, `#${pr.number} follow-up`, FOLLOW_UP(repo, pr)), { iconName: "sparkles" }))))));
   }
 
