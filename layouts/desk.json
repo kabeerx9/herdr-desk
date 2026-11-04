@@ -234,7 +234,7 @@
   ],
   "background": "canvas",
   "theme": {
-    "light": "paper",
+    "light": "desk-light",
     "dark": "graphite"
   },
   "terminal_padding": [

@@ -15,6 +15,11 @@
 /layouts/*
 !/layouts/desk.json
 
+# Our light theme (Herdr ships the other files in themes/).
+!/themes/
+/themes/*
+!/themes/desk-light.json
+
 !/mods/
 /mods/*
 !/mods/desk/

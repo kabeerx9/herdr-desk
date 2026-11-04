@@ -479,7 +479,10 @@ def new_desk(args):
         slug, n = f"{base[:36]}-{n}", n + 1
     folder = os.path.abspath(os.path.expanduser(args.repo)) if args.repo else None
     repo = repo_of(folder) if folder else None
-    rec = chat_append(slug, {"from": "kabeer", "kind": "desk", "name": name or slug, "folder": folder,
+    # Unnamed: the project and when, e.g. "tattvix · Nov 4 14:54", rather than the slug.
+    label = name or " · ".join(x for x in ((repo or {}).get("name") or (os.path.basename(folder) if folder else None),
+                                           time.strftime("%b %-d %H:%M")) if x)
+    rec = chat_append(slug, {"from": "kabeer", "kind": "desk", "name": label, "folder": folder,
                              "project": repo["name"] if repo else (os.path.basename(folder) if folder else None)})
     print(json.dumps({"slug": slug, **rec}))
 

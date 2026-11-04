@@ -422,7 +422,8 @@ export class Desks {
     if (m.from === "kabeer") {
       const to = (m.to ?? []).map((r) => this.roles.byId(r)?.name ?? r).join(", ");
       return v_flex().id(id).items_end().gap(3).py(5).pl(40)
-        .child(div().text_size(11).text_color(t.dim).child(`You → ${to} · ${clock(m.at)}${m.delivered?.length && !m.failed?.length ? " ✓" : ""}`))
+        .child(h_flex().gap(4).items_center().text_size(11).text_color(t.dim).child(`You → ${to} · ${clock(m.at)}`)
+          .when(Boolean(m.delivered?.length && !m.failed?.length), (el) => el.child(icon("check", 12).text_color(t.done))))
         .child(div().max_w_full().px(11).py(7).rounded(12).bg(t.accent + "26").text_size(12.5).line_height(1.45).text_color(t.foreground)
           .child(TextView.markdown(`${id}-md`, m.text).selectable(true)))
         .when(Boolean(m.failed?.length), (el) => el.child(div().text_size(11).text_color(t.blocked)
@@ -441,6 +442,34 @@ export class Desks {
         .child(div().max_w_full().px(11).py(7).rounded(12).bg(kind ? (t[kind[1]] ?? t.accent) + "14" : to ? "#00000000" : t.raised)
           .when(Boolean(to), (el) => el.border_1().border_color(t.border))
           .text_size(12.5).line_height(1.45).text_color(t.foreground).child(TextView.markdown(`${id}-md`, m.text).selectable(true))));
+  }
+
+  // Three dots breathing out of step (native loops, so no re-render drives them).
+  dots(t) {
+    return h_flex().gap(4).items_center().children([820, 960, 1100].map((period) =>
+      div().size(6).rounded(3).bg(t.muted).loop("opacity", { from: 0.25, to: 1, period })));
+  }
+
+  // At the bottom of the thread, like typing dots: who's working right now. "Replying" when the
+  // newest message to them (yours, or a question) is newer than their newest post.
+  activity(t, members) {
+    const lastTo = {}, lastFrom = {};
+    this.messages.forEach((m, i) => {
+      for (const r of m.to ?? []) lastTo[r] = i;
+      if (m.from) lastFrom[m.from] = i;
+    });
+    return members.filter((m) => m.status === "working" || m.status === "blocked").map((m) => {
+      const role = this.roles.byId(m.role), name = role?.name ?? m.role, id = `act-${m.address}`;
+      const blocked = m.status === "blocked";
+      const replying = !blocked && (lastTo[m.role] ?? -1) > (lastFrom[m.role] ?? -1);
+      const caption = blocked ? `${name} needs you in its terminal` : replying ? `${name} is replying…` : `${name} is working${m.note ? ` · ${m.note}` : "…"}`;
+      return h_flex().id(id).items_center().gap(9).py(4)
+        .child(this.avatar(t, role, null, 26))
+        .child(h_flex().h(30).px(12).gap(8).items_center().rounded(15).bg(blocked ? t.blocked + "1f" : t.raised)
+          .child(blocked ? icon("alert", 14).text_color(t.blocked) : this.dots(t)))
+        .child(div().min_w(0).flex_1().truncate().text_size(11).text_color(blocked ? t.blocked : t.dim).child(caption))
+        .when(blocked, (el) => el.child(button(t, `${id}-go`, "Go", () => run("agent.focus", { terminal: m.address }), { tip: "Jump to its terminal" })));
+    });
   }
 
   memberDetail(t, m, d) {
@@ -522,7 +551,7 @@ export class Desks {
       })) : null;
 
     const thread = v_flex().id("desk-thread").flex_1().min_h(0).px(12).py(8).overflow_y_scrollbar().flex_col_reverse()
-      .children(this.messages.map((m, i) => this.message(t, m, i)).reverse());
+      .children([...this.activity(t, members).reverse(), ...this.messages.map((m, i) => this.message(t, m, i)).reverse()]);
 
     const sugg = this.suggestions();
     const composer = v_flex().px(12).pt(6).pb(10).gap(6).border_t(1).border_color(t.border)
