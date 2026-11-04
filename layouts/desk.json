@@ -237,6 +237,9 @@
     "light": "desk-light",
     "dark": "graphite"
   },
+  "colors": {
+    "selection": "#2563eb33"
+  },
   "terminal_padding": [
     14,
     12
