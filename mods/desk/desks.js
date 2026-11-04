@@ -5,6 +5,7 @@ import { pill, button, empty, icon, statusBadge } from "./ui.js";
 import { Roles, roleTile, team, folderOf, findBriefs, startBrief, fileBrief } from "./roles.js";
 import { WorkflowControls, runtimeData, runTeam, refreshRuntime, openDesk } from "./workflows.js";
 import { ReviewView } from "./review.js";
+import { ThreadViewport } from "./thread.js";
 
 // Desks: each one an independent team (its own agents, thread and worktrees) that
 // bin/team keeps in ~/.herdr/team/<desk>.jsonl and on its agents' task=<desk> labels.
@@ -128,9 +129,10 @@ export class Desks {
     this.sendMode = "now";
     this.composeAt = 0; this.reviewAt = 0; this.reviewOpen = false;
     this.drafts = {}; this.draftDesk = null;
+    this.thread = new ThreadViewport(cx);
 
-    this.input = TextareaState.new({ placeholder: "Message the desk…  type @ to mention someone", rows: 2 });
-    this.input.set_auto_grow(2, 8);
+    this.input = TextareaState.new({ placeholder: "Message the team…", rows: 2 });
+    this.input.set_auto_grow(2, 6);
     this.input.on("change", (_e, cx) => { this.trackMention(); cx.notify(); });
     this.input.on("submit", (e, cx) => {
       if (e.shift) return;
@@ -471,6 +473,7 @@ export class Desks {
     const targets = direct ? [direct] : members.filter((m) => roles.includes(m.role));
     const to = targets.flatMap((m) => ["--to", `${m.address}:${m.role}`]);
     const queued = this.sendMode === "queue";
+    this.thread.latest(d.slug);
     this.input.set_value(""); this.mention = null;
     this.busy("send", async (cx) => {
       try {
@@ -618,7 +621,7 @@ export class Desks {
   // 4/5 wide); agents' turns are full-width Markdown with no bubble, under one name row per run
   // of messages; agent-to-agent asides are smaller; long ones fold behind "Show more".
   message(t, m, i, prev) {
-    const id = `msg-${i}`;
+    const id = `msg-${this.view}-${m.id ?? `${m.at}-${i}`}`;
     if (m.kind === "permission") {
       const who = this.roles.byId(m.from)?.name ?? m.from, end = this.permitDone?.get(m.id);
       const how = !end ? "waiting for you" : end === "allow" ? "you allowed it" : end === "always" ? "you allowed it from now on"
@@ -661,15 +664,15 @@ export class Desks {
     const copy = tool("copy", this.copied === id ? "check" : "copy", this.copied === id ? "Copied" : "Copy",
       (_e, cx) => this.copy(id, m.text, cx), this.copied === id ? t.done : null);
 
-    // Yours: a dark bubble on the right, who it went to underneath.
+    // Yours: a quiet bubble on the right, with delivery metadata underneath.
     if (m.from === "kabeer") {
       const to = (m.to ?? []).map((r) => this.roles.byId(r)?.name ?? r).join(", ");
       const ok = Boolean(m.delivered?.length && !m.failed?.length);
       return v_flex().id(id).items_end().gap(3).pt(this.wide ? 26 : 18)
         .on_hover((h, cx) => this.hoverOn(id, h, cx))
-        // Plain text: Markdown views keep their own dark text, unreadable on the dark bubble.
-        .child(div().max_w_4_5().px(15).py(10).rounded(18).bg(t.solid)
-          .text_size(size).line_height(1.55).text_color(t.solid_foreground).child(m.text ?? ""))
+        // Plain text keeps what you typed and shares the theme foreground.
+        .child(div().max_w_4_5().px(15).py(10).rounded(18).bg(t.raised)
+          .text_size(size).line_height(1.55).text_color(t.foreground).child(m.text ?? ""))
         .child(h_flex().h(24).gap(6).items_center().text_size(11).text_color(t.dim)
           .when(hovered, (el) => el.child(copy))
           .child(`To ${to} · ${clock(m.at)}`)
@@ -855,23 +858,23 @@ export class Desks {
         .child(lead ? `Messages go to ${lead}. Type @ to talk to someone directly.` : "Add someone to this desk, then tell them what you need."));
   }
 
-  memberDetail(t, m, d) {
+  memberDetail(t, m, d, compact = false) {
     const role = this.roles.byId(m.role), id = `md-${m.address}`;
     const engineer = role?.worktree && !role?.on_request;
     const cwd = panes().find((p) => p.terminal === m.address)?.cwd ?? m.cwd ?? "";
     const where = cwd.includes("/.herdr/worktrees/") ? cwd.split("/").pop() : cwd.split("/").pop();
     const child = (roleId, task) => team([roleId, "--requested", "--share", "--parent", m.address, "--repo", cwd || d.folder,
       "--slug", d.slug, ...(m.space ? ["--space", m.space] : []), "--task", task]);
-    return v_flex().id(id).ml(10 + m.depth * 18).mr(10).mb(4).px(10).py(7).gap(5).rounded(8).bg(t.raised)
-      .child(h_flex().gap(8).items_center()
+    return v_flex().id(id).ml(compact ? 0 : 10 + m.depth * 18).mr(compact ? 0 : 10).mb(4).px(10).py(7).gap(5).rounded(8).bg(t.raised)
+      .when(!compact, el => el.child(h_flex().gap(8).items_center()
         .child(this.avatar(t, role, m.status, 22))
         .child(div().text_size(12.5).font_semibold().text_color(t.foreground).child(role?.name ?? m.role))
         .child(div().min_w(0).flex_1().truncate().text_size(11).text_color(t.dim).child(where))
-        .child(statusBadge(t, m.status) ?? div()))
-      .when(Boolean(m.note), (el) => el.child(div().pl(30).text_size(11.5).line_height(1.35).text_color(t.muted).child(m.note)))
-      .when(Boolean(m.ctx), (el) => el.child(div().pl(30).text_size(11).text_color(this.overLimit(m) ? t.blocked : t.dim)
+        .child(statusBadge(t, m.status) ?? div())))
+      .when(Boolean(m.note), (el) => el.child(div().pl(compact ? 0 : 30).text_size(11.5).line_height(1.35).text_color(t.muted).child(m.note)))
+      .when(Boolean(m.ctx), (el) => el.child(div().pl(compact ? 0 : 30).text_size(11).text_color(this.overLimit(m) ? t.blocked : t.dim)
         .child(`${kTokens(m.ctx)} tokens of context${this.overLimit(m) ? `, past the ${kTokens(this.roles.freshAt(m.role))} limit: compact it when it's free` : ""}`)))
-      .child(h_flex().pl(30).gap(6).flex_wrap()
+      .child(h_flex().pl(compact ? 0 : 30).gap(6).flex_wrap()
         .child(button(t, `${id}-go`, "Go", () => openTerminal(m.address)))
         .child(button(t, `${id}-changes`, "Changes", (_e, cx) => this.openReview(m, d, cx), { iconName: "branch", tip: "Review this agent's worktree" }))
         .when(role?.cli === "claude" || !role?.cli, (el) => el
@@ -890,7 +893,7 @@ export class Desks {
             const r = await hc(["send", m.address, "Kabeer approved opening a PR for this work. Commit anything left on your branch, push it, and open a PR with gh pr create (what changed, how you verified it, and a link to the related PR from this desk if there is one). Then report the PR URL with team report done."]);
             if (r.code !== 0) throw new Error(r.stderr.trim() || "couldn't send; is it waiting on you?");
           }, cx), { iconName: "pr", disabled: Boolean(this.acting), tip: "Ask it to push its branch and open a PR" }))))
-      .child(div().pl(30).child(this.workflow.actions(t, m)));
+      .child(div().pl(compact ? 0 : 30).child(this.workflow.actions(t, m)));
   }
 
   deskView(t, d) {
@@ -977,9 +980,8 @@ export class Desks {
     });
     const col = (el) => (this.wide ? div().w_full().max_w(COLUMN).child(el) : el);
     const rows = shown.map((m, i) => col(this.message(t, m, i, shown[i - 1])));
-    const thread = v_flex().id("desk-thread").flex_1().min_h(0).px(this.wide ? 28 : 16).pb(12).overflow_y_scrollbar().flex_col_reverse()
-      .when(this.wide, (el) => el.items_center())
-      .children([...this.activity(t, members).map(col).reverse(), ...(said ? [] : [col(this.emptyThread(t, members))]), ...rows.reverse()]);
+    const thread = this.thread.render(t, d.slug,
+      [...(said ? [] : [col(this.emptyThread(t, members))]), ...rows, ...this.activity(t, members).map(col)], this.wide);
 
     // The composer, one frame: mention suggestions above it; the text; then who it goes to and a
     // round send button inside the frame.
@@ -995,7 +997,7 @@ export class Desks {
       .when(sugg.length > 0, (el) => el.child(h_flex().gap(5).flex_wrap()
         .children(sugg.map((o, i) => this.chip(t, `sg-${o.id}`, i === 0, o.name, (_e, cx) => this.pickMention(o, cx),
           o.id === "all" ? icon("team", 13) : roleTile(div, svg, t, o, 16))))))
-      .child(v_flex().rounded(18).border_1().border_color(t.input).bg(t.background).shadow_sm()
+      .child(v_flex().rounded(20).border_1().border_color(t.input).bg(t.raised)
         .child(Textarea.new(this.input).w_full().px(14).pt(12).pb(4).text_size(this.wide ? 14 : 13).text_color(t.foreground)
           .token((ctx) => {
             const role = this.roles.byId(ctx.token.id);
@@ -1011,13 +1013,15 @@ export class Desks {
                 return h_flex().flex_none().h(22).pl(2).pr(7).gap(5).items_center().rounded(11).bg(t.raised).text_color(t.foreground)
                   .when(Boolean(role), (el) => el.child(roleTile(div, svg, t, role, 18))).child(role?.name ?? r);
               }))
-              .when(implicit, (el) => el.child(div().min_w(0).truncate().child(this.directTarget && this.directTask === d.slug ? `· ${this.directTarget}` : "· @ to choose"))))
+              .when(implicit, (el) => el.child(div().min_w(0).truncate().child(this.directTarget && this.directTask === d.slug ? `· ${this.directTarget}` : "· @ to mention"))))
             .when(!to.length, (el) => el.child(div().truncate().child("Nobody here yet: add someone above"))))
-          .child(h_flex().gap(3).flex_none()
-            .child(button(t, "send-now-mode", "Send now", (_e, cx) => { this.sendMode = "now"; cx.notify(); },
-              { primary: this.sendMode === "now", tip: "Send to the agent now using its normal terminal input behavior" }))
-            .child(button(t, "send-queue-mode", "Queue next", (_e, cx) => { this.sendMode = "queue"; cx.notify(); },
-              { primary: this.sendMode === "queue", tip: "Keep this message until its recipients are idle" })))
+          .child(h_flex().id("send-mode").h(28).px(8).gap(5).items_center().rounded(8).flex_none()
+            .text_size(11.5).text_color(this.sendMode === "queue" ? t.accent : t.muted).cursor_pointer()
+            .hover(style => style.bg(t.hover).text_color(t.foreground))
+            .tooltip(this.sendMode === "queue" ? "Queue until the agent is idle. Click to send immediately instead." : "Send immediately. Click to queue until the agent is idle instead.")
+            .on_click((_e, cx) => { this.sendMode = this.sendMode === "queue" ? "now" : "queue"; cx.notify(); })
+            .child(icon(this.sendMode === "queue" ? "clock" : "play", 12))
+            .child(this.sendMode === "queue" ? "Queue next" : "Send now").child(icon("chevron-down", 10)))
           .child(h_flex().id("desk-send").size(30).flex_none().items_center().justify_center().rounded(15)
             .bg(canSend ? t.solid : t.raised).text_color(canSend ? t.solid_foreground : t.dim)
             .when(canSend, (el) => el.cursor_pointer().hover((s) => s.opacity(0.85)))
@@ -1032,7 +1036,7 @@ export class Desks {
       // As the main view, the desk's controls live in the floating card (card.js), not up here.
       .when(!this.wide, (el) => el.child(header))
       .when(Boolean(details) && !this.wide, (el) => el.child(details))
-      .when(this.wide, (el) => el.child(div().h(14).flex_none()))
+      .when(this.wide, (el) => el.child(div().h(76).flex_none()))
       .when(Boolean(d.parent_task), (el) => el.child(band(h_flex().px(12).py(6).gap(8).items_center()
         .child(button(t, "side-return", "Back to original desk", () => openDesk(d.parent_task), { iconName: "back" }))
         .child(div().text_size(11).text_color(t.dim).child("Separate conversation")))))

@@ -25,6 +25,7 @@
 !/themes/
 /themes/*
 !/themes/desk-light.json
+!/themes/desk-dark.json
 
 !/mods/
 /mods/*

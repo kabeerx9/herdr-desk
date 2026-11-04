@@ -160,11 +160,11 @@ export function sessionsInRepo(role, brief) {
 // The role's face (its avatar, round), else its colored tile with its icon or initial.
 export function roleTile(div, svg, t, role, size, dim = false) {
   const color = t[role.color] ?? role.color ?? t.accent;
-  if (role.avatar) return div().size(size).flex_none().rounded(size / 2).overflow_hidden().bg(color + "26")
+  if (role.avatar && !role.icon) return div().size(size).flex_none().rounded(size / 2).overflow_hidden().bg(color + "26")
     .when(dim, (el) => el.opacity(0.55))
     .child(image(`mods/desk/${role.avatar}`).size(size));
   return div().size(size).flex_none().rounded(Math.round(size * 0.28)).flex().items_center().justify_center()
-    .bg(color + (dim ? "1a" : "26")).text_color(dim ? color + "c0" : color)
+    .bg(color + (dim ? "12" : "18")).text_color(dim ? color + "c0" : color)
     .child(role.icon
       ? svg(`mods/desk/icons/${role.icon}.svg`).size(Math.round(size * 0.58)).flex_none()
       : div().text_size(Math.round(size * 0.42)).font_semibold().child(role.name[0].toUpperCase()));

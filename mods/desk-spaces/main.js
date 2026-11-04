@@ -81,10 +81,11 @@ function spaceAgents(w, all, labels) {
 // The Desk's role tile (mods/desk/roles.js roleTile): its avatar, else its initial on its color.
 function roleTile(t, role, size, dim) {
   const color = t[role.color] ?? role.color ?? t.accent;
-  if (role.avatar) return div().size(size).flex_none().rounded(size / 2).overflow_hidden().bg(color + "26")
+  if (role.avatar && !role.icon) return div().size(size).flex_none().rounded(size / 2).overflow_hidden().bg(color + "26")
     .when(dim, (el) => el.opacity(0.55)).child(image(`mods/desk/${role.avatar}`).size(size));
   return h_flex().size(size).flex_none().rounded(5).items_center().justify_center().bg(color + "26").text_color(color)
-    .text_size(Math.round(size * 0.5)).font_semibold().child(role.name[0].toUpperCase());
+    .text_size(Math.round(size * 0.5)).font_semibold().when(dim, el => el.opacity(.55))
+    .child(role.icon ? svg(`mods/desk/icons/${role.icon}.svg`).size(Math.round(size * .6)).flex_none() : role.name[0].toUpperCase());
 }
 
 // Right-click on a space: the ways in (its terminals, a new one, a new desk), then Herdr's own

@@ -11,7 +11,7 @@ import { Desks, deskMembers, showTerminals, openTerminal } from "./desks.js";
 // requests, its agents (add one, an agent's actions), and Wrap up, then Delete. It follows the
 // desk the chat shows (shared "desk.view") and acts through the same Desks code as the chat.
 
-const WIDTH = 284;
+const WIDTH = 320;
 // One line per worktree: branch, base, commits ahead, uncommitted files, and the shortstat of
 // everything since it left the base (committed or not). Reads take no git locks.
 const GIT = `cd "$1" 2>/dev/null || exit 0
@@ -38,8 +38,9 @@ export class DeskCard {
     this.git = {};      // cwd → { branch, base, ahead, dirty, files, adds, dels }
     this.prs = {};      // cwd → [{ number, title, state, url }]
     this.hovered = null;
-    this.collapsed = store.get("card.collapsed", false);
+    this.collapsed = store.get("card.compact", true);
     this.key = "";
+    this.section = "team";
     cx.timer.every(3000, (cx) => { if (this.watchKey() !== this.key) this.refresh(cx); });
     cx.timer.every(10000, (cx) => this.refresh(cx, { git: true }));
     cx.timer.every(120000, (cx) => this.refresh(cx, { prs: true }));
@@ -100,7 +101,7 @@ export class DeskCard {
   }
 
   row(t, id, onClick, children, tip) {
-    return h_flex().id(id).h(32).mx(8).px(8).gap(8).items_center().rounded(8).cursor_pointer()
+    return h_flex().id(id).min_h(40).mx(8).px(8).gap(8).items_center().rounded(8).cursor_pointer()
       .bg(this.hovered === id ? t.hover : "#00000000")
       .on_hover((h, cx) => this.hover(id, h, cx))
       .on_mouse_down("left", (_e, cx) => cx.stop_propagation())
@@ -109,10 +110,10 @@ export class DeskCard {
       .children(children);
   }
 
-  // A section's title: small caps with its count, and room for a control on the right.
+  // A section title with its count and an optional action.
   label(t, text, count, extra) {
     return h_flex().h(30).pl(16).pr(10).pt(6).gap(6).items_center()
-      .child(div().text_size(10.5).font_semibold().text_color(t.muted).child(text.toUpperCase()))
+      .child(div().text_size(11.5).font_medium().text_color(t.muted).child(text))
       .when(count !== undefined && count !== null, (el) => el.child(div().text_size(10.5).text_color(t.dim).child(String(count))))
       .child(div().flex_1())
       .when(Boolean(extra), (el) => el.child(extra));
@@ -144,22 +145,6 @@ export class DeskCard {
       .child([...name][0]?.toUpperCase() ?? "?");
   }
 
-  // Up to four members, overlapping, each with its status as a colored dot. One glance says
-  // who's here and whether anyone needs you.
-  stack(t, members) {
-    const shown = members.slice(0, 4), rest = members.length - shown.length;
-    return h_flex().flex_none().items_center()
-      .children(shown.map((m, i) => {
-        const role = this.roles.byId(m.role), color = t[m.status] ?? t.dim;
-        return div().relative().flex_none().size(24).rounded(12).bg(t.background).p(2).when(i > 0, (el) => el.ml(-7))
-          .child(role ? roleTile(div, svg, t, role, 20) : div().size(20).rounded(10).bg(t.raised))
-          .child(div().absolute().right(0).bottom(0).size(9).rounded(5).bg(t.background).p(1.5)
-            .child(div().size_full().rounded(3).bg(color)
-              .when(m.status === "working", (el) => el.loop("opacity", { from: 0.45, to: 1, period: 1200 }))));
-      }))
-      .when(rest > 0, (el) => el.child(div().ml(3).text_size(10.5).text_color(t.dim).child(`+${rest}`)));
-  }
-
   // What the desk is doing, in one line: "3 agents · 1 needs you · 2 working".
   summary(members, trees) {
     const n = (k) => members.filter((m) => m.status === k).length;
@@ -176,8 +161,8 @@ export class DeskCard {
     if (shared("desk.review")) return div().size(0);
     const t = theme(), slug = this.slug, d = slug ? this.desks.desk(slug) : null;
     if (!d) return h_flex().id("desk-card").p(4).child(this.switcher(t));
-    // Over the terminals, or a narrow chat: just the name and the switch, folded.
-    const folded = this.collapsed || Boolean(shared("deskchat.terminals")) || Boolean(shared("deskchat.narrow"));
+    // Opening the controls is explicit, at every window size.
+    const folded = this.collapsed;
     const members = deskMembers(slug), subs = this.subagents(members), trees = this.worktrees();
     // An unnamed desk is "<folder> · <when>": the folder is its name, the time its subline.
     const [name, when] = d.name.includes(" · ") ? d.name.split(" · ") : [d.name, null];
@@ -189,21 +174,21 @@ export class DeskCard {
       .text_color(t.dim).hover((s) => s.bg(t.raised).text_color(t.foreground))
       .tooltip(folded ? "Show the desk's changes, pull requests and agents" : "Fold")
       .on_mouse_down("left", (_e, cx) => cx.stop_propagation())
-      .on_click((_e, cx) => { cx.stop_propagation(); this.collapsed = !folded; store.set("card.collapsed", this.collapsed);
-        if (folded) setShared("deskchat.narrow", false); this.refresh(cx, { prs: true }); })
+      .on_click((_e, cx) => { cx.stop_propagation(); this.collapsed = !folded; store.set("card.compact", this.collapsed);
+        this.refresh(cx, { prs: true }); })
       .child(icon(folded ? "chevron-down" : "up", 13));
-    const header = h_flex().id("card-head").h(folded ? 48 : 54).pl(12).pr(8).gap(10).items_center()
+    const header = h_flex().id("card-head").h(48).pl(12).pr(8).gap(10).items_center()
       .on_mouse_down("left", (_e, cx) => cx.stop_propagation())
-      .child(this.tile(t, name, folded ? 26 : 30))
+      .child(this.tile(t, name, 24))
       .child(v_flex().min_w(0).flex_1().gap(1)
         .child(h_flex().min_w(0).gap(6).items_center()
           .child(div().truncate().text_size(13).font_semibold().text_color(t.foreground).child(name))
           .when(urgent, (el) => el.child(div().size(7).rounded(4).flex_none().bg(t.blocked).loop("opacity", { from: 0.35, to: 1, period: 1400 }))))
         .when(Boolean(sub), (el) => el.child(div().truncate().text_size(11).text_color(t.dim).child(sub))))
-      .when(folded && members.length > 0, (el) => el.child(this.stack(t, members)))
-      .child(this.switcher(t, folded))
+
+      .child(this.switcher(t, true))
       .child(toggle);
-    if (folded) return v_flex().id("desk-card").w(WIDTH + 56).child(header);
+    if (folded) return v_flex().id("desk-card").w(WIDTH).child(header);
 
     const changes = trees.map((m) => {
       const g = this.git[m.cwd], role = this.roles.byId(m.role), read = m.cwd in this.git;
@@ -256,7 +241,7 @@ export class DeskCard {
           statusBadge(t, m.status) ?? div(),
           more,
         ], `${m.note ?? "Open its terminal"}`),
-        ...(open ? [div().mx(8).mb(4).rounded(8).bg(t.raised).child(this.desks.memberDetail(t, m, d))] : [])];
+        ...(open ? [div().mx(8).mb(4).rounded(8).bg(t.raised).child(this.desks.memberDetail(t, m, d, true))] : [])];
       }),
       ...subs.map((s) => {
         const a = app.get(s.address), status = a?.status ?? null;
@@ -282,24 +267,33 @@ export class DeskCard {
     const acting = this.desks.acting, deleting = Date.now() < this.desks.confirmDelete;
     const footer = h_flex().h(44).px(12).gap(8).items_center().bg(t.raised + "80").border_t(1).border_color(t.border)
       .child(div().flex_1().text_size(11).text_color(t.dim)
-        .child(acting && acting !== "wrap" ? "Working…" : this.summary(members, trees)))
+        .child(acting && acting !== "wrap" ? "Working…" : "Desk controls"))
       .when(members.length > 0, (el) => el.child(button(t, "card-wrap", acting === "wrap" ? "Wrapping up…" : "Wrap up", (_e, cx) => this.desks.wrapUp(d, cx),
         { disabled: Boolean(acting), tip: "Each agent flags anything left locally, or cleans up its worktree and closes" })))
       .when(!members.length, (el) => el.child(button(t, "card-del", deleting ? "Click again to delete" : "Delete desk", (_e, cx) => this.desks.deleteDesk(d, cx),
         { iconName: "trash", disabled: Boolean(acting), tip: "Nobody's running. Kept in ~/.herdr/team/.deleted, so it can be put back" })));
 
-    const divider = () => div().h(1).mx(12).bg(t.border);
-    return v_flex().id("desk-card").w(WIDTH + 40)
+    const tab = (id, label, count) => h_flex().id(`card-section-${id}`).flex_1().h(30).gap(5).items_center().justify_center().rounded(7)
+      .bg(this.section === id ? t.background : "#00000000").text_color(this.section === id ? t.foreground : t.muted)
+      .text_size(12).font_medium().cursor_pointer().hover(style => style.text_color(t.foreground))
+      .on_click((_e, cx) => { this.section = id; cx.notify(); }).child(label)
+      .child(div().text_size(10.5).text_color(t.dim).child(String(count)));
+    const body = v_flex().id(`card-body-${slug}`).max_h(440).overflow_y_scrollbar().pb(10)
+      .when(lost.length > 0, el => el.child(div().mx(10).my(5).child(v_flex().gap(5).children(this.desks.workflow.disconnected(t, slug)))))
+      .when(this.section === "team", el => el
+        .child(this.label(t, "Agents", subs.length ? `${members.length} + ${subs.length} sub` : members.length, add))
+        .when(Boolean(adder), el => el.child(adder))
+        .children(people.length ? people : [this.note(t, "Nobody running")]))
+      .when(this.section === "changes", el => el
+        .child(this.label(t, "Worktrees", trees.length))
+        .children(changes.length ? changes : [this.note(t, "No worktrees yet")])
+        .child(this.label(t, "Pull requests", prs.length))
+        .children(prs.length ? prs : [this.note(t, "No pull requests on these branches")]));
+    return v_flex().id("desk-card").w(WIDTH)
+      .on_mouse_down_out((_e, cx) => { this.collapsed = true; store.set("card.compact", true); cx.notify(); })
       .child(header)
-      .child(divider())
-      .when(lost.length > 0, (el) => el.child(div().mx(10).my(5).child(v_flex().gap(5).children(this.desks.workflow.disconnected(t, slug)))))
-      .child(this.label(t, "Changes", trees.length))
-      .children(changes.length ? changes : [this.note(t, "No worktrees yet")])
-      .when(prs.length > 0, (el) => el.child(this.label(t, "Pull requests", prs.length)).children(prs))
-      .child(this.label(t, "Agents", subs.length ? `${members.length} + ${subs.length} sub` : members.length, add))
-      .when(Boolean(adder), (el) => el.child(adder))
-      .children(people.length ? people : [this.note(t, "Nobody running")])
-      .child(div().h(8))
-      .child(footer);
+      .child(h_flex().mx(10).mb(4).p(3).gap(3).rounded(10).bg(t.raised)
+        .child(tab("team", "Team", members.length + subs.length)).child(tab("changes", "Changes", trees.length)))
+      .child(body).child(footer);
   }
 }

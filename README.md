@@ -66,3 +66,28 @@ herdr-app status
 ```
 
 The Python suite covers real CLI orchestration as well as state and Git behavior: concurrent writes, delivery serialization, uncertain attempts, queue ordering, reply reservation, recovery without replay, custom adapter arguments, shell/pager rejection, resolved permissions, worktree boundaries and branch bases.
+
+### Chat viewport and appearance
+
+`mods/desk/thread.js` owns a measured viewport, with per-desk offsets in
+`scroll-state.js`. Initial opening and sending follow the latest message;
+scrolling up pauses following. Latest / End resumes it. Hover, drafting, and
+incoming replies preserve the offset while reading. Home, Page Up/Down, arrows,
+and a draggable scrollbar work when the transcript has focus.
+
+The bridge exposes scroll handles only for virtual lists, whose deferred rows
+cannot register the message actions. The viewport therefore keeps normal,
+interactive elements and translates the transcript within a clipped area. It
+still lays out the full transcript; it does not virtualize long histories.
+Size and pointer events use window pixels, while numeric styles are zoomed, so
+position and scrollbar styles divide by the current zoom.
+
+The compact Desk card opens Team / Changes tabs and dismisses on an outside
+click. Role tiles prefer the shared SVG family. `desk-light` and `desk-dark`
+provide the personal palettes in both Desk layouts.
+
+Run the scroll behavior regressions with:
+
+```sh
+node --test mods/desk/scroll-state.test.mjs
+```

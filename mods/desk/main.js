@@ -81,16 +81,12 @@ class ChatPane {
 }
 
 // The chat as the window's main view: the open desk (shared with the panel and the card) in a
-// centered column. It tells the card when the center is too narrow for it to sit beside.
+// centered column. The card stays compact until explicitly opened.
 class MainChat {
   init(_p, cx) { this.chat = new Desks(null, cx, { wide: true }); }
   render(_cx) {
     const t = theme();
     return v_flex().id("chat-main").size_full().bg(t.background).text_color(t.foreground)
-      .on_size_change((size) => {
-        const narrow = size.width < 1360;
-        if (shared("deskchat.narrow") !== narrow) setShared("deskchat.narrow", narrow);
-      })
       .child(this.chat.render(t));
   }
 }

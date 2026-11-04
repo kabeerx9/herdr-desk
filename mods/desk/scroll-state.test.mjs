@@ -1,0 +1,51 @@
+import test from 'node:test';
+import assert from 'node:assert/strict';
+import { ScrollState } from './scroll-state.js';
+
+test('first measurement opens at latest, including a long reply', () => {
+  const s = new ScrollState(); s.measure(600, 5000);
+  assert.equal(s.offset, 4400); assert.equal(s.following, true);
+});
+test('new messages and composer resize follow only while at the bottom', () => {
+  const s = new ScrollState(); s.measure(600, 5000); s.measure(500, 5300);
+  assert.equal(s.offset, 4800);
+  s.move(2200); s.measure(400, 6000);
+  assert.equal(s.offset, 2200); assert.equal(s.following, false);
+});
+test('hover or equal-size redraw does not move a reader', () => {
+  const s = new ScrollState(); s.measure(600, 5000); s.move(1200);
+  for (let i = 0; i < 20; i++) s.measure(600, 5000);
+  assert.equal(s.offset, 1200);
+});
+test('latest explicitly resumes following, and scrolling back to bottom does too', () => {
+  const s = new ScrollState(); s.measure(600, 5000); s.move(100); s.latest();
+  assert.equal(s.offset, 4400); assert.equal(s.following, true);
+  s.move(100); s.move(4400); s.measure(600, 5500);
+  assert.equal(s.offset, 4900);
+});
+test('wheel accepts pixel and line devices without leaving the content bounds', () => {
+  const s = new ScrollState(); s.measure(600, 5000);
+  s.wheel({ delta: { y: 50 } }); assert.equal(s.offset, 4350);
+  s.wheel({ delta: { y: 3 }, delta_lines: { y: 3 } }); assert.equal(s.offset, 4278);
+  s.wheel({ delta: { y: 10000 } }); assert.equal(s.offset, 0);
+  s.wheel({ delta: { y: -10000 } }); assert.equal(s.offset, 4400);
+});
+test('shrinking content clamps safely, and short/empty threads never overscroll', () => {
+  const s = new ScrollState(); s.measure(600, 5000); s.move(2200); s.measure(600, 1000);
+  assert.equal(s.offset, 400);
+  s.measure(600, 100); assert.equal(s.offset, 0); assert.equal(s.max, 0);
+  s.seek(300); assert.equal(s.offset, 0);
+  assert.deepEqual(s.thumb, { top: 0, height: 600 });
+});
+test('scrollbar maps its top and bottom to the content endpoints', () => {
+  const s = new ScrollState(); s.measure(600, 6000);
+  assert.deepEqual(s.thumb, { top: 540, height: 60 });
+  s.seek(30); assert.equal(s.offset, 0);
+  s.seek(570); assert.equal(s.offset, 5400);
+});
+test('conversations keep independent positions', () => {
+  const a = new ScrollState(), b = new ScrollState();
+  a.measure(600, 5000); b.measure(600, 2000); a.move(1200);
+  b.measure(600, 3000); a.measure(600, 5000);
+  assert.equal(a.offset, 1200); assert.equal(b.offset, 2400);
+});

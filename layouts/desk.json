@@ -221,10 +221,7 @@
   "background": "canvas",
   "theme": {
     "light": "desk-light",
-    "dark": "graphite"
-  },
-  "colors": {
-    "selection": "#2563eb33"
+    "dark": "desk-dark"
   },
   "terminal_padding": [
     14,
