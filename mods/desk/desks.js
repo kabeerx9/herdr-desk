@@ -259,11 +259,19 @@ export class Desks {
     });
   }
 
-  // Where a desk's agents start: its project's space, else a space already in that folder
-  // (none: bin/team opens a new one there).
+  // Where a desk's agents start: its project's space, else a space whose folder is the desk's
+  // folder, else the nearest space the folder is inside of. Never a space that merely lives
+  // somewhere under the folder (a desk in ~/Desktop must not land in ~/Desktop/work/shotgun).
+  // None: bin/team opens a new one there.
   spaceFor(folder) {
-    const project = this.projectList().find((p) => folder && (folder === p.folder || folder.startsWith(p.folder + "/")));
-    return (project && this.panel?.spaceFor(project)) || spaces().find((s) => !s.machine && folder && (folderOf(s) ?? "").startsWith(folder)) || null;
+    if (!folder) return null;
+    const project = this.projectList().find((p) => folder === p.folder || folder.startsWith(p.folder + "/"));
+    const fromProject = project && this.panel?.spaceFor(project);
+    if (fromProject) return fromProject;
+    const local = spaces().filter((s) => !s.machine).map((s) => ({ s, at: folderOf(s) ?? "" })).filter((x) => x.at);
+    return local.find((x) => x.at === folder)?.s
+      ?? local.filter((x) => folder.startsWith(x.at + "/")).sort((a, b) => b.at.length - a.at.length)[0]?.s
+      ?? null;
   }
 
   async addMember(role, d, task) {
