@@ -31,20 +31,6 @@
                 "weight": 1
               },
               "min": 90
-            },
-            {
-              "id": "agents",
-              "type": "block",
-              "content": {
-                "mod": "desk",
-                "props": {
-                  "agents": true
-                }
-              },
-              "size": {
-                "weight": 1
-              },
-              "min": 90
             }
           ]
         },

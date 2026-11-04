@@ -6,7 +6,6 @@ import { GitPanel } from "./git.js";
 import { TABS, currentTab, setOpen } from "./tabs.js";
 import { Rail } from "./rail.js";
 import { inboxView } from "./inbox.js";
-import { Sidebar } from "./sidebar.js";
 import { startRole } from "./roles.js";
 import { Desks } from "./desks.js";
 import { DeskCard } from "./card.js";
@@ -62,7 +61,7 @@ const store = {
 export default class Desk extends View {
   init(_props, cx) {
     const p = props();
-    this.part = p?.popover ? new UsagePopover() : p?.rail ? new Rail() : p?.agents ? new Sidebar() : p?.chat ? new ChatPane()
+    this.part = p?.popover ? new UsagePopover() : p?.rail ? new Rail() : p?.chat ? new ChatPane()
       : p?.main ? new MainChat() : p?.card ? new DeskCard() : new Panel();
     this.part.init(p, cx);
     // Only the rail is always shown, so it takes the key commands.

@@ -4,9 +4,9 @@
 // right its most urgent agent's status (the Desk's badge). Click to switch,
 // right-click for its menu, drag to reorder.
 
-import { View, div, svg } from "gpui-kit";
+import { View, div, svg, image } from "gpui-kit";
 import { v_flex, h_flex } from "gpui-base";
-import { spaces, machines, panes, run, openOverlay, closeOverlay, props, pickFolder, exec, hc, theme, shared, setShared, watchFolder, window, layout } from "herdr";
+import { spaces, machines, panes, run, openOverlay, closeOverlay, props, pickFolder, exec, hc, theme, shared, setShared, watchFolder, window, layout, agents, terminals, setAgentOrder, readTextFile, appHome } from "herdr";
 
 function find(node, id) {
   if (node?.id === id) return node;
@@ -68,6 +68,28 @@ function showTerminals(on) {
   run(on ? "layout.show" : "layout.hide", { id: "tabs" });
 }
 
+// Agents in a space, desk members first (CTO first), then by who needs you. `labels` are their
+// terminals' (role=, task= from bin/team); `roles` is mods/desk/roles.json's list by id.
+const RANK = { blocked: 0, working: 1, done: 2, idle: 3 };
+function spaceAgents(w, all, labels) {
+  return all.filter((a) => a.space === w.id).map((a) => ({ a, l: labels.get(a.address) ?? {} }))
+    .sort((x, y) => (x.l.role ? 0 : 1) - (y.l.role ? 0 : 1) || (x.l.role === "cto" ? -1 : y.l.role === "cto" ? 1 : 0)
+      || (RANK[x.a.status] ?? 9) - (RANK[y.a.status] ?? 9) || x.a.seq - y.a.seq);
+}
+
+// The Desk's role tile (mods/desk/roles.js roleTile): its avatar, else its initial on its color.
+function roleTile(t, role, size, dim) {
+  const color = t[role.color] ?? role.color ?? t.accent;
+  if (role.avatar) return div().size(size).flex_none().rounded(size / 2).overflow_hidden().bg(color + "26")
+    .when(dim, (el) => el.opacity(0.55)).child(image(`mods/desk/${role.avatar}`).size(size));
+  return h_flex().size(size).flex_none().rounded(5).items_center().justify_center().bg(color + "26").text_color(color)
+    .text_size(Math.round(size * 0.5)).font_semibold().child(role.name[0].toUpperCase());
+}
+function programTile(t, p, size) {
+  if (!p?.icon) return svg("mods/desk/icons/terminal.svg").size(size - 4).flex_none().text_color(t.dim);
+  return p.tint ? svg(p.icon).size(size - 4).flex_none().text_color(t.foreground) : image(p.icon).size(size - 4).flex_none();
+}
+
 // Right-click on a space: the ways in (its terminals, a new one, a new desk), then Herdr's own
 // space menu (rename, worktrees, close) under More.
 class SpaceMenu {
@@ -110,11 +132,27 @@ export default class Spaces extends View {
     this.over = null;
     this.machines = [];
     this.folded = new Set(JSON.parse(localStorage.getItem("machines.folded") ?? "[]"));
+    this.roles = new Map(); // role id → { name, avatar, color }, from the Desk's roles.json
+    this.rolesRaw = null;
+    this.loadRoles(cx);
+    cx.timer.every(5000, (cx) => this.loadRoles(cx));
     this.refreshMachines(cx);
     cx.timer.every(15000, cx => this.refreshMachines(cx));
     // `git status` walks the whole tree, on another machine a process there:
     // only when its answer could have changed (see `due`).
     cx.timer.every(250, (cx) => this.checkNew(cx));
+  }
+
+  loadRoles(cx) {
+    cx.spawn(async (cx) => {
+      try {
+        const text = await readTextFile(`${appHome()}/mods/desk/roles.json`);
+        if (!text || text === this.rolesRaw) return;
+        this.rolesRaw = text;
+        this.roles = new Map((JSON.parse(text).roles ?? []).map((r) => [r.id ?? r.name.toLowerCase(), r]));
+        cx.notify();
+      } catch {}
+    });
   }
 
   checkNew(cx) {
@@ -243,14 +281,46 @@ export default class Spaces extends View {
     });
   }
 
-  // Switch to the space. In desk-chat's chat view, also open a fresh desk for it: the new-desk
-  // page aimed at that space, with its earlier desks listed. Nothing starts until you send.
-  // In the terminal view a click only switches, so you can still reach plain terminals.
+  // Switch to the space. In desk-chat's chat view, also open its desk (the one its agents are
+  // in), else the new-desk page aimed at it. In the terminal view a click only switches.
   pick(w) {
     run("space.select", { id: w.id });
-    if (shared("layout") !== "desk-chat" || shared("deskchat.terminals")) return;
+    if (!chatLayout() || shared("deskchat.terminals")) return;
+    const labels = new Map(terminals().map((x) => [x.address, x.labels ?? {}]));
+    const desk = spaceAgents(w, agents(), labels).find((x) => x.l.task)?.l.task;
+    if (desk) return setShared("desk.view", desk);
     setShared("desk.here", { space: w.id, at: Date.now() });
     setShared("desk.view", "new");
+  }
+
+  // An agent under its space: in the chat view its desk's chat, else (or with no desk) its terminal.
+  openAgent(a, l) {
+    if (l.task && chatLayout() && !shared("deskchat.terminals")) {
+      run("space.select", { id: a.space });
+      return setShared("desk.view", l.task);
+    }
+    showTerminals(true);
+    run("pane.focus", { pane: a.pane });
+  }
+
+  // One agent row: its tile, its role (else program), the worktree branch when it isn't the
+  // space's, and its status.
+  agentRow({ a, l }, g, ps, t) {
+    const role = l.role ? this.roles.get(l.role) : null;
+    const pane = ps.find((p) => p.pane === a.pane);
+    const branch = pane?.branch && g?.branch && pane.branch !== g.branch ? pane.branch : null;
+    const name = role?.name ?? (l.role || (/^\d+$/.test(a.tab_name) ? a.program?.name || a.title : a.tab_name) || "Agent");
+    const idle = a.status === "idle";
+    return h_flex().id(`agent-${a.address}`).h(28).flex_none().pl(39).pr(8).gap(8).items_center().rounded(7).cursor_pointer()
+      .when(a.focused && shared("deskchat.terminals"), (el) => el.bg(t.selected))
+      .hover((s) => s.bg(t.hover))
+      .on_click(() => this.openAgent(a, l))
+      .child(role ? roleTile(t, role, 18, idle) : h_flex().size(18).flex_none().items_center().justify_center().child(programTile(t, a.program, 18)))
+      .child(div().min_w(0).flex_shrink_1().truncate().text_size(12.5).text_color(idle ? t.muted : t.foreground).child(name))
+      .when(Boolean(branch), (el) => el.child(h_flex().min_w(0).flex_1().gap(3).items_center().text_size(11).text_color(t.dim)
+        .child(svg("mods/workspace-chrome/branch.svg").size(10).flex_none()).child(div().min_w(0).truncate().child(branch))))
+      .when(!branch, (el) => el.child(div().flex_1()))
+      .child(statusBadge(t, a.status) ?? div());
   }
 
   // A new session in desk-chat: pick a folder and the main chat starts a desk there with the CTO
@@ -294,7 +364,16 @@ export default class Spaces extends View {
   // The rows, under a header per machine once one isn't this computer.
   grouped(t, collapsed) {
     const rows = this.ordered();
-    const draw = (r) => (collapsed ? this.compact(r, t) : this.row(r, t));
+    const all = agents(), labels = new Map(terminals().map((x) => [x.address, x.labels ?? {}])), ps = panes();
+    const order = [];
+    const draw = (r) => {
+      const kids = spaceAgents(r.w, all, labels);
+      order.push(...kids.map((k) => k.a.address));
+      if (collapsed) return [this.compact(r, t)];
+      return [this.row({ ...r, kids: kids.length }, t), ...kids.map((k) => this.agentRow(k, r.g, ps, t))];
+    };
+    // Keyboard order follows the list (Herdr's next/previous agent).
+    const finish = (list) => { setAgentOrder(order); return list; };
     const remote = [...new Set([...rows.map(r => r.w.machine).filter(Boolean), ...this.machines.map(m => m.name)])].sort();
     const loading = m => {
       const layout = machines().find(k => k.name === m)?.layout;
@@ -302,9 +381,9 @@ export default class Spaces extends View {
         || spaces().some(s => (s.machine ?? null) === m && !this.shown.has(s.id));
     };
     const loadingRow = m => div().id(`machine-loading-${m ?? "local"}`).h(28).flex_none().px(8).text_size(12).text_color(t.dim).child(collapsed ? "…" : "Loading…");
-    if (!remote.length) return loading(null) && !rows.length ? [loadingRow(null)] : rows.map(draw);
+    if (!remote.length) return finish(loading(null) && !rows.length ? [loadingRow(null)] : rows.flatMap(draw));
     const machineNames = [null, ...remote];
-    return machineNames.flatMap((m) => {
+    return finish(machineNames.flatMap((m) => {
       const mine = rows.filter((r) => (r.w.machine ?? null) === m);
       const machine = this.machines.find(k => k.name === m);
       const connected = !m || machine?.state === "connected";
@@ -327,8 +406,8 @@ export default class Spaces extends View {
         .text_size(12).text_color(t.dim).hover(s => s.bg(t.hover).text_color(t.foreground))
         .on_click((_e, cx) => this.newSession(m, cx))
         .child(svg("mods/workspace-chrome/plus.svg").size(12)).when(!collapsed, el => el.child("New space there"));
-      return [head, ...(folded ? [] : mine.length ? mine.map(draw) : [loading(m) ? loadingRow(m) : empty])];
-    });
+      return [head, ...(folded ? [] : mine.length ? mine.flatMap(draw) : [loading(m) ? loadingRow(m) : empty])];
+    }));
   }
 
   // Under the title: the branch (a worktree row's title is its branch already), then ahead/behind.
@@ -341,7 +420,7 @@ export default class Spaces extends View {
       .when(g.behind > 0, (el) => el.child(div().flex_none().text_color(t.ansi1).child(`\u2193${g.behind}`)));
   }
 
-  row({ w, i, g, tree }, t) {
+  row({ w, i, g, tree, kids = 0 }, t) {
     const on = w.active;
     const colors = shared("space.colors") ?? {};
     const color = colors[w.id] ?? "ansi6";
@@ -384,11 +463,12 @@ export default class Spaces extends View {
         cx.notify();
       })
       .on_mouse_down("right", () => this.menu(w))
-      .child(tree ? this.worktreeLine(w, g, t) : this.spaceLines(w, g, fill, t));
+      .child(tree ? this.worktreeLine(w, g, t, kids) : this.spaceLines(w, g, fill, t, kids));
   }
 
   // A space: its repo (else its name), and a name you gave it when that says something else.
-  spaceLines(w, g, fill, t) {
+  // Its agents are listed under it, so the space's own badge only shows when it has none.
+  spaceLines(w, g, fill, t, kids) {
     const title = g?.name ?? w.name;
     const extra = w.named && g && w.name.toLowerCase() !== g.name.toLowerCase() ? w.name : null;
     return h_flex().gap(9).items_center()
@@ -399,17 +479,17 @@ export default class Spaces extends View {
           .child(div().min_w(0).flex_shrink_1().truncate().font_medium().text_color(t.foreground).child(title))
           .when(Boolean(extra), (el) => el.child(div().min_w(0).flex_shrink_1().truncate().text_size(11.5).text_color(t.dim).child(extra))))
         .child(this.subline(g, w, t)))
-      .child(statusBadge(t, w.status, { idle: false }) ?? div());
+      .child((!kids && statusBadge(t, w.status)) || div());
   }
 
   // A worktree under its repo: its branch, ahead/behind, its status.
-  worktreeLine(w, g, t) {
+  worktreeLine(w, g, t, kids) {
     return h_flex().pl(31).gap(6).items_center()
       .child(svg("mods/workspace-chrome/branch.svg").size(12).flex_none().text_color(t.dim))
       .child(div().min_w(0).flex_1().truncate().text_size(12.5).text_color(t.foreground).child(g?.branch ?? w.name))
       .when((g?.ahead ?? 0) > 0, (el) => el.child(div().flex_none().text_size(11.5).text_color(t.ansi2).child(`\u2191${g.ahead}`)))
       .when((g?.behind ?? 0) > 0, (el) => el.child(div().flex_none().text_size(11.5).text_color(t.ansi1).child(`\u2193${g.behind}`)))
-      .child(statusBadge(t, w.status, { idle: false }) ?? div());
+      .child((!kids && statusBadge(t, w.status)) || div());
   }
 
   compact({ w, i }, t) {
