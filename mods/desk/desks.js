@@ -132,6 +132,14 @@ export class Desks {
     this.newTarget = store.get("desks.target", null);
     this.newRoles = new Set(["cto"]);
 
+    // What each working agent is doing: its tool calls this turn, from bin/team's PreToolUse hook
+    // (~/.herdr/team/.activity/<address>.jsonl). Polled only while someone in the open desk works.
+    this.steps = {};                                   // address -> [{ at, tool, text }]
+    this.stepsOpen = store.get("desks.steps", true);   // the feed shown, or just the caption
+    this.stepsAll = new Set();                         // addresses whose whole feed is shown
+    this.stepsSeen = {};                               // address -> ms the newest row was first drawn (for its fade-in)
+    cx.timer.every(900, (cx) => this.pollSteps(cx));
+
     this.roles.load(cx);
     cx.timer.every(5000, (cx) => this.roles.load(cx));
     cx.timer.every(2500, () => { if (this.toasts) this.watch.check(this.roles); });
@@ -702,6 +710,64 @@ export class Desks {
   }
 
   // Three dots breathing out of step (native loops, so no re-render drives them).
+  pollSteps(cx) {
+    const d = this.view !== "list" && this.view !== "new" ? this.desk(this.view) : null;
+    if (!d || this.polling) return;
+    const working = this.members(d.slug).filter((m) => m.status === "working").map((m) => m.address);
+    for (const a of Object.keys(this.steps)) if (!working.includes(a)) { delete this.steps[a]; delete this.stepsSeen[a]; }
+    if (!working.length) return;
+    this.polling = true;
+    cx.spawn(async (cx) => {
+      let changed = false;
+      try {
+        for (const a of working) {
+          const r = await exec("tail", ["-n", "60", `${home()}/.herdr/team/.activity/${a}.jsonl`]);
+          const list = r.code === 0 ? parse(r.stdout) : [];
+          const before = this.steps[a];
+          if (!before || before.length !== list.length || before[before.length - 1]?.at !== list[list.length - 1]?.at) { this.steps[a] = list; changed = true; }
+        }
+      } finally { this.polling = false; }
+      if (changed) { cx.notify(); cx.timer.after(40, (cx) => cx.notify()); }  // the second frame lets the new row ease in
+    });
+  }
+
+  // The feed under a working agent: its last few steps, newest at the bottom, each easing in
+  // as the older ones slide up. A chevron folds it to the caption; "all N" shows the whole turn.
+  stepIcon(tool) {
+    return tool === "Bash" ? "terminal" : ["Read", "Glob", "Grep"].includes(tool) ? "book"
+      : ["Edit", "Write", "MultiEdit", "NotebookEdit"].includes(tool) ? "pages"
+      : ["WebFetch", "WebSearch"].includes(tool) ? "fetch" : ["Task", "Agent"].includes(tool) ? "sparkles" : "play";
+  }
+
+  feed(t, m, steps) {
+    const id = `feed-${m.address}`, all = this.stepsAll.has(m.address), LIMIT = 4;
+    const shown = all ? steps : steps.slice(-LIMIT), hidden = steps.length - shown.length;
+    const newest = steps[steps.length - 1]?.at, seen = this.stepsSeen[m.address];
+    if (newest && seen?.at !== newest) this.stepsSeen[m.address] = { at: newest, drawn: Date.now() };
+    const head = h_flex().id(`${id}-head`).h(22).gap(5).items_center().cursor_pointer().text_size(11).text_color(t.dim)
+      .hover((s) => s.text_color(t.foreground))
+      .on_click((_e, cx) => { this.stepsOpen = !this.stepsOpen; store.set("desks.steps", this.stepsOpen); cx.notify(); })
+      .child(icon(this.stepsOpen ? "chevron-down" : "chevron", 11))
+      .child(`${steps.length} step${steps.length === 1 ? "" : "s"} this turn`)
+      .when(this.stepsOpen && hidden > 0, (el) => el.child(div().flex_1()).child(div().id(`${id}-all`).text_color(t.accent).cursor_pointer()
+        .hover((s) => s.opacity(0.8)).on_click((_e, cx) => { cx.stop_propagation(); this.stepsAll.add(m.address); cx.notify(); }).child(`all ${steps.length}`)))
+      .when(this.stepsOpen && all && steps.length > LIMIT, (el) => el.child(div().flex_1()).child(div().id(`${id}-less`).text_color(t.accent).cursor_pointer()
+        .hover((s) => s.opacity(0.8)).on_click((_e, cx) => { cx.stop_propagation(); this.stepsAll.delete(m.address); cx.notify(); }).child("last 4")));
+    const rows = shown.map((st, i) => {
+      // The newest row starts low and faint on its first frame, then eases to its place.
+      const fresh = st.at === newest && Date.now() - (this.stepsSeen[m.address]?.drawn ?? 0) < 30;
+      const last = i === shown.length - 1;
+      return h_flex().id(`${id}-${st.at}`).h(fresh ? 6 : 22).opacity(fresh ? 0 : 1).overflow_hidden().gap(7).items_center().px(8)
+        .transition("height", { duration: 220, easing: "ease-out" }).transition("opacity", { duration: 260, easing: "ease-out" })
+        .child(icon(this.stepIcon(st.tool), 12).text_color(last ? t.working : t.dim))
+        .child(div().min_w(0).flex_1().truncate().text_size(11.5).text_color(last ? t.foreground : t.muted).child(st.text))
+        .child(div().flex_none().text_size(10.5).text_color(t.dim).child(ago(st.at)));
+    });
+    return v_flex().w_full().max_w(560).gap(2)
+      .child(head)
+      .when(this.stepsOpen, (el) => el.child(v_flex().py(4).rounded(8).bg(t.raised + "80").border_1().border_color(t.border).children(rows)));
+  }
+
   dots(t) {
     return h_flex().h(20).gap(4).items_center().children([820, 960, 1100].map((period) =>
       div().size(6).rounded(3).bg(t.dim).loop("opacity", { from: 0.25, to: 1, period })));
@@ -713,14 +779,16 @@ export class Desks {
     return members.filter((m) => m.status === "working" || m.status === "blocked").map((m) => {
       const role = this.roles.byId(m.role), name = role?.name ?? m.role, id = `act-${m.address}`;
       const blocked = m.status === "blocked";
-      const caption = blocked ? "needs you in its terminal" : this.waitingFor?.has(m.address) ? "waiting for your answer below" : m.handingOff ? "writing a handoff for a fresh session" : m.awaiting ? "replying" : `working${m.note ? ` · ${m.note}` : ""}`;
+      const steps = blocked ? [] : this.steps[m.address] ?? [], latest = steps[steps.length - 1];
+      const caption = blocked ? "needs you in its terminal" : this.waitingFor?.has(m.address) ? "waiting for your answer below" : m.handingOff ? "writing a handoff for a fresh session"
+        : latest ? latest.text : m.awaiting ? "replying" : `working${m.note ? ` · ${m.note}` : ""}`;
       return v_flex().id(id).gap(6).pt(this.wide ? 26 : 18)
         .child(h_flex().h(22).gap(7).items_center()
           .child(this.avatar(t, role, null, 18))
           .child(div().flex_none().text_size(12.5).font_semibold().text_color(t.foreground).child(name))
           .child(div().min_w(0).flex_1().truncate().text_size(11.5).text_color(blocked ? t.blocked : t.dim).child(caption))
           .when(blocked, (el) => el.child(button(t, `${id}-go`, "Open terminal", () => openTerminal(m.address), { primary: true, tip: "It's waiting on a prompt only its terminal can answer" }))))
-        .child(blocked ? icon("alert", 15).text_color(t.blocked) : this.dots(t));
+        .child(blocked ? icon("alert", 15).text_color(t.blocked) : steps.length ? this.feed(t, m, steps) : this.dots(t));
     });
   }
 

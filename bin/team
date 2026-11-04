@@ -108,10 +108,13 @@ def argv_for(role, task):
         base += ["--model", role["model"]] if role.get("model") else []
         base += ["--effort", effort] if effort else []
         base += ["--permission-mode", role["permission_mode"]] if role.get("permission_mode") else []
-        # Stop: post replies, measure context. SessionStart after a compaction (asked for or Claude's own): its new size.
+        # Stop: post replies, measure context. PreToolUse: each tool call as one line of the agent's
+        # activity feed (the Desk shows it while the agent works; no tokens spent).
+        # SessionStart after a compaction (asked for or Claude's own): its new size.
         # PermissionRequest: what it would ask in its terminal, asked in the desk chat (team permit answers).
         base += ["--settings", json.dumps({"hooks": {
             "Stop": [{"hooks": [{"type": "command", "command": f"{SELF} hook claude", "timeout": 20}]}],
+            "PreToolUse": [{"matcher": "*", "hooks": [{"type": "command", "command": f"{SELF} hook claude-tool", "timeout": 5}]}],
             "SessionStart": [{"matcher": "compact", "hooks": [{"type": "command", "command": f"{SELF} hook claude-compact", "timeout": 20}]}],
             "PermissionRequest": [{"matcher": "*", "hooks": [{"type": "command", "command": f"{SELF} hook claude-permission", "timeout": PERMIT_TIMEOUT}]}]}})]
         base += ["--append-system-prompt", prompt] if prompt else []
@@ -135,6 +138,68 @@ def inside(path, d):
 CHAT = os.path.expanduser("~/.herdr/team")
 # Pending permission requests: the Desk's buttons (team permit) drop the answer here as <id>.json.
 PERMITS = os.path.join(CHAT, ".permits")
+# What each agent is doing right now, one line per tool call (team hook claude-tool), read by
+# the Desk's chat while the agent works and cleared when its turn ends.
+ACTIVITY = os.path.join(CHAT, ".activity")
+
+
+def activity_file(addr):
+    return os.path.join(ACTIVITY, f"{addr}.jsonl")
+
+
+def step_text(name, inp):
+    """One short line for a tool call, the way a person would say it."""
+    inp = inp if isinstance(inp, dict) else {}
+    base = lambda v: os.path.basename(str(v or "").rstrip("/")) or str(v or "")
+    if name == "Bash":
+        return (inp.get("description") or " ".join((inp.get("command") or "").split())[:90] or "Run a command")
+    if name in ("Read", "Edit", "Write", "MultiEdit", "NotebookEdit"):
+        verb = {"Read": "Read", "Edit": "Edit", "MultiEdit": "Edit", "Write": "Write", "NotebookEdit": "Edit"}[name]
+        return f"{verb} {base(inp.get('file_path') or inp.get('notebook_path'))}"
+    if name == "Glob":
+        return f"Find files {inp.get('pattern') or ''}".strip()
+    if name == "Grep":
+        return f"Search for {inp.get('pattern') or ''}".strip()
+    if name == "WebFetch":
+        return f"Fetch {re.sub(r'^https?://([^/]+).*$', r'\1', inp.get('url') or '')}"
+    if name == "WebSearch":
+        return f"Search the web: {inp.get('query') or ''}"
+    if name == "TodoWrite":
+        return "Update the plan"
+    if name in ("Task", "Agent"):
+        return f"Start a sub-agent: {inp.get('description') or ''}".strip(": ")
+    if name.startswith("mcp__"):
+        return name.split("__")[-1].replace("_", " ").capitalize()
+    return name
+
+
+def tool_step():
+    """Claude's PreToolUse hook: append this call to the agent's activity feed. Quick; never blocks."""
+    if not ME:
+        return
+    try:
+        payload = json.load(sys.stdin)
+        rec = {"at": int(time.time() * 1000), "tool": payload.get("tool_name") or "?",
+               "text": step_text(payload.get("tool_name") or "", payload.get("tool_input"))[:160]}
+        os.makedirs(ACTIVITY, exist_ok=True)
+        path = activity_file(ME)
+        with open(path, "a", encoding="utf-8") as f:
+            f.write(json.dumps(rec) + "\n")
+        # Keep it short: the Desk shows the last few dozen at most.
+        if os.path.getsize(path) > 32768:
+            with open(path, encoding="utf-8") as f:
+                lines = f.readlines()[-80:]
+            with open(path, "w", encoding="utf-8") as f:
+                f.writelines(lines)
+    except (ValueError, OSError):
+        return
+
+
+def clear_activity(addr):
+    try:
+        os.remove(activity_file(addr))
+    except OSError:
+        pass
 PERMIT_TIMEOUT = 600  # the hook's timeout in Claude's settings, seconds
 PERMIT_WAIT = float(os.environ.get("TEAM_PERMIT_WAIT", PERMIT_TIMEOUT - 60))  # give up well before Claude kills it
 
@@ -525,6 +590,8 @@ def hook(args):
         return compacted()
     if args.cli == "claude-permission":
         return permission_request()
+    if args.cli == "claude-tool":
+        return tool_step()
     try:
         if args.cli == "codex":
             payload = json.loads(args.payload[-1]) if args.payload else {}
@@ -544,6 +611,7 @@ def hook(args):
         return
     if not ME:
         return
+    clear_activity(ME)  # the turn's steps; its reply says what came of them
     labels = terminal(ME).get("labels", {})
     awaiting, slug, who = labels.get("awaiting"), labels.get("task"), labels.get("role")
     # Cleared whatever the turn said: an empty or failed turn owes nothing more, so the Desk
@@ -1149,7 +1217,7 @@ def main():
     ro = sub.add_parser("route")
     ro.add_argument("role"); ro.add_argument("text", nargs="+")
     hk = sub.add_parser("hook")
-    hk.add_argument("cli", choices=["claude", "claude-compact", "claude-permission", "codex"]); hk.add_argument("payload", nargs="*")
+    hk.add_argument("cli", choices=["claude", "claude-compact", "claude-permission", "claude-tool", "codex"]); hk.add_argument("payload", nargs="*")
     pm = sub.add_parser("permit")
     pm.add_argument("--task", required=True); pm.add_argument("id"); pm.add_argument("decision", choices=["allow", "always", "deny"])
     pm.add_argument("--message", help="with deny: tell it what to do instead")
