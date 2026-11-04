@@ -24,9 +24,9 @@
     "accent_foreground": "#ffffff",
     "solid": "#1f2328",
     "solid_foreground": "#ffffff",
-    "working": "#2563eb",
+    "working": "#16a34a",
     "blocked": "#b45309",
-    "done": "#15803d",
+    "done": "#2563eb",
     "idle": "#9ca3af"
   }
 }

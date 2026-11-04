@@ -47,12 +47,13 @@ export function tone(t, status) {
 }
 
 // The Desk's status badge (mods/desk/ui.js), kept the same here: a mod can't import another's files.
-const LABEL = { working: "Working", blocked: "Needs you", done: "Done" };
+const LABEL = { working: "Working", blocked: "Needs you", done: "Done", idle: "Idle" };
 function statusBadge(t, status) {
   if (!LABEL[status]) return null;
   const color = t[status] ?? t.dim;
   const mark = status === "working" ? svg("mods/workspace-chrome/spinner.svg").size(10).flex_none().spin(900)
     : status === "blocked" ? div().size(6).rounded(3).flex_none().bg(color).loop("opacity", { from: 0.35, to: 1, period: 1400 })
+    : status === "idle" ? div().size(6).rounded(3).flex_none().bg(color)
     : svg("mods/desk/icons/check.svg").size(10).flex_none();
   return h_flex().flex_none().h(20).pl(6).pr(7).gap(4).items_center().rounded(10).bg(color + "1f")
     .text_size(10.5).font_semibold().text_color(color).child(mark).child(LABEL[status]);
@@ -332,11 +333,9 @@ export default class Spaces extends View {
 
   // One agent row: its tile, its role (else program), the worktree branch when it isn't the
   // space's, and its status.
-  // The quiet status of one agent: a spinner while it works, a check when done; "Needs you"
-  // keeps its badge because it's the one you act on.
+  // Every agent wears its status in words: Working (spinner), Needs you (pulsing dot),
+  // Done (check), Idle (quiet dot). Same badge as the Desk's.
   mark(t, status) {
-    if (status === "working") return svg("mods/workspace-chrome/spinner.svg").size(12).flex_none().text_color(t.working).spin(900);
-    if (status === "done") return svg("mods/desk/icons/check.svg").size(12).flex_none().text_color(t.done);
     return statusBadge(t, status);
   }
 
