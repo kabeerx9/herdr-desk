@@ -23,7 +23,9 @@ export class Roles {
         if (text === this.raw) return;
         this.raw = text;
         if (text === null) throw new Error(`${FILE} not found`);
-        this.list = (JSON.parse(text).roles ?? []).map((r) => ({ ...r, id: r.id ?? r.name.toLowerCase() }));
+        const data = JSON.parse(text);
+        this.list = (data.roles ?? []).map((r) => ({ ...r, id: r.id ?? r.name.toLowerCase() }));
+        this.freshLimit = Number(data.fresh_at) || 250000;
         this.error = null;
       } catch (e) {
         this.error = String(e?.message ?? e);
@@ -33,6 +35,8 @@ export class Roles {
   }
 
   byId(id) { return this.list?.find((r) => r.id === id) ?? null; }
+  // Context size (tokens) past which a role should start fresh; bin/team reads the same numbers.
+  freshAt(id) { return Number(this.byId(id)?.fresh_at) || this.freshLimit || 250000; }
 }
 
 // Live terminals' labels by address.

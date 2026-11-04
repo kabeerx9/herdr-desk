@@ -13,6 +13,7 @@
   team finish [--address T] [--keep-worktree]  wrap up: flag leftovers, or remove the team worktree and close
   team hook claude|codex                    (the CLIs' end-of-turn hook) posts a reply the chat is waiting for
   team new-desk [--name NAME] [--repo DIR]  a desk: an independent team with its own thread; prints its slug
+  team fresh --address T [--force]          a long context: it writes a handoff, then a new session of it takes over
   team roles
 
 One launcher for everyone (the CTO, the Desk's buttons, you): it reads roles.json,
@@ -50,9 +51,25 @@ def hc_json(*args):
         return None
 
 
-def load_roles():
+FRESH_AT = 250_000  # roles.json "fresh_at" (or a role's own) overrides it
+
+
+def roles_file():
     with open(os.path.join(DESK, "roles.json")) as f:
-        roles = json.load(f)["roles"]
+        return json.load(f)
+
+
+def fresh_at(role_id):
+    try:
+        data = roles_file()
+    except (OSError, ValueError):
+        return FRESH_AT
+    role = next((r for r in data.get("roles", []) if r.get("id") == role_id), {})
+    return int(role.get("fresh_at") or data.get("fresh_at") or FRESH_AT)
+
+
+def load_roles():
+    roles = roles_file()["roles"]
     try:
         with open(os.path.join(DESK, "roles", "protocol.md")) as f:
             protocol = f.read().strip()
@@ -322,7 +339,7 @@ def start(args):
         task += f"\n\n(Team task: {slug}. Report with `{SELF} report done|blocked \"<summary>\"` when done or stuck.)"
 
     space = args.space or caller_labels.get("herdr.space") or "spteam" + secrets.token_hex(8)
-    tab = "tb" + secrets.token_hex(16)
+    tab = args.tab or "tb" + secrets.token_hex(16)
     name = unique_name(f"{role['id']}-{slug}")
     cmd = ["hc", "run", "--bg", "--outlive-parent", "--name", name, "--cwd", folder,
            "--label", f"role={role['id']}", "--label", f"task={slug}", "--label", f"by={args.by or ME or 'shell'}",
@@ -351,8 +368,12 @@ def start(args):
     if ME and caller_labels.get("role") == "cto" and caller_labels.get("task") != slug:
         sh(["hc", "label", ME, f"task={slug}"])
     starter = caller_labels.get("role") or ("kabeer" if args.by == "desk" else (ME or "shell"))
-    chat_append(slug, {"from": starter, "kind": "start", "role": role["id"], "address": launched.get("address"),
-                       "text": f"Started {role['name']} in {os.path.basename(folder)}" + (f" on {branch}" if branch else "")})
+    if args.fresh_of:
+        chat_append(slug, {"from": role["id"], "kind": "fresh", "role": role["id"], "address": launched.get("address"),
+                           "replaces": args.fresh_of, "text": args.note or f"{role['name']} started fresh"})
+    else:
+        chat_append(slug, {"from": starter, "kind": "start", "role": role["id"], "address": launched.get("address"),
+                           "text": f"Started {role['name']} in {os.path.basename(folder)}" + (f" on {branch}" if branch else "")})
     renamed = rename_tab(tab, role["name"])
     trusted = accept_trust(name, role.get("cli")) if branch else None
     print(json.dumps({"address": launched.get("address"), "name": name, "role": role["id"], "task": slug,
@@ -476,10 +497,11 @@ def route(args):
 
 
 def hook(args):
-    """End of an agent's turn (Claude's Stop hook, Codex's notify). When the turn answered a desk
-    message, its final message is posted for it: the agent replies once, in its own words, and
-    never types the reply again into `team say`. Silent and quick; never blocks the agent."""
-    msg = ""
+    """End of an agent's turn (Claude's Stop hook, Codex's notify). For Claude, records how big
+    its context is now (the ctx label). When the turn answered a desk message, its final message is posted
+    for it: the agent replies once, in its own words, and never types it again into `team say`.
+    When the turn wrote a handoff (team fresh), a new session takes over. Quick; never blocks."""
+    msg, ctx = "", None
     try:
         if args.cli == "codex":
             payload = json.loads(args.payload[-1]) if args.payload else {}
@@ -490,21 +512,37 @@ def hook(args):
         else:
             payload = json.load(sys.stdin)
             msg = payload.get("last_assistant_message") or last_text(payload.get("transcript_path"))
+            # Claude writes the turn's usage just after this hook, so it's measured a moment later, apart.
+            if ME and payload.get("transcript_path"):
+                env = {k: v for k, v in os.environ.items() if k != "HC_TERMINAL_ID"}
+                subprocess.Popen([SELF, "measure", "--address", ME, "--transcript", payload["transcript_path"]], env=env,
+                                 stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, start_new_session=True)
     except (ValueError, OSError):
         return
-    if not ME or not msg.strip():
+    if not ME:
         return
     labels = terminal(ME).get("labels", {})
     awaiting, slug, who = labels.get("awaiting"), labels.get("task"), labels.get("role")
+    # Cleared whatever the turn said: an empty or failed turn owes nothing more, so the Desk
+    # never shows "replying" for a reply that isn't coming.
+    if awaiting:
+        sh(["hc", "label", ME, "awaiting="])
     if not awaiting or not slug or not who:
         return
     what, _, since = awaiting.rpartition(":")
-    sh(["hc", "label", ME, "awaiting="])
+    if what.startswith("fresh"):
+        # This turn wrote the handoff. The takeover ends this terminal, so it runs on its own.
+        env = {k: v for k, v in os.environ.items() if k != "HC_TERMINAL_ID"}
+        subprocess.Popen([SELF, "fresh", "--address", ME, "--take-over"], env=env, stdin=subprocess.DEVNULL,
+                         stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, start_new_session=True)
+        return
+    msg = msg.strip()
+    if not msg:
+        return
     # It posted by hand this turn after all: don't post twice.
     if any(r.get("address") == ME and r.get("kind") in ("say", "answer") and r.get("at", 0) >= int(since or 0)
            for r in chat_read(slug)[-30:]):
         return
-    msg = msg.strip()
     if what.startswith("ask-"):
         qid = what[4:]
         q = next((r for r in reversed(chat_read(slug)) if r.get("kind") == "ask" and r.get("id") == qid), None)
@@ -519,6 +557,54 @@ def hook(args):
                            **({"delivered_to": [asker]} if asker and not why else {})})
     else:
         chat_append(slug, {"from": who, "address": ME, "kind": "say", "text": msg, "auto": True})
+
+
+def measure(args):
+    """(Claude's hook, detached) labels ctx=<tokens>; the first time past the role's limit, says so in the chat."""
+    ctx = None
+    for _ in range(8):
+        time.sleep(0.75)
+        ctx = claude_context(args.transcript)
+        if ctx and str(ctx) != (terminal(args.address).get("labels") or {}).get("ctx"):
+            break
+    if not ctx:
+        return
+    labels = terminal(args.address).get("labels") or {}
+    slug, who = labels.get("task"), labels.get("role")
+    warn = bool(slug and who and ctx >= fresh_at(who) and not labels.get("ctxwarned"))
+    sh(["hc", "label", args.address, f"ctx={ctx}", *(["ctxwarned=1"] if warn else [])])
+    if warn:
+        chat_append(slug, {"from": who, "address": args.address, "kind": "context", "ctx": ctx,
+                           "text": f"Context is at {ctx // 1000}k tokens. Every turn now re-reads all of it; "
+                                   "a fresh start (Details) hands over to a new session."})
+
+
+def tail_lines(path, size=4_000_000):
+    """The end of a (possibly huge) transcript, newest line first."""
+    with open(path, "rb") as f:
+        f.seek(0, 2)
+        f.seek(max(0, f.tell() - size))
+        return reversed(f.read().decode("utf-8", "replace").splitlines())
+
+
+def claude_context(transcript):
+    """Tokens in a Claude agent's context now: its last main-thread call's prompt plus reply."""
+    try:
+        lines = tail_lines(transcript)
+    except (OSError, TypeError):
+        return None
+    for line in lines:
+        if '"usage"' not in line:
+            continue
+        try:
+            r = json.loads(line)
+        except ValueError:
+            continue
+        if r.get("type") != "assistant" or r.get("isSidechain"):
+            continue
+        u = (r.get("message") or {}).get("usage") or {}
+        return sum(int(u.get(k) or 0) for k in ("input_tokens", "cache_creation_input_tokens", "cache_read_input_tokens", "output_tokens")) or None
+    return None
 
 
 def last_text(transcript):
@@ -695,6 +781,89 @@ def finish(args):
             time.sleep(0.15)
 
 
+def handoff_path(cwd, slug, role_id):
+    repo = repo_of(cwd) if cwd else None
+    d = os.path.join(repo["common"], "team", "desks", slug) if repo else os.path.join(CHAT, f"{slug}.handoffs")
+    os.makedirs(d, exist_ok=True)
+    return os.path.join(d, f"handoff-{role_id}-{time.strftime('%m%d-%H%M%S')}.md")
+
+
+def fresh(args):
+    """A fresh session for an agent whose context got long. First the agent writes a handoff
+    (what it's doing, done, next, open); when that turn ends, its hook runs --take-over: the
+    same role starts in the same folder, tab and desk with the handoff as its first message,
+    takes over the old one's place in the chat, and the old terminal is ended."""
+    need_core()
+    info = terminal(args.address)
+    if info.get("state") != "live":
+        die(f"{args.address} isn't a live terminal")
+    addr, labels = info.get("address") or args.address, info.get("labels") or {}
+    role_id, slug = labels.get("role"), labels.get("task")
+    if not role_id or not slug:
+        die("fresh is for desk agents (role and task labels)")
+    cwd = (info.get("foreground") or {}).get("cwd") or info.get("cwd")
+    if args.take_over:
+        return take_over(info, addr, labels, role_id, slug, cwd)
+    status = (info.get("status") or {}).get("state")
+    if status == "working" and not args.force:
+        die("it's working; start fresh once its turn ends (or pass --force)")
+    path = handoff_path(cwd, slug, role_id)
+    ctx = labels.get("ctx")
+    why = send_text(addr, f"[desk] Your context is long{f' ({int(ctx) // 1000}k tokens)' if ctx else ''}, so a fresh session of you "
+                          f"takes over when this turn ends. Write a handoff to {path}: what you're working on and why, what's done "
+                          "(commits, files), what's next, open questions and who's waiting on what. Under 60 lines, facts only. "
+                          "If you keep the decisions file, bring it up to date too. Then end your turn; start nothing new.")
+    if why:
+        die(f"couldn't reach it: {why}")
+    sh(["hc", "label", addr, f"handoff={path}"])
+    expect_reply(addr, "fresh")
+    print(json.dumps({"ok": True, "handoff": path}))
+
+
+def take_over(info, addr, labels, role_id, slug, cwd):
+    role = next((r for r in load_roles() if r["id"] == role_id), {"name": role_id})
+    path, ctx = labels.get("handoff"), labels.get("ctx")
+    wrote = bool(path) and os.path.exists(path)
+    task = (f"You're this desk's {role['name']}, taking over from your previous session, whose context got long. "
+            + (f"Read its handoff in {path} first, then carry on" if wrote else
+               f"It wrote no handoff, so read the decisions file and `{SELF} inbox --all`, then carry on")
+            + " from where it left off. Don't redo finished work. If nothing is in flight, just say you're ready, in one line.")
+    parent = info.get("parent")
+    cmd = [SELF, "start", role_id, "--repo", cwd or os.path.expanduser("~"), "--share", "--slug", slug, "--requested",
+           "--by", "fresh", "--task", task, "--fresh-of", addr,
+           "--note", f"{role['name']} started fresh" + (f" (was {int(ctx) // 1000}k tokens)" if ctx else "")
+           + (f". Handoff: `{path}`" if wrote else ". No handoff was written.")]
+    cmd += ["--parent", parent] if parent and terminal(parent).get("state") == "live" else ["--no-parent"]
+    for flag, key in (("--space", "herdr.space"), ("--tab", "herdr.tab")):
+        if labels.get(key):
+            cmd += [flag, labels[key]]
+    r = sh(cmd)
+    try:
+        new = json.loads(r.stdout).get("address") if r.returncode == 0 else None
+    except ValueError:
+        new = None
+    if not new:
+        why = (r.stderr or r.stdout).strip()[:200]
+        chat_append(slug, {"from": role_id, "address": addr, "kind": "flag",
+                           "text": f"Couldn't start a fresh {role['name']} ({why}). The old session is still running."})
+        sh(["hc", "label", addr, "handoff="])
+        return
+    # The new session reads the chat from where the old one stopped.
+    try:
+        with open(cursors_file(slug)) as f:
+            cur = json.load(f)
+    except (OSError, ValueError):
+        cur = {}
+    if addr in cur:
+        cur[new] = cur.pop(addr)
+        tmp = cursors_file(slug) + ".tmp"
+        with open(tmp, "w") as f:
+            json.dump(cur, f)
+        os.replace(tmp, cursors_file(slug))
+    sh(["hc", "kill", addr])
+    print(json.dumps({"ok": True, "address": new, "replaced": addr, "handoff": path if wrote else None}))
+
+
 def main():
     import argparse
     p = argparse.ArgumentParser(prog="team", description=__doc__.split("\n")[0])
@@ -705,6 +874,7 @@ def main():
     s.add_argument("--parent"); s.add_argument("--no-parent", action="store_true")
     s.add_argument("--space"); s.add_argument("--requested", action="store_true"); s.add_argument("--by")
     s.add_argument("--share", action="store_true", help="work in --repo as is, never a new worktree")
+    s.add_argument("--tab"); s.add_argument("--fresh-of"); s.add_argument("--note")
     r = sub.add_parser("report")
     r.add_argument("kind", choices=["done", "blocked", "update"])
     r.add_argument("text", nargs="+")
@@ -730,6 +900,11 @@ def main():
     fi.add_argument("--force", action="store_true", help="wrap up even while it's working")
     nd = sub.add_parser("new-desk")
     nd.add_argument("--name"); nd.add_argument("--repo")
+    me_ = sub.add_parser("measure")
+    me_.add_argument("--address", required=True); me_.add_argument("--transcript", required=True)
+    fr = sub.add_parser("fresh")
+    fr.add_argument("--address", required=True); fr.add_argument("--force", action="store_true")
+    fr.add_argument("--take-over", action="store_true", help=argparse.SUPPRESS)
     sub.add_parser("roles")
     args = p.parse_args()
     if args.cmd == "start":
@@ -752,6 +927,10 @@ def main():
         post(args)
     elif args.cmd == "finish":
         finish(args)
+    elif args.cmd == "measure":
+        measure(args)
+    elif args.cmd == "fresh":
+        fresh(args)
     elif args.cmd == "new-desk":
         new_desk(args)
     else:
