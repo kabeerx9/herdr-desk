@@ -7,6 +7,20 @@ import { KIND, span, summarizeSteps, thoughtLine, subagentHeader, subStatus, sub
 // The desk chat's thread, drawn from rows model.js derived on reload. Everything here reads
 // state; nothing here fetches or derives (desks.js owns both). `o` is the Desks owner.
 
+
+const EVIDENCE = { verified: "It ran the checks itself", reported: "Passed on from another agent's check", asserted: "Claimed, not checked" };
+const CRITERION = { pass: "done", fail: "failed", "n/a": "idle" };
+
+// A done report against its brief's acceptance criteria: one row per criterion.
+function criteriaList(t, id, criteria, indent) {
+  return v_flex().id(`${id}-crit`).ml(indent).mt(2).py(4).gap(1).rounded(8).border_1().border_color(t.border)
+    .children(criteria.map((c) => h_flex().id(`${id}-crit-${c.id}`).min_h(24).px(8).gap(7).items_center()
+      .child(statusMark(t, CRITERION[c.result] ?? "idle", 11))
+      .child(div().flex_none().text_size(11).font_semibold().text_color(t.muted).child(c.id))
+      .child(div().min_w(0).flex_1().truncate().text_size(12).text_color(t.foreground).tooltip(c.text ?? "").child(c.text ?? ""))
+      .when(Boolean(c.note), (el) => el.child(div().flex_none().max_w(220).truncate().text_size(11).text_color(t.dim).tooltip(c.note).child(c.note)))));
+}
+
 export const COLUMN = 760;
 
 const clock = (ms) => {
@@ -118,6 +132,10 @@ export function messageRow(o, t, slug, row, ctx) {
       .when(Boolean(to), (el) => el.child(div().flex_none().text_size(12).text_color(t.dim).child(`to ${to}`)))
       .when(Boolean(kind), (el) => el.child(h_flex().flex_none().gap(4).items_center().text_size(12).text_color(t.muted)
         .when(Boolean(kind.mark), (x) => x.child(statusMark(t, kind.mark, 11))).child(kind.word)))
+      // How "done" was established: checked by the agent itself, passed on, or only claimed.
+      .when(Boolean(m.evidence), (el) => el.child(div().id(`${id}-ev`).flex_none().text_size(11)
+        .text_color(m.evidence === "verified" ? t.done : m.evidence === "reported" ? t.muted : t.dim)
+        .tooltip(EVIDENCE[m.evidence] ?? "").child(m.evidence)))
       .child(div().flex_none().text_size(11).text_color(t.dim).child(clock(m.at)))
       .child(div().flex_1())
       .when(!latest, (el) => el.child(div().when(!hovered, (x) => x.opacity(0)).child(copy)))))
@@ -127,6 +145,7 @@ export function messageRow(o, t, slug, row, ctx) {
       .when(Boolean(snap.steps?.length), (x) => x.child(stepList(t, `${id}-steps`, snap.steps, { live: false })))
       .when(Boolean(snap.subagents?.length), (x) => x.child(subagents(o, t, `${id}-subs`, snap.subagents, ctx.now)))))
     .child(body)
+    .when(Boolean(m.criteria?.length), (el) => el.child(criteriaList(t, id, m.criteria, indent)))
     .when(latest, (el) => el.child(h_flex().ml(-5).gap(2)
       .child(copy)
       .when(Boolean(live), (el) => el.child(tool(t, `${id}-term`, "terminal", `Open ${role?.name ?? m.from}'s terminal`, () => o.openTerminal(live.address))))))
