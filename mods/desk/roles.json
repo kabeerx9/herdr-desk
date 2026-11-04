@@ -1,5 +1,5 @@
 {
-  "_help": "Team roles for the Desk's Team tab and sidebar. cli: claude | codex (or give a full argv). model: what that CLI's --model / -m takes. prompt: a file in roles/ added to the agent's system prompt. icon: an svg in icons/, without .svg. worktree: true for roles that edit code; such a role gets its own git worktree when another agent is already working in that checkout. Saved edits show within a few seconds.",
+  "_help": "Team roles for the Desk's Team tab and sidebar. cli: claude | codex (or give a full argv). model: what that CLI's --model / -m takes. prompt: a file in roles/ added to the agent's system prompt. icon: an svg in icons/, without .svg. worktree: true for roles that edit code; such a role gets its own git worktree when another agent is already working in that checkout. Saved edits show within a few seconds. on_request: true for roles that start only when Kabeer asks (team start needs --requested; the Desk's buttons pass it). bin/team starts every role; roles/protocol.md is added to every role's prompt.",
   "roles": [
     {
       "id": "cto",
@@ -11,7 +11,8 @@
       "prompt": "roles/cto.md",
       "color": "ansi5",
       "icon": "roles/cto",
-      "worktree": false
+      "worktree": false,
+      "on_request": false
     },
     {
       "id": "frontend",
@@ -23,7 +24,8 @@
       "prompt": "roles/frontend.md",
       "color": "ansi4",
       "icon": "roles/frontend",
-      "worktree": true
+      "worktree": true,
+      "on_request": false
     },
     {
       "id": "backend",
@@ -35,7 +37,8 @@
       "prompt": "roles/backend.md",
       "color": "ansi2",
       "icon": "roles/backend",
-      "worktree": true
+      "worktree": true,
+      "on_request": false
     },
     {
       "id": "reviewer",
@@ -51,7 +54,8 @@
       "prompt": "roles/reviewer.md",
       "color": "ansi3",
       "icon": "roles/reviewer",
-      "worktree": false
+      "worktree": false,
+      "on_request": true
     },
     {
       "id": "qa",
@@ -63,7 +67,8 @@
       "prompt": "roles/qa.md",
       "color": "ansi6",
       "icon": "roles/qa",
-      "worktree": true
+      "worktree": true,
+      "on_request": true
     }
   ]
 }

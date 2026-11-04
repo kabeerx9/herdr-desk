@@ -2,6 +2,7 @@ import { div, svg } from "gpui-kit";
 import { h_flex, v_flex, TextareaState, Textarea } from "gpui-base";
 import { spaces, run, notify, exec, shared, setShared } from "herdr";
 import { pill, button, section, empty, card, ago } from "./ui.js";
+import { tasksView, PhaseWatch } from "./tasks.js";
 import { Roles, sessions, startRole, roleTile, cliName, findBriefs, startBrief, sendBrief, fileBrief, sessionsInRepo, folderOf } from "./roles.js";
 
 // The Team tab: one card per role in roles.json, a place to start it, and a task to give it.
@@ -22,6 +23,9 @@ export class Team {
     this.load(cx);
     this.scan(cx);
     cx.timer.every(6000, (cx) => this.scan(cx));
+    // Agents report by changing their phase label; toast each report once.
+    this.watch = new PhaseWatch();
+    cx.timer.every(2500, () => this.watch.check(this.roles));
   }
 
   load(cx) { this.roles.load(cx); }
@@ -159,17 +163,19 @@ export class Team {
     if (error) return v_flex().py(8).child(empty(t, `Couldn't read roles: ${error}`));
     if (!list) return v_flex().py(8).child(empty(t, "Loading roles…"));
     const key = "team-roles", open = !this.panel.collapsed[key];
+    const tasks = tasksView(this, t);
     return v_flex().pb(10)
       .child(this.targetPicker(t))
       .child(div().mx(12).mt(10).mb(6)
         .child(Textarea.new(this.task).w_full().px(10).py(8).rounded(8).border_1().border_color(t.input)
           .bg(t.background).text_size(12.5).text_color(t.foreground)))
+      .when(Boolean(tasks), (el) => el.child(tasks))
       .when(this.briefs.length > 0, (el) => el
         .child(section(t, "team-briefs", "Briefs from the CTO", this.briefs.length, !this.panel.collapsed["team-briefs"], (_e, cx) => this.panel.toggle("team-briefs", cx)))
         .when(!this.panel.collapsed["team-briefs"], (el) => el.child(v_flex().children(this.briefs.map((b) => this.briefCard(t, b))))))
       .child(section(t, key, "Roles", list.length, open, (_e, cx) => this.panel.toggle(key, cx)))
       .when(open, (el) => el.child(v_flex().gap(2).children(list.map((r) => this.roleCard(t, r)))))
       .child(div().mx(16).mt(8).text_size(11).text_color(t.dim).line_height(1.4)
-        .child("Click a role to go to it, or start it if it isn't running. Ask the CTO for a plan and its briefs show up here. Edit roles in mods/desk/roles.json."));
+        .child("Give the CTO a task: it briefs and starts the engineers, and they show up under Tasks. Reviews, QA and PRs happen only when you ask. Edit roles in mods/desk/roles.json."));
   }
 }

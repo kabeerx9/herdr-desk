@@ -1,0 +1,313 @@
+#!/usr/bin/env python3
+"""team: start and report for the Desk's role agents (see mods/desk/roles.json).
+
+  team start <role> [--repo DIR] [--brief FILE] [--task TEXT] [--slug SLUG]
+                    [--parent T | --no-parent] [--space ID] [--requested] [--share] [--by WHO]
+  team report <done|blocked|update> "<summary>"
+  team roles
+
+One launcher for everyone (the CTO, the Desk's buttons, you): it reads roles.json,
+gives an editing role its own git worktree when its checkout already has an agent
+in it, and starts the role with hc in its own Herdr tab, labeled role=<id> task=<slug>.
+Children always outlive their parent, so closing the CTO doesn't end its workers.
+"""
+import json, os, re, secrets, shutil, subprocess, sys, time
+
+APP = os.environ.get("HERDR_APP_HOME") or os.path.expanduser("~/.config/herdr-app")
+DESK = os.path.join(APP, "mods", "desk")
+WORKTREES = os.path.expanduser("~/.herdr/worktrees")
+ME = os.environ.get("HC_TERMINAL_ID")
+SELF = os.path.join(APP, "bin", "team")
+
+
+def die(msg, code=1):
+    print(json.dumps({"error": msg}), file=sys.stderr)
+    sys.exit(code)
+
+
+def sh(args, cwd=None, check=False):
+    r = subprocess.run(args, cwd=cwd, capture_output=True, text=True)
+    if check and r.returncode != 0:
+        die(f"{' '.join(args[:3])}… failed: {(r.stderr or r.stdout).strip()}")
+    return r
+
+
+def hc_json(*args):
+    r = sh(["hc", *args, "--json"])
+    if r.returncode != 0:
+        return None
+    try:
+        return json.loads(r.stdout)
+    except ValueError:
+        return None
+
+
+def load_roles():
+    with open(os.path.join(DESK, "roles.json")) as f:
+        roles = json.load(f)["roles"]
+    try:
+        with open(os.path.join(DESK, "roles", "protocol.md")) as f:
+            protocol = f.read().strip()
+    except OSError:
+        protocol = ""
+    for r in roles:
+        r.setdefault("id", r["name"].lower())
+        text = ""
+        if r.get("prompt"):
+            with open(os.path.join(DESK, r["prompt"])) as f:
+                text = f.read().strip()
+        r["promptText"] = "\n\n".join(p for p in (text, protocol) if p)
+    return roles
+
+
+def argv_for(role, task):
+    if isinstance(role.get("argv"), list):
+        return role["argv"] + ([task] if task else [])
+    prompt, extra = role["promptText"], role.get("args", [])
+    if role.get("cli") == "codex":
+        # --no-daemon: otherwise Codex runs its commands outside hc. -c parses TOML;
+        # a JSON string is a valid TOML basic string.
+        base = ["codex", "--no-daemon"] + (["-m", role["model"]] if role.get("model") else [])
+        base += ["-c", "developer_instructions=" + json.dumps(prompt)] if prompt else []
+    else:
+        base = ["claude"] + (["--model", role["model"]] if role.get("model") else [])
+        base += ["--append-system-prompt", prompt] if prompt else []
+    return base + extra + ([task] if task else [])
+
+
+def repo_of(folder):
+    top = sh(["git", "rev-parse", "--show-toplevel"], cwd=folder)
+    common = sh(["git", "rev-parse", "--path-format=absolute", "--git-common-dir"], cwd=folder)
+    if top.returncode or common.returncode:
+        return None
+    common = common.stdout.strip()
+    main = common[:-5] if common.endswith("/.git") else common
+    return {"top": top.stdout.strip(), "main": main, "common": common, "name": os.path.basename(main)}
+
+
+def inside(path, d):
+    return bool(path) and (path == d or path.startswith(d.rstrip("/") + "/"))
+
+
+def live_terminals():
+    d = hc_json("ls") or {}
+    items = d.get("terminals", []) if isinstance(d, dict) else d
+    return [t for t in items if isinstance(t, dict) and t.get("state") == "live"]
+
+
+def terminal(t):
+    return hc_json("get", t) or {}
+
+
+AGENT_CLIS = {"claude", "codex", "opencode", "gemini", "pi", "aider", "cursor-agent"}
+
+
+def is_agent(info):
+    """An agent, not a shell: a team role, a reported status, or a known agent CLI in front.
+    (Status stays empty until an agent's first report, e.g. while it shows a trust prompt.)"""
+    if info.get("labels", {}).get("role"):
+        return True
+    if isinstance(info.get("status"), dict) and info["status"].get("app"):
+        return True
+    argv = (info.get("foreground") or {}).get("argv") or []
+    return bool(argv) and os.path.basename(argv[0]) in AGENT_CLIS
+
+
+def accept_trust(name, cli):
+    """Answers the CLI's folder-trust prompt, for a worktree this script just made from a repo
+    already in use. Claude's prompt defaults to "No, exit", so it needs down then enter."""
+    for _ in range(40):
+        # Once the agent reports a status it's past any trust prompt.
+        st = terminal(name).get("status")
+        if isinstance(st, dict) and st.get("state"):
+            return False
+        screen = sh(["hc", "read", "--lines", "0", name]).stdout
+        if cli == "codex" and "Trust this folder?" in screen:
+            sh(["hc", "keys", name, "enter"])
+            return True
+        if cli != "codex" and "Yes, I trust this folder" in screen:
+            sh(["hc", "keys", name, "down", "enter"])
+            return True
+        time.sleep(0.5)
+    return False
+
+
+def editors_in(checkout, roles):
+    """Live agents working in this checkout, except read-only roles (worktree: false)."""
+    read_only = {r["id"] for r in roles if not r.get("worktree")}
+    busy = []
+    for t in live_terminals():
+        info = terminal(t["address"])
+        if not is_agent(info):
+            continue
+        cwd = (info.get("foreground") or {}).get("cwd") or info.get("cwd")
+        if inside(cwd, checkout) and info.get("labels", {}).get("role") not in read_only:
+            busy.append(t["address"])
+    return busy
+
+
+def add_worktree(repo, role):
+    stamp = time.strftime("%m%d-%H%M%S")
+    branch = f"team/{role['id']}-{stamp}"
+    path = os.path.join(WORKTREES, repo["name"], re.sub(r"[^A-Za-z0-9._-]+", "-", branch))
+    sh(["git", "worktree", "add", "-b", branch, path, "HEAD"], cwd=repo["top"], check=True)
+    return path, branch
+
+
+def unique_name(base):
+    base = re.sub(r"[^a-z0-9_-]+", "-", base.lower()).strip("-")[:28] or "role"
+    taken = {t.get("name") for t in live_terminals()}
+    name, n = base, 2
+    while name in taken:
+        name, n = f"{base[:26]}-{n}", n + 1
+    return name
+
+
+def file_brief(path, role_id):
+    """Moves a queued brief to team/sent/ so it's handed off once; returns where it went."""
+    d = os.path.dirname(path)
+    if os.path.basename(d) != "briefs":
+        return path
+    sent = os.path.join(os.path.dirname(d), "sent")
+    os.makedirs(sent, exist_ok=True)
+    dest = os.path.join(sent, f"{role_id}-{int(time.time() * 1000)}.md")
+    shutil.move(path, dest)
+    return dest
+
+
+def rename_tab(tab, name):
+    # The app sees a new labeled terminal within a moment; retry until its tab exists.
+    for _ in range(12):
+        r = sh(["herdr-app", "do", "tab.rename", json.dumps({"id": tab, "name": name})])
+        try:
+            if r.returncode == 0 and json.loads(r.stdout).get("ok"):
+                return True
+        except ValueError:
+            pass
+        time.sleep(0.25)
+    return False
+
+
+def start(args):
+    roles = load_roles()
+    role = next((r for r in roles if r["id"] == args.role or r["name"].lower() == args.role.lower()), None)
+    if not role:
+        die(f"no role {args.role!r}; known: {', '.join(r['id'] for r in roles)}")
+    if role.get("on_request") and not args.requested:
+        die(f"{role['name']} starts only when Kabeer asks for it. If Kabeer did, pass --requested.", 2)
+
+    folder = os.path.abspath(os.path.expanduser(args.repo or os.getcwd()))
+    need_core()
+    me = terminal(ME) if ME else {}
+    caller_labels = me.get("labels", {})
+    slug = args.slug or caller_labels.get("task") or f"{role['id']}-{time.strftime('%m%d-%H%M')}"
+    slug = re.sub(r"[^a-z0-9_-]+", "-", slug.lower()).strip("-")[:40]
+
+    note, branch = None, None
+    repo = repo_of(folder)
+    if role.get("worktree") and repo and not args.share:
+        busy = editors_in(repo["top"], roles)
+        if busy:
+            folder, branch = add_worktree(repo, role)
+            note = f"own worktree on {branch} (from HEAD; uncommitted changes in {repo['name']} aren't in it)"
+
+    task = args.task or ""
+    if args.brief:
+        brief = file_brief(os.path.abspath(os.path.expanduser(args.brief)), role["id"])
+        task = (f"Your brief is in {brief}. Read it, then carry it out within the files and contract it gives you. "
+                + task).strip()
+    if task:
+        task += f"\n\n(Team task: {slug}. Report with `{SELF} report done|blocked \"<summary>\"` when done or stuck.)"
+
+    space = args.space or caller_labels.get("herdr.space") or "spteam" + secrets.token_hex(8)
+    tab = "tb" + secrets.token_hex(16)
+    name = unique_name(f"{role['id']}-{slug}")
+    cmd = ["hc", "run", "--bg", "--outlive-parent", "--name", name, "--cwd", folder,
+           "--label", f"role={role['id']}", "--label", f"task={slug}", "--label", f"by={args.by or ME or 'shell'}",
+           "--label", f"herdr.space={space}", "--label", f"herdr.tab={tab}"]
+    cmd += ["--no-parent"] if args.no_parent else (["--parent", args.parent] if args.parent else [])
+    cmd += ["--"] + argv_for(role, task)
+    r = sh(cmd)
+    if r.returncode != 0:
+        die(f"hc run failed: {(r.stderr or r.stdout).strip()}")
+    try:
+        launched = json.loads(r.stdout)
+    except ValueError:
+        launched = {"raw": r.stdout.strip()}
+
+    # The CTO that fans a task out is part of it too, so the Desk groups them.
+    if ME and caller_labels.get("role") == "cto" and caller_labels.get("task") != slug:
+        sh(["hc", "label", ME, f"task={slug}"])
+    renamed = rename_tab(tab, role["name"])
+    trusted = accept_trust(name, role.get("cli")) if branch else None
+    print(json.dumps({"address": launched.get("address"), "name": name, "role": role["id"], "task": slug,
+                      "cwd": folder, "branch": branch, "note": note, "tab": tab, "tab_named": renamed, "trust_accepted": trusted,
+                      "hint": "A trust prompt in a new folder shows as 'Needs you'; its task runs once accepted."}))
+
+
+SANDBOX_HINT = ("hc can't reach herdr-core from here. If you're in a sandbox (Codex's blocks hc's socket), "
+                "rerun this exact command with escalated permissions / outside the sandbox.")
+
+
+def need_core():
+    r = sh(["hc", "get", ME or "self", "--json"]) if ME else sh(["hc", "server", "status"])
+    if r.returncode != 0:
+        die(f"{SANDBOX_HINT} ({(r.stderr or r.stdout).strip()[:160]})", 3)
+
+
+def report(args):
+    if not ME:
+        die("team report runs inside an hc terminal ($HC_TERMINAL_ID is unset)")
+    need_core()
+    me = terminal(ME)
+    labels = me.get("labels", {})
+    text = " ".join(args.text).strip()
+    if not text:
+        die("say what happened: team report done \"<what changed, what you verified>\"")
+    lr = sh(["hc", "label", ME, f"phase={args.kind}", f"note={text[:240]}"])
+    if lr.returncode != 0:
+        die(f"couldn't record the report: {(lr.stderr or lr.stdout).strip()[:200]}", 3)
+    who = labels.get("role") or me.get("name") or ME
+    sent = False
+    parent = me.get("parent")
+    if parent and (terminal(parent).get("state") == "live"):
+        r = sh(["hc", "send", parent, f"[{who} {args.kind}] {text}"])
+        sent = r.returncode == 0
+        if not sent:
+            print(json.dumps({"warning": f"recorded, but not delivered to {parent}: {(r.stderr or r.stdout).strip()[:200]}"}), file=sys.stderr)
+    cwd = (me.get("foreground") or {}).get("cwd") or me.get("cwd")
+    repo = repo_of(cwd) if cwd else None
+    if repo:
+        log = os.path.join(repo["common"], "team", "log.jsonl")
+        os.makedirs(os.path.dirname(log), exist_ok=True)
+        with open(log, "a") as f:
+            f.write(json.dumps({"at": int(time.time() * 1000), "from": who, "address": ME, "kind": args.kind,
+                                "task": labels.get("task"), "text": text}) + "\n")
+    print(json.dumps({"ok": True, "phase": args.kind, "sent_to_parent": parent if sent else None}))
+
+
+def main():
+    import argparse
+    p = argparse.ArgumentParser(prog="team", description=__doc__.split("\n")[0])
+    sub = p.add_subparsers(dest="cmd", required=True)
+    s = sub.add_parser("start")
+    s.add_argument("role")
+    s.add_argument("--repo"); s.add_argument("--brief"); s.add_argument("--task"); s.add_argument("--slug")
+    s.add_argument("--parent"); s.add_argument("--no-parent", action="store_true")
+    s.add_argument("--space"); s.add_argument("--requested", action="store_true"); s.add_argument("--by")
+    s.add_argument("--share", action="store_true", help="work in --repo as is, never a new worktree")
+    r = sub.add_parser("report")
+    r.add_argument("kind", choices=["done", "blocked", "update"])
+    r.add_argument("text", nargs="+")
+    sub.add_parser("roles")
+    args = p.parse_args()
+    if args.cmd == "start":
+        start(args)
+    elif args.cmd == "report":
+        report(args)
+    else:
+        print(json.dumps([{k: r.get(k) for k in ("id", "name", "cli", "model", "worktree", "on_request")} for r in load_roles()]))
+
+
+if __name__ == "__main__":
+    main()

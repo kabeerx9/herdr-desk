@@ -1,25 +1,12 @@
-import { agents, panes, spaces, run, notify, appHome, home, readTextFile, exec, hc } from "herdr";
+import { agents, terminals, panes, spaces, run, notify, appHome, home, readTextFile, exec, hc } from "herdr";
 
 // Team roles from roles.json, shared by the Team tab, the sidebar and the PR buttons.
-// Starting a role opens a tab named after it, so its live agents are the ones in
-// tabs with that name.
+// Every role starts through bin/team (the same launcher the CTO uses), which labels
+// its terminal role=<id> task=<slug> and gives it its own tab.
 const FILE = "mods/desk/roles.json";
 export const RANK = { blocked: 0, done: 1, working: 2, idle: 3 };
-// Herdr's own worktree mod puts checkouts here, so they show up in its picker too.
+const TEAM = () => `${appHome()}/bin/team`;
 const WORKTREES = () => `${home()}/.herdr/worktrees`;
-
-// What starts a role: the CLI, its model, and the role prompt as a system prompt.
-function argvFor(role) {
-  if (Array.isArray(role.argv)) return role.argv;
-  const prompt = role.promptText, extra = role.args ?? [];
-  if (role.cli === "codex") {
-    // -c values parse as TOML; a JSON string is a valid TOML basic string.
-    return ["codex", ...(role.model ? ["-m", role.model] : []),
-      ...(prompt ? ["-c", `developer_instructions=${JSON.stringify(prompt)}`] : []), ...extra];
-  }
-  return ["claude", ...(role.model ? ["--model", role.model] : []),
-    ...(prompt ? ["--append-system-prompt", prompt] : []), ...extra];
-}
 
 export const cliName = (role) => (role.cli === "codex" ? "Codex" : !role.cli || role.cli === "claude" ? "Claude Code" : role.cli);
 const inside = (path, dir) => Boolean(path) && (path === dir || path.startsWith(dir + "/"));
@@ -27,7 +14,7 @@ const inside = (path, dir) => Boolean(path) && (path === dir || path.startsWith(
 export class Roles {
   constructor() { this.list = null; this.error = null; this.raw = null; }
 
-  // Re-reads roles.json (and the prompts) when it changed; cheap enough to poll.
+  // Re-reads roles.json when it changed; cheap enough to poll. (bin/team reads the prompts.)
   load(cx) {
     cx.spawn(async (cx) => {
       try {
@@ -35,11 +22,7 @@ export class Roles {
         if (text === this.raw) return;
         this.raw = text;
         if (text === null) throw new Error(`${FILE} not found`);
-        const roles = JSON.parse(text).roles ?? [];
-        this.list = await Promise.all(roles.map(async (r) => ({
-          ...r,
-          promptText: r.prompt ? (await readTextFile(`${appHome()}/mods/desk/${r.prompt}`))?.trim() ?? null : null,
-        })));
+        this.list = (JSON.parse(text).roles ?? []).map((r) => ({ ...r, id: r.id ?? r.name.toLowerCase() }));
         this.error = null;
       } catch (e) {
         this.error = String(e?.message ?? e);
@@ -48,53 +31,24 @@ export class Roles {
     });
   }
 
-  byId(id) { return this.list?.find((r) => (r.id ?? r.name.toLowerCase()) === id) ?? null; }
+  byId(id) { return this.list?.find((r) => r.id === id) ?? null; }
 }
 
-// A role's live agents, most urgent first.
-export function sessions(role, list = agents()) {
-  return list.filter((a) => a.tab_name === role.name).sort((x, y) => RANK[x.status] - RANK[y.status] || y.seq - x.seq);
+// Live terminals' labels by address.
+export function labelsByAddress() {
+  return new Map(terminals().map((t) => [t.address, t.labels ?? {}]));
 }
 
-// ── git ───────────────────────────────────────────────────────────────────
-
-async function git(cwd, args) {
-  try {
-    const r = await exec("git", args, { cwd });
-    return { ok: r.code === 0, out: r.stdout.trim(), err: r.stderr.trim() };
-  } catch (e) { return { ok: false, out: "", err: String(e?.message ?? e) }; }
+// A role's live agents, most urgent first: labeled role=<id>, or (started before
+// labels) in a tab named after the role.
+export function sessions(role, list = agents(), labels = labelsByAddress()) {
+  return list.filter((a) => {
+    const r = labels.get(a.address)?.role;
+    return r ? r === role.id : a.tab_name === role.name;
+  }).sort((x, y) => RANK[x.status] - RANK[y.status] || y.seq - x.seq);
 }
 
-// The repo a folder is in: this checkout (top), the main one, its name. null outside git.
-export async function repoOf(folder) {
-  if (!folder) return null;
-  const top = await git(folder, ["rev-parse", "--show-toplevel"]);
-  const common = await git(folder, ["rev-parse", "--path-format=absolute", "--git-common-dir"]);
-  if (!top.ok || !common.ok) return null;
-  const main = common.out.endsWith("/.git") ? common.out.slice(0, -5) : common.out;
-  return { top: top.out, main, common: common.out, name: main.split("/").pop() };
-}
-
-// Agents that may be editing files in `checkout`. Roles marked "worktree": false
-// (CTO, Reviewer: they read, plan and review) don't count.
-function editorsIn(checkout, roles) {
-  const cwd = new Map(panes().map((p) => [p.pane, p.cwd]));
-  const readOnly = new Set((roles ?? []).filter((r) => !r.worktree).map((r) => r.name));
-  return agents().filter((a) => !readOnly.has(a.tab_name) && inside(cwd.get(a.pane), checkout));
-}
-
-// A fresh checkout of HEAD on a new team/<role>-<time> branch.
-async function addWorktree(repo, role) {
-  const d = new Date(), pad = (n) => String(n).padStart(2, "0");
-  const stamp = `${pad(d.getMonth() + 1)}${pad(d.getDate())}-${pad(d.getHours())}${pad(d.getMinutes())}${pad(d.getSeconds())}`;
-  const branch = `team/${role.id ?? role.name.toLowerCase()}-${stamp}`;
-  const path = `${WORKTREES()}/${repo.name}/${branch.replace(/[^A-Za-z0-9._-]+/g, "-")}`;
-  const r = await git(repo.top, ["worktree", "add", "-b", branch, path, "HEAD"]);
-  if (!r.ok) throw new Error(r.err || "git worktree add failed");
-  return { path, branch };
-}
-
-// The folder a role would start in: the project's, else the space's focused terminal.
+// The folder a role would start in: the space's focused terminal, else its folder.
 export function folderOf(space) {
   if (!space) return null;
   const tabs = new Set(space.tabs.map((t) => t.id));
@@ -102,40 +56,31 @@ export function folderOf(space) {
   return (mine.find((p) => p.focused) ?? mine[0])?.cwd ?? space.folder ?? null;
 }
 
-// Starts a role in `space` (default: the shown one) or a new space for `project`.
-// An editing role whose checkout already has an agent in it gets its own worktree.
-export async function startRole(role, { task, project, space, folder, roles } = {}) {
-  if (role.prompt && role.promptText === null) {
-    notify({ title: `${role.name}: prompt missing`, body: role.prompt, level: "error", timeout: 4000 });
-    return false;
+// Runs `team start`; resolves with its JSON, or notifies and resolves null.
+export async function team(args) {
+  let r;
+  try { r = await exec(TEAM(), ["start", ...args, "--by", "desk"]); }
+  catch (e) { r = { code: 1, stdout: "", stderr: String(e?.message ?? e) }; }
+  if (r.code !== 0) {
+    let msg = r.stderr.trim() || r.stdout.trim();
+    try { msg = JSON.parse(msg).error ?? msg; } catch {}
+    notify({ title: "Couldn't start the role", body: msg, level: "error", timeout: 6000 });
+    return null;
   }
+  try { return JSON.parse(r.stdout); } catch { return {}; }
+}
+
+// Starts a role from the Desk: in `space` (default: the shown one), or a new space for `project`.
+export async function startRole(role, { task, project, space, folder } = {}) {
   space = space ?? (project ? null : spaces().find((s) => s.active));
-  folder = folder ?? project?.folder ?? folderOf(space);
-  let note = role.label ?? role.model ?? cliName(role);
-  if (role.worktree && folder) {
-    const repo = await repoOf(folder);
-    const busy = repo ? editorsIn(repo.top, roles) : [];
-    if (busy.length) {
-      try {
-        const wt = await addWorktree(repo, role);
-        folder = wt.path;
-        note = `Own worktree: ${wt.branch} (from HEAD; uncommitted changes in ${repo.name} aren't in it)`;
-      } catch (e) {
-        notify({ title: `${role.name}: no worktree`, body: String(e?.message ?? e), level: "error", timeout: 6000 });
-        return false;
-      }
-    }
-  }
-  const argv = argvFor(role);
-  if (space) {
-    run("space.select", { id: space.id });
-    run("tab.new", { space: space.id, name: role.name, ...(folder ? { folder } : {}), argv, task });
-  } else if (project) {
-    run("space.new", { name: project.name, folder, tab: role.name, argv, task });
-  } else {
-    run("tab.new", { name: role.name, ...(folder ? { folder } : {}), argv, task });
-  }
-  notify({ title: `${role.name} started`, body: note, level: "info", timeout: 4000 });
+  folder = folder ?? project?.folder ?? folderOf(space) ?? home();
+  const args = [role.id, "--repo", folder, "--no-parent", "--requested"];
+  if (space && !space.machine) args.push("--space", space.id);
+  if (task) args.push("--task", task);
+  const out = await team(args);
+  if (!out) return false;
+  if (space) run("space.select", { id: space.id });
+  notify({ title: `${role.name} started`, body: out.note ?? role.label ?? role.model ?? cliName(role), level: "info", timeout: 4000 });
   return true;
 }
 
@@ -174,20 +119,20 @@ export async function fileBrief(brief, to) {
   return dest;
 }
 
-const briefTask = (path) => `Your brief from the CTO is in ${path}. Read it, then carry it out within the files and contract it gives you.`;
-
-// Starts the brief's role in the brief's repo (a worktree if it's busy).
+// Starts the brief's role in the brief's repo (bin/team moves the brief to sent/).
 export async function startBrief(brief, roles, space) {
   const role = roles.byId(brief.role);
   if (!role) return notify({ title: `No role "${brief.role}"`, body: "Brief file names must match a role id in roles.json.", level: "error", timeout: 5000 });
-  const sent = await fileBrief(brief, "sent");
-  await startRole(role, { task: briefTask(sent), folder: brief.main, space, roles: roles.list });
+  const args = [role.id, "--repo", brief.main, "--brief", brief.path, "--no-parent", "--requested"];
+  if (space && !space.machine) args.push("--space", space.id);
+  const out = await team(args);
+  if (out) notify({ title: `${role.name} started`, body: out.note ?? brief.title, level: "info", timeout: 4000 });
 }
 
 // Hands the brief to a running agent of its role instead.
 export async function sendBrief(brief, agent) {
   const sent = await fileBrief(brief, "sent");
-  const r = await hc(["send", agent.address, briefTask(sent)]);
+  const r = await hc(["send", agent.address, `Your brief is in ${sent}. Read it, then carry it out within the files and contract it gives you.`]);
   if (r.code !== 0) throw new Error(r.stderr.trim() || "hc send failed");
   run("agent.focus", { terminal: agent.address });
 }

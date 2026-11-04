@@ -6,6 +6,11 @@
 !/keys.json
 !/settings.json
 
+# The team launcher the Desk and its agents share.
+!/bin/
+/bin/*
+!/bin/team
+
 !/layouts/
 /layouts/*
 !/layouts/desk.json
