@@ -70,13 +70,16 @@ export async function team(args) {
   try { return JSON.parse(r.stdout); } catch { return {}; }
 }
 
+// A task's thread name from its first words: "Add cursor pagination to picks" → add-cursor-pagination-to-picks.
+const slugOf = (task) => task.toLowerCase().replace(/[^a-z0-9\s-]/g, " ").split(/\s+/).filter(Boolean).slice(0, 5).join("-").slice(0, 40);
+
 // Starts a role from the Desk: in `space` (default: the shown one), or a new space for `project`.
 export async function startRole(role, { task, project, space, folder } = {}) {
   space = space ?? (project ? null : spaces().find((s) => s.active));
   folder = folder ?? project?.folder ?? folderOf(space) ?? home();
   const args = [role.id, "--repo", folder, "--no-parent", "--requested"];
   if (space && !space.machine) args.push("--space", space.id);
-  if (task) args.push("--task", task);
+  if (task) args.push("--task", task, "--slug", slugOf(task));
   const out = await team(args);
   if (!out) return false;
   if (space) run("space.select", { id: space.id });

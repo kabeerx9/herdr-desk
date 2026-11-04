@@ -1,6 +1,7 @@
 import { div, svg } from "gpui-kit";
 import { h_flex, v_flex } from "gpui-base";
-import { agents, terminals, panes, run, notify, hc } from "herdr";
+import { agents, terminals, panes, run, notify, hc, setShared } from "herdr";
+import { choose } from "./tabs.js";
 import { pill, button, section } from "./ui.js";
 import { team, roleTile } from "./roles.js";
 
@@ -108,7 +109,8 @@ export function tasksView(owner, t) {
         .child(h_flex().mx(16).mb(4).gap(6).items_center()
           .child(div().min_w(0).truncate().text_size(12).font_semibold().text_color(t.foreground).child(g.slug))
           .child(div().flex_1())
-          .child(div().text_size(11).text_color(t.dim).child(`${done}/${g.rows.length} done`)))
+          .child(div().text_size(11).text_color(t.dim).child(`${done}/${g.rows.length} done`))
+          .child(button(t, `chat-${g.slug}`, "Chat", () => { setShared("desk.chat.task", g.slug); choose("chat"); }, { iconName: "chat", tip: "Open this task's team chat" })))
         .children(g.rows.map(row));
     })));
 }

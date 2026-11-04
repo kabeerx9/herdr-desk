@@ -4,6 +4,8 @@
   team start <role> [--repo DIR] [--brief FILE] [--task TEXT] [--slug SLUG]
                     [--parent T | --no-parent] [--space ID] [--requested] [--share] [--by WHO]
   team report <done|blocked|update> "<summary>"
+  team say "<message>"                      post to your task's team chat
+  team post --task SLUG --to ADDR:ROLE... "<message>"   (the Desk) Kabeer's chat message
   team roles
 
 One launcher for everyone (the CTO, the Desk's buttons, you): it reads roles.json,
@@ -87,6 +89,19 @@ def repo_of(folder):
 
 def inside(path, d):
     return bool(path) and (path == d or path.startswith(d.rstrip("/") + "/"))
+
+
+CHAT = os.path.expanduser("~/.herdr/team")
+
+
+def chat_append(slug, rec):
+    """One thread per task, outside any repo, since a task can span several."""
+    slug = re.sub(r"[^a-z0-9_-]+", "-", (slug or "untracked").lower()).strip("-") or "untracked"
+    os.makedirs(CHAT, exist_ok=True)
+    rec = {"at": int(time.time() * 1000), **rec}
+    with open(os.path.join(CHAT, f"{slug}.jsonl"), "a") as f:
+        f.write(json.dumps(rec) + "\n")
+    return rec
 
 
 def live_terminals():
@@ -226,7 +241,10 @@ def start(args):
            "--label", f"role={role['id']}", "--label", f"task={slug}", "--label", f"by={args.by or ME or 'shell'}",
            "--label", f"herdr.space={space}", "--label", f"herdr.tab={tab}"]
     cmd += ["--no-parent"] if args.no_parent else (["--parent", args.parent] if args.parent else [])
-    cmd += ["--"] + argv_for(role, task)
+    # Through the user's own login + interactive shell: hc's environment lacks what ~/.zshrc sets
+    # up (nvm's node and npm, Android tools). exec swaps the shell for the agent itself.
+    shell = os.environ.get("SHELL") or "/bin/zsh"
+    cmd += ["--", shell, "-lic", 'exec "$@"', "team-role"] + argv_for(role, task)
     r = sh(cmd)
     if r.returncode != 0:
         die(f"hc run failed: {(r.stderr or r.stdout).strip()}")
@@ -238,6 +256,9 @@ def start(args):
     # The CTO that fans a task out is part of it too, so the Desk groups them.
     if ME and caller_labels.get("role") == "cto" and caller_labels.get("task") != slug:
         sh(["hc", "label", ME, f"task={slug}"])
+    starter = caller_labels.get("role") or ("kabeer" if args.by == "desk" else (ME or "shell"))
+    chat_append(slug, {"from": starter, "kind": "start", "role": role["id"], "address": launched.get("address"),
+                       "text": f"Started {role['name']} in {os.path.basename(folder)}" + (f" on {branch}" if branch else "")})
     renamed = rename_tab(tab, role["name"])
     trusted = accept_trust(name, role.get("cli")) if branch else None
     print(json.dumps({"address": launched.get("address"), "name": name, "role": role["id"], "task": slug,
@@ -275,15 +296,46 @@ def report(args):
         sent = r.returncode == 0
         if not sent:
             print(json.dumps({"warning": f"recorded, but not delivered to {parent}: {(r.stderr or r.stdout).strip()[:200]}"}), file=sys.stderr)
-    cwd = (me.get("foreground") or {}).get("cwd") or me.get("cwd")
-    repo = repo_of(cwd) if cwd else None
-    if repo:
-        log = os.path.join(repo["common"], "team", "log.jsonl")
-        os.makedirs(os.path.dirname(log), exist_ok=True)
-        with open(log, "a") as f:
-            f.write(json.dumps({"at": int(time.time() * 1000), "from": who, "address": ME, "kind": args.kind,
-                                "task": labels.get("task"), "text": text}) + "\n")
+    chat_append(labels.get("task"), {"from": who, "address": ME, "kind": args.kind, "text": text})
     print(json.dumps({"ok": True, "phase": args.kind, "sent_to_parent": parent if sent else None}))
+
+
+def say(args):
+    if not ME:
+        die("team say runs inside an hc terminal ($HC_TERMINAL_ID is unset)")
+    need_core()
+    me = terminal(ME)
+    labels = me.get("labels", {})
+    text = " ".join(args.text).strip()
+    if not text:
+        die("nothing to say")
+    chat_append(labels.get("task"), {"from": labels.get("role") or me.get("name") or ME, "address": ME, "kind": "say", "text": text})
+    print(json.dumps({"ok": True, "task": labels.get("task")}))
+
+
+def post(args):
+    """Kabeer's message from the Desk chat: logged, then typed into each recipient."""
+    text = " ".join(args.text).strip()
+    if not text or not args.to:
+        die("post needs --to ADDR:ROLE and a message")
+    targets = [t.split(":", 1) if ":" in t else (t, t) for t in args.to]
+    delivered, failed = [], []
+    note = (f"Kabeer, in the team chat (to {', '.join(r for _, r in targets)}): {text}\n\n"
+            "(Answer in the chat with `" + SELF + " say \"...\"`, then do what's asked.)")
+    for addr, role in targets:
+        r = sh(["hc", "send", addr, note])
+        if r.returncode == 0:
+            delivered.append(role)
+        else:
+            why = (r.stderr or r.stdout).strip()
+            try:
+                why = json.loads(why)["error"]["message"]
+            except (ValueError, KeyError, TypeError):
+                pass
+            failed.append({"role": role, "why": why[:160]})
+    rec = chat_append(args.task, {"from": "kabeer", "kind": "say", "to": [r for _, r in targets], "text": text,
+                                  "delivered": delivered, "failed": failed})
+    print(json.dumps(rec))
 
 
 def main():
@@ -299,12 +351,22 @@ def main():
     r = sub.add_parser("report")
     r.add_argument("kind", choices=["done", "blocked", "update"])
     r.add_argument("text", nargs="+")
+    y = sub.add_parser("say")
+    y.add_argument("text", nargs="+")
+    q = sub.add_parser("post")
+    q.add_argument("--task", required=True)
+    q.add_argument("--to", action="append", default=[])
+    q.add_argument("text", nargs="+")
     sub.add_parser("roles")
     args = p.parse_args()
     if args.cmd == "start":
         start(args)
     elif args.cmd == "report":
         report(args)
+    elif args.cmd == "say":
+        say(args)
+    elif args.cmd == "post":
+        post(args)
     else:
         print(json.dumps([{k: r.get(k) for k in ("id", "name", "cli", "model", "worktree", "on_request")} for r in load_roles()]))
 
