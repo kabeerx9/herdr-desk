@@ -310,7 +310,9 @@ export class DeskCard {
         indent: m.depth * 12, lead: role ? this.glyph(t, role) : div().size(16),
         name: role?.name ?? m.role, meta: quiet ? settledNote(s) : s?.title ?? null, muted: quiet,
         mark: statusMark(t, m.status ?? "idle", 12), actions: [...triageIcons(t, id, this, m.address, quiet), more],
-        onClick: () => openTerminal(m.address), tip: m.note ?? s?.title ?? "Open its terminal",
+        // Its own conversation (a route of this desk); the terminal stays one click away in its actions.
+        onClick: () => { showTerminals(false); setShared("desk.view", d.slug); setShared("desk.route", { task: d.slug, address: m.address }); },
+        tip: m.note ?? s?.title ?? "Open its conversation",
       })];
       const chips = snoozeChips(t, id, this, m.address);
       if (chips) rows.push(chips);
