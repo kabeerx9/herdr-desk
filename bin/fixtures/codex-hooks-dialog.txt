@@ -1,0 +1,15 @@
+╭──────────────────────────────────────────────────────╮
+│ >_ OpenAI Codex (v0.166.0)                           │
+│                                                      │
+│ model:     gpt-5.5-codex high   /model to change     │
+│ directory: ~/Desktop/projects/tattvix                │
+╰──────────────────────────────────────────────────────╯
+
+  Hooks
+
+  ⚠ 2 hooks need review before they can run.
+
+  › SessionStart   team hook session    .codex/hooks.json
+    Stop           team hook stop       .codex/hooks.json
+
+  t trust all · enter review · esc close

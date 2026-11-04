@@ -1,0 +1,7 @@
+• Cleaning the build output before the rebuild.
+
+  Allow command?
+
+  $ rm -rf apps/web/dist
+
+  › Yes (y)    Always (a)    No, provide feedback (n)

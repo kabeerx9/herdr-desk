@@ -961,16 +961,35 @@ def transcript_title(path, cache_path=None, max_scan=8 * 1024 * 1024):
 # What the Desk types into an agent depends on what its terminal shows right now. Claude draws
 # its input box as "❯ text" between two "─" rules; its dialogs (/status, /cost, pickers,
 # permission prompts) replace that box, open with a "▔" border or name their keys ("Esc to
-# cancel"). A dialog takes every key typed into it, so nothing is typed while one is open.
+# cancel"). Codex draws its input as a "›" line near the bottom with only its footer (model,
+# context left) below; its dialogs (hooks review, approvals, /model, folder trust) take that
+# place and end in key hints, often terse ("t trust all · enter review · esc close"). A dialog
+# takes every key typed into it, so nothing is typed while one is open.
 
 RULE = re.compile(r"^[─━]{20,}\s*$")
 TOP_BORDER = re.compile(r"^\s*[▔]{20,}\s*$")
-DIALOG_KEYS = re.compile(r"\besc to (?:cancel|close|exit|go back)\b|\benter to (?:confirm|select)\b|\bpress enter to\b"
-                         r"|↑/↓ to (?:navigate|select)", re.I)
+# A key named with what it does, in either CLI's wording: "Esc to cancel", "Enter to confirm",
+# "enter review", "esc close", "Press enter to continue", "↑/↓ to navigate". Not "esc to
+# interrupt" (a working agent) or "esc again to edit" (Codex's shortcut help): those leave the
+# input usable.
+DIALOG_KEYS = re.compile(r"\b(?:esc|enter|return|space)\s+(?:to\s+)?(?:cancel|close|exit|go back|back|dismiss|confirm|select|choose"
+                         r"|continue|accept|review|submit|skip|toggle)\b|\bpress (?:enter|esc|return|any key)\b|[↑↓]\s*/\s*[↑↓]|↑↓", re.I)
+# A list's focused option ("› 1. Yes, proceed") or a choice's key ("Yes (y)", "[y/n]").
+OPTION_CURSOR = re.compile(r"^\s*[›❯>▶]\s*\d{1,2}[.)]\s+\S")
+CHOICE_KEYS = re.compile(r"\((?:y|n|a|esc)\)|\[y/n\]", re.I)
+# What Codex shows, dimmed, in an empty input (plain text can't tell dim from typed).
+CODEX_PLACEHOLDERS = {"ask codex to do anything", "explain this codebase", "summarize recent commits", "implement {feature}",
+                      "find and fix a bug in @filename", "write tests for @filename", "improve documentation in @filename",
+                      "run /review on my current changes", "use /skills to list available skills"}
+NO_INPUT = "no input line"   # Codex showing something other than its input: a weak sign, see screen_state
 PROMPTS = ("❯", "›")
 CHROME = re.compile(r"^\s*(?:[─━▔▁]{6,}|⏵⏵ .*|◐ .*· /effort|\? for shortcuts.*)\s*$|\besc to (?:cancel|close|exit|go back)\b", re.I)
 DIALOG_TABS = re.compile(r"^\s*Settings\s+Status\s+Config\b")
 DIALOG_OPEN = "has a dialog open in its terminal"
+
+
+def _hinted(line):
+    return bool(DIALOG_KEYS.search(line) or OPTION_CURSOR.match(line) or CHOICE_KEYS.search(line))
 
 
 def _lines(screen):
@@ -991,19 +1010,41 @@ def prompt_box(lines):
     return None
 
 
+def codex_input(lines):
+    """Codex's input line: the index of the last "›" line at column 0 in the bottom rows with only
+    its footer below (a few lines, no key hints, no options), or None. A "›" that marks a list's
+    focused option, or sits above a dialog's key hints, is not it."""
+    for i in range(len(lines) - 1, max(-1, len(lines) - 16), -1):
+        if not lines[i].startswith("›"):
+            continue
+        if OPTION_CURSOR.match(lines[i]) or CHOICE_KEYS.search(lines[i]):
+            return None
+        below = [x for x in lines[i + 1:] if x.strip()]
+        return None if len(below) > 6 or any(_hinted(x) for x in below) else i
+    return None
+
+
 def screen_state(screen, cli="claude"):
     """What an agent's visible screen shows: {"state": "prompt"|"dialog"|"unknown", "input": the
     text sitting in its input box (prompt only), "why": what gave a dialog away}. "unknown" (still
-    starting, a CLI drawn differently) is neither: callers keep their old behaviour for it."""
+    starting, a CLI drawn differently) is neither: callers keep their old behaviour for it.
+    A Codex screen with content but no input line is a dialog ("why": NO_INPUT), so a dialog
+    the Desk has never seen is still not typed into."""
     lines = [x.rstrip() for x in _lines(screen)]
     while lines and not lines[-1].strip():
         lines.pop()
-    box = prompt_box(lines) if cli != "codex" else None
-    if box:
-        top, first, bottom = box
-        text = "\n".join(lines[first:bottom])
-        return {"state": "prompt", "input": text[1:].strip() if text.startswith("❯") else text.strip(), "why": None}
     tail = lines[-24:]
+    if cli == "codex":
+        i = codex_input(tail)
+        if i is not None:
+            text = tail[i][1:].strip()
+            return {"state": "prompt", "input": "" if text.lower() in CODEX_PLACEHOLDERS else text, "why": None}
+    else:
+        box = prompt_box(lines)
+        if box:
+            top, first, bottom = box
+            text = "\n".join(lines[first:bottom])
+            return {"state": "prompt", "input": text[1:].strip() if text.startswith("❯") else text.strip(), "why": None}
     for line in lines:
         if TOP_BORDER.match(line):
             return {"state": "dialog", "input": None, "why": "a full-screen dialog"}
@@ -1011,10 +1052,10 @@ def screen_state(screen, cli="claude"):
         m = DIALOG_KEYS.search(line)
         if m:
             return {"state": "dialog", "input": None, "why": m.group(0)}
-    if cli == "codex":
-        for line in reversed(tail[-8:]):
-            if line.startswith("›"):
-                return {"state": "prompt", "input": line[1:].strip(), "why": None}
+    if any(OPTION_CURSOR.match(x) or CHOICE_KEYS.search(x) for x in tail):
+        return {"state": "dialog", "input": None, "why": "options to choose from"}
+    if cli == "codex" and sum(1 for x in tail if x.strip()) >= 3:
+        return {"state": "dialog", "input": None, "why": NO_INPUT}
     return {"state": "unknown", "input": None, "why": None}
 
 

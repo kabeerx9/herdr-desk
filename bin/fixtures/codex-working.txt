@@ -1,0 +1,15 @@
+› Run the web type check and tell me what fails
+
+• Ran pnpm --filter web check-types
+  └ > web@0.0.0 check-types /Users/kabeer/Desktop/projects/tattvix/apps/web
+    > tsc --noEmit
+    … +12 lines
+
+• Two errors in apps/web/src/routes/stay.tsx; reading the file.
+
+• Working (14s • esc to interrupt)
+
+
+› Ask Codex to do anything
+
+  ? for shortcuts                                               91% context left

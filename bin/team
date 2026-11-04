@@ -40,7 +40,7 @@ from desk_runtime import find_queue as runtime_find_queue, queue_item as runtime
 from desk_runtime import foreground_agent, recover_interrupted_claims, reorder as runtime_reorder, session_view as runtime_session_view, upsert_session
 from desk_runtime import (classify_launch_failure, find_transcript, gate_verdict, parse_contract, parse_criteria, runner_variants,
                           session_cli, step_text, transcript_timeline, transcript_title, transcript_turns, triage_apply, triage_clear)
-from desk_runtime import DIALOG_OPEN, cleared_transcript, command_result, screen_state
+from desk_runtime import DIALOG_OPEN, NO_INPUT, cleared_transcript, command_result, screen_state
 from desk_runtime import diff_stat, dialog_matches, permission_dialog, pick_option, task_line
 
 APP = os.environ.get("HERDR_APP_HOME") or os.path.expanduser("~/.config/herdr-app")
@@ -440,6 +440,11 @@ def screen_of(addr, history=0):
 
 
 def cli_of(info):
+    """Which CLI draws this terminal's screen: what is running in it first (a runner list can
+    start Codex for a role configured as Claude), else the role's configured CLI."""
+    for cli in ("codex", "claude"):
+        if foreground_agent(info, cli):
+            return cli
     return "codex" if agent_identity(info) == "codex" else "claude"
 
 
@@ -666,13 +671,43 @@ def start(args):
     renamed = rename_tab(tab, role["name"])
     if len(variants) == 1:
         trusted = accept_trust(name, role.get("cli")) if branch else None
+    startup_dialog = None
+    if role.get("cli") == "codex" and launched.get("address"):
+        startup_dialog = watch_startup_dialog(launched["address"])
+        if startup_dialog:
+            chat_append(slug, {"from": role["id"], "address": launched["address"], "kind": "command-note", "dialog": True,
+                               "terminal": True, "startup": True, "why": startup_dialog, "text": f"{role['name']} {DIALOG_OPEN}"})
     print(json.dumps({"address": launched.get("address"), "name": name, "role": role["id"], "task": slug,
                       "cwd": folder, "branch": branch, "note": note, "tab": tab, "tab_named": renamed, "trust_accepted": trusted,
-                      "runner": role.get("runner"), "fallbacks": fallbacks, "contract": contract,
+                      "startup_dialog": startup_dialog, "runner": role.get("runner"), "fallbacks": fallbacks, "contract": contract,
                       "hint": "A trust prompt in a new folder shows as 'Needs you'; its task runs once accepted."}))
 
 
 RUNNER_WATCH = float(os.environ.get("TEAM_RUNNER_WATCH", 12))
+STARTUP_DIALOG_S = float(os.environ.get("TEAM_STARTUP_DIALOG_WATCH", 6))
+
+
+def watch_startup_dialog(address, seconds=None):
+    """A just-started Codex member: what gave away a dialog on its screen (the hooks review, an
+    approval) once it held for two reads in a row, or None. Bounded; ends early once it is working
+    at its input line. Only reads the screen: nothing is pressed, trusted or dismissed. A screen
+    without an input line alone (still drawing) is not enough here."""
+    deadline, last = time.time() + (STARTUP_DIALOG_S if seconds is None else seconds), None
+    while True:
+        info = terminal(address)
+        if info.get("state") and info.get("state") != "live":
+            return None
+        screen = screen_of(address)
+        state = screen_state(screen, "codex")
+        sure = state["state"] == "dialog" and state["why"] != NO_INPUT
+        if sure and last == screen:
+            return state["why"]
+        if state["state"] == "prompt" and last == screen and (info.get("status") or {}).get("state") == "working":
+            return None
+        last = screen if sure or state["state"] == "prompt" else None
+        if time.time() >= deadline:
+            return None
+        time.sleep(0.5)
 
 
 def watch_launch(address, task, seconds=None):
@@ -752,10 +787,13 @@ def report(args):
     if args.kind == "done":
         extra += f"\nEvidence: {evidence}" + (f". Blocking findings: {blocking}" if blocking is not None else "") + (f". HEAD {head[:10]}" if head else "")
     if parent:
-        r = sh(["hc", "send", parent, f"[{who} {args.kind}] {text}{extra}"])
-        sent = r.returncode == 0
+        # Never typed into a dialog open in the parent's terminal: the chat record below still has it.
+        why = dialog_open(parent, terminal(parent))
+        r = None if why else sh(["hc", "send", parent, f"[{who} {args.kind}] {text}{extra}"])
+        sent = bool(r) and r.returncode == 0
         if not sent:
-            print(json.dumps({"warning": f"recorded, but not delivered to {parent}: {(r.stderr or r.stdout).strip()[:200]}"}), file=sys.stderr)
+            why = why or (r.stderr or r.stdout).strip()[:200]
+            print(json.dumps({"warning": f"recorded, but not delivered to {parent}: {why}"}), file=sys.stderr)
     diff = diff_stat(cwd) if args.kind == "done" and cwd else None
     facts = {**({"criteria": criteria} if criteria else {}), **({"evidence": evidence} if args.kind == "done" else {}),
              **({"diff": {**diff, "cwd": cwd}} if diff else {}),
@@ -1110,6 +1148,9 @@ def compact(args):
     status = (info.get("status") or {}).get("state")
     if status in ("working", "blocked"):
         die(f"it's {'working' if status == 'working' else 'waiting on you in its terminal'}; compact once its turn ends")
+    why = dialog_open(info.get("address") or args.address, info)
+    if why:
+        die(why + "; close it there first")
     keep = "keep the task and why decisions made files and commits touched next steps open questions and who is waiting"
     keys = ["/", *"compact", "space", *["space" if c == " " else c for c in keep], "enter"]
     r = sh(["hc", "keys", info.get("address") or args.address, *keys])
@@ -1924,15 +1965,21 @@ def runtime_queue_dispatch_locked(store, _args):
             outcome = "not_sent"
         else:
             why = send_text(target["address"], "[desk chat] Kabeer: " + claimed["text"])
-            outcome = "uncertain" if why else "sent"
-        if why: failures.append({"role": target["role"], "why": why})
+            # A dialog opened since the claim: nothing was typed, so it waits for the dialog to close.
+            outcome = "not_sent" if why and DIALOG_OPEN in why else "uncertain" if why else "sent"
+            if outcome == "not_sent": sh(["hc", "label", target["address"], "awaiting="])
+        if why: failures.append({"role": target["role"], "why": why, **({"dialog": True} if DIALOG_OPEN in why else {})})
         def record_delivery(data):
             item = runtime_find_queue(data, claimed["id"])
             item.setdefault("deliveries", {})[target["address"]] = {"state": outcome, "error": why}
         store.mutate(record_delivery)
     def finish(data):
         item = runtime_find_queue(data, claimed["id"])
-        if failures: item.update(state="uncertain", error="; ".join(x["why"] for x in failures))
+        if failures and len(failures) == len(claimed["targets"]) and all(x.get("dialog") for x in failures):
+            # Nobody got it and every refusal was a dialog: keep it queued until they close.
+            item.update(state="pending", error="; ".join(x["why"] for x in failures))
+            item.pop("claimed_at", None); item.pop("deliveries", None)
+        elif failures: item.update(state="uncertain", error="; ".join(x["why"] for x in failures))
         else:
             item["state"] = "delivered"
             chat_append(item["task"], {"from": "kabeer", "kind": "say", "to": [x["role"] for x in item["targets"]],

@@ -20,6 +20,7 @@
 !/bin/test_desk_transcript.py
 !/bin/test_desk_commands.py
 !/bin/test_desk_approve.py
+!/bin/test_desk_codex.py
 # Real agent screens the command tests classify.
 !/bin/fixtures/
 

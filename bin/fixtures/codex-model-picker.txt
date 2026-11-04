@@ -1,0 +1,6 @@
+  Select Model and Effort
+  Switch the model for this and future Codex CLI sessions
+
+› 1. gpt-5.5-codex (current)   Optimized for coding tasks with many tools.
+  2. gpt-5.5-codex-mini        Cheaper, faster, less capable.
+  3. gpt-5.5                   Broad world knowledge with strong general reasoning.

@@ -1,4 +1,5 @@
 import { div, svg } from "gpui-kit";
+import { renderBlocks } from "./blocks.js";
 import { h_flex, v_flex, TextView } from "gpui-base";
 import { icon, statusMark } from "./ui.js";
 import { contextMeter } from "./model.js";
@@ -91,7 +92,7 @@ export function routeRow(o, t, key, row, { role, now, member }) {
       .when(Boolean(x.tools.failed), (y) => y.child(h_flex().flex_none().gap(4).items_center().child(statusMark(t, "failed", 10)).child(`${x.tools.failed} failed`)))))
     .when(subs.length > 0, (el) => el.child(subagents(o, t, `${id}-subs`, subs, now)))
     .when(Boolean(x.text), (el) => el.child(div().text_size(size).line_height(1.6).text_color(t.foreground)
-      .child(TextView.markdown(`${id}-md`, x.text).selectable(true))));
+      .child(renderBlocks(t, `${id}-md`, x.text, { size, onReply: (text, cx) => { o.input.set_value(text); o.send(cx); } }))));
   return v_flex().id(id).pt(row.grouped ? 8 : o.wide ? 18 : 14)
     .child(h_flex().w_full().items_start().gap(10)
       .child(row.grouped ? div().w(FACE).flex_none() : o.face(t, member?.role ?? role?.id, member?.address, FACE))

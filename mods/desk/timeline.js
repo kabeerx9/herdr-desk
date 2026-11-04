@@ -1,4 +1,5 @@
 import { div, svg } from "gpui-kit";
+import { renderBlocks } from "./blocks.js";
 import { h_flex, v_flex, TextView } from "gpui-base";
 import { button, icon, statusMark } from "./ui.js";
 import { KIND, span, summarizeSteps, thoughtLine, subagentHeader, subStatus, subElapsed, snapshotFor, contextMeter, stepKind } from "./model.js";
@@ -219,7 +220,7 @@ export function messageRow(o, t, slug, row, ctx) {
   const body = v_flex().gap(4)
     .child(div().when(long, (el) => el.max_h(132).overflow_hidden())
       .text_size(aside ? size - 1 : size).line_height(1.6).text_color(aside ? t.muted : t.foreground)
-      .child(TextView.markdown(`${id}-md`, m.text ?? "").selectable(true)))
+      .child(aside ? TextView.markdown(`${id}-md`, m.text ?? "").selectable(true) : renderBlocks(t, `${id}-md`, m.text ?? "", { size, onReply: latest ? (text, cx) => { o.input.set_value(text); o.send(cx); } : null })))
     .when(long, (el) => el.child(div().id(`${id}-more`).text_size(12).text_color(t.accent).cursor_pointer()
       .hover((s) => s.text_color(t.foreground)).on_click((_e, cx) => { o.expanded.add(id); cx.notify(); }).child("Show more")));
 

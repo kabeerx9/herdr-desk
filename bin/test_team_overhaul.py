@@ -58,6 +58,7 @@ class Base(unittest.TestCase):
                         patch.object(team, 'runtime_terminals', lambda: copy.deepcopy(self.info)),
                         patch.object(team, 'terminal', lambda a: copy.deepcopy(self.info.get(a, {}))),
                         patch.object(team, 'wake_queue', lambda: None),
+                        patch.object(team, 'STARTUP_DIALOG_S', 0),
                         patch.object(team, 'unique_name', lambda name: name[:30]),
                         patch.object(team, 'rename_tab', lambda *a: True),
                         patch.dict(os.environ, {'TEAM_CLAUDE_PROJECTS': os.path.join(self.tmp.name, 'projects')})]
