@@ -15,6 +15,7 @@
   team hook claude-permission               (Claude's PermissionRequest hook) asks in the desk chat, waits for Allow/Deny
   team permit --task SLUG <id> allow|always|deny [--message TEXT]   (the Desk's buttons) answer a pending permission request
   team new-desk [--name NAME] [--repo DIR]  a desk: an independent team with its own thread; prints its slug
+  team join --task SLUG --address T --role R   (the Desk) bring an agent you started yourself into a desk
   team compact --address T                  a long context: Claude's /compact (same session, history summarized)
   team fresh --address T [--force]          or a new session: it writes a handoff, then a new one of it takes over
   team roles
@@ -387,6 +388,10 @@ def start(args):
     else:
         chat_append(slug, {"from": starter, "kind": "start", "role": role["id"], "address": launched.get("address"),
                            "text": f"Started {role['name']} in {os.path.basename(folder)}" + (f" on {branch}" if branch else "")})
+        if starter == "kabeer":
+            tell_cto(slug, f"Kabeer added {role['name']} ({launched.get('address')}) to the desk"
+                     + (f", working in {os.path.basename(folder)}" + (f" on {branch}" if branch else "") + "." if folder else "."),
+                     skip=launched.get("address"))
     renamed = rename_tab(tab, role["name"])
     trusted = accept_trust(name, role.get("cli")) if branch else None
     print(json.dumps({"address": launched.get("address"), "name": name, "role": role["id"], "task": slug,
@@ -890,6 +895,51 @@ def post(args):
     print(json.dumps(rec))
 
 
+def tell_cto(slug, text, skip=None):
+    """A heads-up to the desk's CTO, typed in now rather than left for its next inbox check.
+    No reply is expected (nothing is marked awaiting)."""
+    cto = next((t for t in desk_members(slug) if t["labels"].get("role") == "cto" and t["address"] not in (skip, ME)), None)
+    if cto:
+        send_text(cto["address"], f"[desk chat] {text} No reply needed.")
+    return cto
+
+
+def join(args):
+    """Brings a terminal Kabeer started outside the desk (a plain `claude` in a tab) into a desk: labels it
+    role/task like a started member, tells it how the desk works, and tells the CTO."""
+    need_core()
+    info = terminal(args.address)
+    if not info or info.get("state") != "live":
+        die(f"{args.address} isn't a live terminal")
+    addr = info.get("address") or args.address
+    labels = info.get("labels") or {}
+    if labels.get("role") and labels.get("task"):
+        die(f"{addr} is already in desk {labels['task']}")
+    if not os.path.exists(os.path.join(CHAT, f"{args.task}.jsonl")):
+        die(f"no desk {args.task}")
+    role = next((r for r in load_roles() if r["id"] == args.role), None)
+    if not role:
+        die(f"no role {args.role}")
+    if role["id"] == "cto" and any(t["labels"].get("role") == "cto" for t in desk_members(args.task)):
+        die("this desk has a CTO already")
+    r = sh(["hc", "label", addr, f"role={role['id']}", f"task={args.task}", "by=kabeer"])
+    if r.returncode != 0:
+        die(f"couldn't label {addr}: {(r.stderr or r.stdout).strip()[:160]}")
+    # It wasn't started by team, so it has no end-of-turn hook: its replies aren't posted for it.
+    note = (f"[desk chat] Kabeer added you to desk `{args.task}` as {role['name']}. The team tool is `{SELF}` "
+            f"and the protocol is `{os.path.join(DESK, 'roles', 'protocol.md')}`: read it once. One difference for you: "
+            f"you joined mid-session, so your replies are NOT posted to the chat for you. Answer Kabeer's `[desk chat]` "
+            f"messages with `team say \"...\"`, another agent's question with `team answer <id> \"...\"`, and use "
+            f"`team report done|blocked \"...\"` when you finish or get stuck. No reply needed to this message.")
+    why = send_text(addr, note)
+    rec = chat_append(args.task, {"from": "kabeer", "kind": "start", "role": role["id"], "address": addr,
+                                  "text": f"Added {role['name']} ({addr}), an agent started outside the desk"})
+    cto = tell_cto(args.task, f"Kabeer added {role['name']} ({addr}) to the desk: an agent Kabeer started outside the desk, "
+                              f"so it replies with `team say` rather than automatically. Reach it with `team ask {role['id']}`.",
+                   skip=addr) if role["id"] != "cto" else None
+    print(json.dumps({**rec, "told": why is None, "told_cto": bool(cto)}))
+
+
 def new_desk(args):
     name = (args.name or "").strip()
     base = re.sub(r"[^a-z0-9]+", "-", name.lower()).strip("-")[:40] or f"desk-{time.strftime('%m%d-%H%M')}"
@@ -1120,6 +1170,8 @@ def main():
     fi.add_argument("--address"); fi.add_argument("--keep-open", action="store_true")
     fi.add_argument("--keep-worktree", action="store_true", help="close the agent once nothing is uncommitted; keep its branch")
     fi.add_argument("--force", action="store_true", help="wrap up even while it's working")
+    jn = sub.add_parser("join")
+    jn.add_argument("--task", required=True); jn.add_argument("--address", required=True); jn.add_argument("--role", required=True)
     nd = sub.add_parser("new-desk")
     nd.add_argument("--name"); nd.add_argument("--repo")
     me_ = sub.add_parser("measure")
@@ -1161,6 +1213,8 @@ def main():
         fresh(args)
     elif args.cmd == "new-desk":
         new_desk(args)
+    elif args.cmd == "join":
+        join(args)
     else:
         print(json.dumps([{k: r.get(k) for k in ("id", "name", "cli", "model", "worktree", "on_request")} for r in load_roles()]))
 

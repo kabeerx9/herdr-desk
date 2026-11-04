@@ -6,7 +6,7 @@
 
 import { View, div, svg, image } from "gpui-kit";
 import { v_flex, h_flex } from "gpui-base";
-import { spaces, machines, panes, run, openOverlay, closeOverlay, props, pickFolder, exec, hc, theme, shared, setShared, watchFolder, window, layout, agents, terminals, setAgentOrder, readTextFile, appHome } from "herdr";
+import { spaces, machines, panes, run, openOverlay, closeOverlay, props, pickFolder, exec, hc, theme, shared, setShared, watchFolder, window, layout, agents, terminals, setAgentOrder, readTextFile, appHome, notify } from "herdr";
 
 function find(node, id) {
   if (node?.id === id) return node;
@@ -85,10 +85,6 @@ function roleTile(t, role, size, dim) {
   return h_flex().size(size).flex_none().rounded(5).items_center().justify_center().bg(color + "26").text_color(color)
     .text_size(Math.round(size * 0.5)).font_semibold().child(role.name[0].toUpperCase());
 }
-function programTile(t, p, size) {
-  if (!p?.icon) return svg("mods/desk/icons/terminal.svg").size(size - 4).flex_none().text_color(t.dim);
-  return p.tint ? svg(p.icon).size(size - 4).flex_none().text_color(t.foreground) : image(p.icon).size(size - 4).flex_none();
-}
 
 // Right-click on a space: the ways in (its terminals, a new one, a new desk), then Herdr's own
 // space menu (rename, worktrees, close) under More.
@@ -113,9 +109,40 @@ class SpaceMenu {
   }
 }
 
+// "Add to desk" on an agent started outside one: which role it joins as (bin/team join labels it,
+// tells it how the desk works, and tells the CTO).
+class JoinMenu {
+  render() {
+    const t = theme(), { overlay, address, task, name, roles } = props();
+    const join = (r) => (_e, cx) => {
+      if (this.busy) return;
+      this.busy = r.id;
+      cx.notify();
+      cx.spawn(async () => {
+        const out = await exec(`${appHome()}/bin/team`, ["join", "--task", task, "--address", address, "--role", r.id]);
+        if (out.code !== 0) {
+          let why = out.stderr.trim();
+          try { why = JSON.parse(why).error ?? why; } catch {}
+          notify({ title: "Couldn't add it to the desk", body: why.slice(0, 200), level: "error", timeout: 6000 });
+        }
+        closeOverlay(overlay);
+      });
+    };
+    return v_flex().id("join-menu").w_full().p(4).gap(1).bg(t.popover)
+      .child(div().px(10).pt(6).pb(5).text_size(11.5).text_color(t.dim).truncate().child(`Add ${name} to the desk as`))
+      .children(roles.map((r) => h_flex().id(`jm-${r.id}`).h(30).px(10).gap(9).items_center().rounded(6).cursor_pointer()
+        .text_size(12.5).text_color(t.foreground).hover((s) => s.bg(t.hover)).on_click(join(r))
+        .child(roleTile(t, r, 18, false))
+        .child(div().flex_1().child(r.name))
+        .when(this.busy === r.id, (el) => el.child(svg("mods/workspace-chrome/spinner.svg").size(11).flex_none().spin(900)))));
+  }
+}
+
 export default class Spaces extends View {
   init(_props, cx) {
     if (props()?.spaceMenu) { this.part = new SpaceMenu(); return; }
+    if (props()?.joinMenu) { this.part = new JoinMenu(); return; }
+    this.hoverAgent = null;
     this.git = {}; // where() -> { name, branch, ahead, behind, repo, linked }, null: not a repo
     this.checked = {}; // where() -> when it was last looked at
     this.unsure = new Set(); // where()s git couldn't answer for (a machine away)
@@ -305,27 +332,53 @@ export default class Spaces extends View {
 
   // One agent row: its tile, its role (else program), the worktree branch when it isn't the
   // space's, and its status.
-  agentRow({ a, l }, g, ps, t, last) {
+  // The quiet status of one agent: a spinner while it works, a check when done; "Needs you"
+  // keeps its badge because it's the one you act on.
+  mark(t, status) {
+    if (status === "working") return svg("mods/workspace-chrome/spinner.svg").size(12).flex_none().text_color(t.working).spin(900);
+    if (status === "done") return svg("mods/desk/icons/check.svg").size(12).flex_none().text_color(t.done);
+    return statusBadge(t, status);
+  }
+
+  // One agent under its space, aligned with the space's title. A desk member: its role's avatar
+  // and name. An agent outside the desk: plain, with "Add to desk" on hover when the space has one.
+  agentRow({ a, l }, g, ps, t, desk) {
     const role = l.role ? this.roles.get(l.role) : null;
+    const member = Boolean(role && l.task);
     const pane = ps.find((p) => p.pane === a.pane);
     const branch = pane?.branch && g?.branch && pane.branch !== g.branch ? pane.branch : null;
-    const name = role?.name ?? (l.role || (/^\d+$/.test(a.tab_name) ? a.program?.name || a.title : a.tab_name) || "Agent");
+    const name = role?.name ?? ((/^\d+$/.test(a.tab_name) ? a.title || a.program?.name : a.tab_name) || "Agent");
     const idle = a.status === "idle";
+    const id = `agent-${a.address}`, hovered = this.hoverAgent === id;
     // Focus only means something where terminals show; there it's a raised row in the group.
     const focused = a.focused && (!chatLayout() || shared("deskchat.terminals"));
-    const guide = t.dim + "45", tint = this.groupOn ? t.accent + "12" : t.hover;
-    return h_flex().relative().id(`agent-${a.address}`).h(28).flex_none().pl(37).pr(8).gap(8).items_center().rounded(7).cursor_pointer()
-      .child(div().absolute().left(18).top(0).w(1).bg(guide).when(last, (el) => el.h(14)).when(!last, (el) => el.bottom(0)))
-      .child(div().absolute().left(18).top(14).w(13).h(1).bg(guide))
+    const tint = this.groupOn ? t.accent + "12" : t.hover, sub = this.groupOn ? t.muted : t.dim;
+    const canJoin = !member && desk && !a.space.includes("/");
+    const add = canJoin && hovered ? h_flex().id(`${id}-join`).flex_none().h(20).px(7).items_center().rounded(10)
+      .text_size(11).font_medium().text_color(t.accent).bg(t.accent + "14").hover((s) => s.bg(t.accent + "26"))
+      .on_click((_e, cx) => { cx.stop_propagation(); this.joinMenu(a, name, desk); }).child("Add to desk") : null;
+    return h_flex().id(id).h(28).flex_none().pl(39).pr(6).gap(8).items_center().rounded(7).cursor_pointer()
       .when(focused, (el) => el.bg(t.chrome).border_1().border_color(t.border))
       .when(!focused, (el) => el.hover((s) => s.bg(tint)))
+      .on_hover((h, cx) => { if (h) this.hoverAgent = id; else if (this.hoverAgent === id) this.hoverAgent = null; cx.notify(); })
       .on_click(() => this.openAgent(a, l))
-      .child(role ? roleTile(t, role, 18, idle) : h_flex().size(18).flex_none().items_center().justify_center().child(programTile(t, a.program, 18)))
-      .child(div().min_w(0).flex_shrink_1().truncate().text_size(12.5).text_color(idle ? t.muted : t.foreground).child(name))
-      .when(Boolean(branch), (el) => el.child(h_flex().min_w(0).flex_1().gap(3).items_center().text_size(11).text_color(this.groupOn ? t.muted : t.dim)
+      .when(canJoin, (el) => el.on_mouse_down("right", () => this.joinMenu(a, name, desk)))
+      .child(member ? roleTile(t, role, 16, idle)
+        : h_flex().size(16).flex_none().items_center().justify_center().child(svg("mods/desk/icons/terminal.svg").size(12).text_color(sub)))
+      .child(div().min_w(0).flex_shrink_1().truncate().text_size(12.5)
+        .text_color(member ? (idle ? t.muted : t.foreground) : t.muted).child(name))
+      .when(Boolean(branch), (el) => el.child(h_flex().min_w(0).flex_shrink_1().gap(3).items_center().text_size(11).text_color(sub)
         .child(svg("mods/workspace-chrome/branch.svg").size(10).flex_none()).child(div().min_w(0).truncate().child(branch))))
-      .when(!branch, (el) => el.child(div().flex_1()))
-      .child(statusBadge(t, a.status) ?? div());
+      .child(div().flex_1())
+      .child(add ?? this.mark(t, a.status) ?? div());
+  }
+
+  joinMenu(a, name, desk) {
+    const taken = new Set(desk.roles);
+    const roles = [...this.roles.entries()].map(([id, r]) => ({ id, name: r.name, avatar: r.avatar, color: r.color }))
+      .filter((r) => !(r.id === "cto" && taken.has("cto")));
+    openOverlay({ mod: "desk-spaces", kind: "popup", width: 230, height: 40 + roles.length * 31,
+      props: { joinMenu: true, address: a.address, task: desk.slug, name, roles } });
   }
 
   // A new session in desk-chat: pick a folder and the main chat starts a desk there with the CTO
@@ -377,7 +430,14 @@ export default class Spaces extends View {
       const kids = spaceAgents(r.w, all, labels);
       order.push(...kids.map((k) => k.a.address));
       if (collapsed) return [this.compact(r, t)];
-      return [this.row({ ...r, kids: kids.length }, t), ...kids.map((k, n) => this.agentRow(k, r.g, ps, t, n === kids.length - 1))];
+      const members = kids.filter((k) => k.l.role && k.l.task), outside = kids.filter((k) => !(k.l.role && k.l.task));
+      // The space's desk (its members' task), so an outside agent can be added to it.
+      const desk = members.length ? { slug: members[0].l.task, roles: members.map((k) => k.l.role) } : null;
+      const divider = div().pl(39).pt(6).pb(2).h(24).flex_none().text_size(10.5).text_color(this.groupOn ? t.muted : t.dim).child("Not in a desk");
+      return [this.row({ ...r, kids: kids.length }, t),
+        ...members.map((k) => this.agentRow(k, r.g, ps, t, desk)),
+        ...(desk && outside.length ? [divider] : []),
+        ...outside.map((k) => this.agentRow(k, r.g, ps, t, desk))];
     };
     const groups = (list) => {
       if (collapsed) return list.flatMap(draw);

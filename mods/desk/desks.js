@@ -270,7 +270,7 @@ export class Desks {
     const space = this.spaceFor(d.folder);
     // With a CTO in the desk, newcomers report to it (and it can wait on them).
     const cto = role.id !== "cto" && this.members(d.slug).find((m) => m.role === "cto");
-    const args = [role.id, "--repo", d.folder ?? home(), "--slug", d.slug, ...(cto ? ["--parent", cto.address] : ["--no-parent"]), "--requested"];
+    const args = [role.id, "--repo", d.folder ?? home(), "--slug", d.slug, ...(cto ? ["--parent", cto.address] : ["--no-parent"]), "--requested", "--by", "desk"];
     if (space) args.push("--space", space.id);
     if (task) args.push("--task", task);
     const out = await team(args);
