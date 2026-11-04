@@ -33,3 +33,8 @@ herdr-app do layout.switch --name desk
 ```
 
 Needs `gh` signed in (PRs and issues), `git`, `python3` (usage limits) and Zed (Open in Zed).
+
+## Permissions
+
+CTO, Frontend and Backend start in Claude's `auto` mode (`permission_mode` in `mods/desk/roles.json`). When one of them would ask you something in its terminal, a `PermissionRequest` hook (`team hook claude-permission`) also puts the request in the desk chat, above the message box, with Claude's own choices: Yes; Yes, and don't ask again for the rule Claude suggests; No (whatever you've typed goes with it as the reason). `team permit` writes your answer; the first answer wins, the chat or the terminal. With no answer in 9 minutes it's left to the terminal, and nothing is ever allowed by default. Codex (the Reviewer) can't be answered this way: its terminal prompt shows as "needs you" in the chat.
+

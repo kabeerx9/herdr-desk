@@ -26,7 +26,8 @@
       "icon": "roles/cto",
       "avatar": "avatars/cto.png",
       "worktree": false,
-      "on_request": false
+      "on_request": false,
+      "permission_mode": "auto"
     },
     {
       "id": "frontend",
@@ -52,7 +53,8 @@
       "icon": "roles/frontend",
       "avatar": "avatars/frontend.png",
       "worktree": true,
-      "on_request": false
+      "on_request": false,
+      "permission_mode": "auto"
     },
     {
       "id": "backend",
@@ -78,7 +80,8 @@
       "icon": "roles/backend",
       "avatar": "avatars/backend.png",
       "worktree": true,
-      "on_request": false
+      "on_request": false,
+      "permission_mode": "auto"
     },
     {
       "id": "reviewer",

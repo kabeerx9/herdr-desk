@@ -1,6 +1,6 @@
 import { div, svg } from "gpui-kit";
 import { h_flex, v_flex, TextareaState, Textarea, InputState, Input, TextView } from "gpui-base";
-import { terminals, agents, panes, spaces, exec, home, appHome, readTextFile, watchFolder, notify, run, shared, setShared, hc } from "herdr";
+import { terminals, agents, panes, spaces, exec, home, appHome, readTextFile, watchFolder, notify, run, shared, setShared, hc, playSound } from "herdr";
 import { pill, button, empty, icon, statusBadge } from "./ui.js";
 import { Roles, roleTile, team, folderOf, findBriefs, startBrief, fileBrief } from "./roles.js";
 
@@ -15,7 +15,9 @@ const TEAM = () => `${appHome()}/bin/team`;
 const STATUS = { blocked: "needs you", done: "done", working: "working", idle: "idle" };
 const KIND = { done: ["done", "done"], blocked: ["blocked", "blocked"], update: ["update", "accent"], flag: ["left locally", "blocked"],
   finish: ["wrapped up", "dim"], ask: ["asks", "accent"], answer: ["answers", "done"], route: ["passes on", "accent"], context: ["long context", "blocked"] };
-const EVENTS = ["desk", "start", "fresh", "compact"];
+const EVENTS = ["desk", "start", "fresh", "compact", "permission", "permission-done"];
+// How long bin/team waits on a permission request before Claude asks in its terminal instead.
+const PERMIT_WAIT = 540000;
 const kTokens = (n) => (n >= 1e6 ? `${(n / 1e6).toFixed(1)}M` : `${Math.round(n / 1000)}k`);
 const RANK = { blocked: 0, done: 1, working: 2, idle: 3 };
 // The reading column of the chat when it's the main view (layouts/desk-chat.json).
@@ -187,9 +189,17 @@ export class Desks {
       // Toast what agents say in desks you aren't looking at.
       if (this.toasts && this.counts) for (const d of desks) {
         const before = this.counts[d.slug];
-        if (before === undefined || d.n <= before || (d.slug === this.view && this.onScreen())) continue;
+        if (before === undefined || d.n <= before) continue;
+        const looking = d.slug === this.view && this.onScreen();
         for (const m of parse(await readTextFile(`${DIR()}/${d.slug}.jsonl`)).slice(before)) {
-          if (m.from !== "kabeer" && (m.kind === "say" || m.kind === "flag")) {
+          // A permission request rings even when you're looking: an agent is stopped until you answer.
+          if (m.kind === "permission" && looking) { playSound("blocked"); continue; }
+          if (m.kind === "permission") {
+            playSound("blocked");
+            notify({ title: `${this.roles.byId(m.from)?.name ?? m.from} asks to use ${m.tool} · ${d.name}`, body: `${(m.detail ?? "").slice(0, 140)}\nClick to answer in the chat`,
+              level: "warning", timeout: 15000, action: { name: `desk.open-${d.slug}` } });
+          }
+          if (!looking && m.from !== "kabeer" && (m.kind === "say" || m.kind === "flag")) {
             notify({ title: `${this.roles.byId(m.from)?.name ?? m.from} · ${d.name}`, body: m.text.slice(0, 160), level: m.kind === "flag" ? "warning" : "info", timeout: 6000 });
           }
         }
@@ -251,7 +261,7 @@ export class Desks {
   sameRepo() {
     const project = this.newTarget && this.panel?.projects?.().find((p) => p.name === this.newTarget);
     const folder = project?.folder ?? folderOf(spaces().find((s) => s.active));
-    const other = folder && this.desks.find((d) => d.folder && (folder.startsWith(d.folder) || d.folder.startsWith(folder)) && this.members(d.slug).length);
+    const other = folder && this.desks.find((d) => d.folder && (folder === d.folder || folder.startsWith(`${d.folder}/`)) && this.members(d.slug).length);
     return other?.name ?? null;
   }
 
@@ -448,7 +458,8 @@ export class Desks {
     const roles = this.roles.list ?? [];
     const here = this.newTarget === null ? folderOf(current) : projects.find((p) => p.name === this.newTarget)?.folder;
     const inside = (a, b) => a === b || a.startsWith(`${b}/`);
-    const earlier = here ? this.desks.filter((d) => d.folder && (inside(here, d.folder) || inside(d.folder, here))) : [];
+    // Desks for this folder, or for the repo it's inside (a worktree, a subfolder); not every desk under ~.
+    const earlier = here ? this.desks.filter((d) => d.folder && inside(here, d.folder)) : [];
     return v_flex().id("desk-new-form").size_full().min_h(0).overflow_y_scrollbar().px(14).pb(14)
       .child(h_flex().pt(10).pb(4).gap(6).items_center()
         .child(button(t, "new-back", null, (_e, cx) => this.go("list", cx), { iconName: "back", tip: "All desks" }))
@@ -493,6 +504,14 @@ export class Desks {
   // of messages; agent-to-agent asides are smaller; long ones fold behind "Show more".
   message(t, m, i, prev) {
     const id = `msg-${i}`;
+    if (m.kind === "permission") {
+      const who = this.roles.byId(m.from)?.name ?? m.from, end = this.permitDone?.get(m.id);
+      const how = !end ? "waiting for you" : end === "allow" ? "you allowed it" : end === "always" ? "you allowed it from now on"
+        : end === "deny" ? "you denied it" : "answered in its terminal";
+      return h_flex().id(id).justify_center().pt(10).pb(2)
+        .child(div().max_w_4_5().truncate().text_size(11).text_color(end === "deny" ? t.blocked : t.dim).tooltip(m.detail ?? "")
+          .child(`${who} asked to use ${m.tool}: ${(m.detail ?? "").split("\n")[0].slice(0, 80)} · ${how} · ${clock(m.at)}`));
+    }
     if (m.kind === "compact") {
       const who = this.roles.byId(m.from)?.name ?? m.from;
       return h_flex().id(id).justify_center().pt(10).pb(2)
@@ -580,6 +599,39 @@ export class Desks {
             tip: offer.status === "working" ? "Once its turn ends" : "Claude's /compact: same session, the history becomes a summary" }))));
   }
 
+  // A permission request, on top of the composer: who, the tool, exactly what (the command, the
+  // file), and the answer. Claude waits on it; with no answer in time it asks in its terminal.
+  permitCard(t, d, m) {
+    const role = this.roles.byId(m.from), id = `pm-${m.id}`, busy = this.acting === id;
+    // Claude's own three: Yes; Yes, and don't ask again for <its rule>; No, and tell it what to do
+    // instead (whatever is in the message box goes with the No).
+    const why = this.input.value().trim();
+    const answer = (decision) => (_e, cx) => this.busy(id, async () => {
+      const r = await exec(TEAM(), ["permit", "--task", d.slug, m.id, decision, ...(decision === "deny" && why ? ["--message", why] : [])]);
+      if (r.code !== 0) throw new Error(r.stderr.trim() || "couldn't answer");
+      if (decision === "deny" && why) this.input.set_value("");
+    }, cx);
+    const left = Math.max(0, Math.round((PERMIT_WAIT - (Date.now() - m.at)) / 60000));
+    const rule = typeof m.always === "string" ? m.always : null;
+    return v_flex().id(id).px(12).py(10).gap(8).rounded(14).border_1().border_color(t.blocked + "59").bg(t.blocked + "0f")
+      .child(h_flex().gap(7).items_center()
+        .child(role ? roleTile(div, svg, t, role, 18) : icon("alert", 15).text_color(t.blocked))
+        .child(div().min_w(0).flex_1().truncate().text_size(12.5).font_medium().text_color(t.foreground)
+          .child(`${role?.name ?? m.from} wants to use ${m.tool}`))
+        .child(div().id(`${id}-left`).flex_none().text_size(11).text_color(t.dim)
+          .tooltip("Then it asks in its terminal instead").child(left ? `${left} min left` : "about to ask in its terminal")))
+      .child(div().id(`${id}-detail`).max_h(110).overflow_y_scrollbar().px(10).py(7).rounded(8).bg(t.background).border_1().border_color(t.border)
+        .text_size(12).line_height(1.45).text_color(t.foreground).child(m.detail ?? ""))
+      .child(h_flex().gap(6).items_center().flex_wrap()
+        .child(button(t, `${id}-allow`, busy ? "Answering…" : "Yes", answer("allow"), { primary: true, disabled: Boolean(this.acting), tip: "Allow this once" }))
+        .when(Boolean(m.always), (el) => el.child(button(t, `${id}-always`, rule ? `Yes, don't ask again for ${rule.length > 40 ? `${rule.slice(0, 40)}…` : rule}` : "Yes, don't ask again",
+          answer("always"), { disabled: Boolean(this.acting), tip: rule ? `Saves Claude's rule: ${rule}` : "Saves the rule Claude suggests" })))
+        .child(button(t, `${id}-deny`, why ? "No, and tell it what you typed" : "No", answer("deny"),
+          { disabled: Boolean(this.acting), tip: why ? `It gets: "${why.slice(0, 80)}"` : "Type in the message box first to tell it what to do instead" }))
+        .child(div().flex_1())
+        .child(button(t, `${id}-term`, "Terminal", () => openTerminal(m.address), { iconName: "terminal", tip: "Look at what it's doing first" })));
+  }
+
   hoverOn(id, on, cx) {
     if (on) this.hoverMsg = id;
     else if (this.hoverMsg === id) this.hoverMsg = null;
@@ -608,7 +660,7 @@ export class Desks {
     return members.filter((m) => m.status === "working" || m.status === "blocked").map((m) => {
       const role = this.roles.byId(m.role), name = role?.name ?? m.role, id = `act-${m.address}`;
       const blocked = m.status === "blocked";
-      const caption = blocked ? "needs you in its terminal" : m.handingOff ? "writing a handoff for a fresh session" : m.awaiting ? "replying" : `working${m.note ? ` · ${m.note}` : ""}`;
+      const caption = blocked ? "needs you in its terminal" : this.waitingFor?.has(m.address) ? "waiting for your answer below" : m.handingOff ? "writing a handoff for a fresh session" : m.awaiting ? "replying" : `working${m.note ? ` · ${m.note}` : ""}`;
       return v_flex().id(id).gap(6).pt(this.wide ? 26 : 18)
         .child(h_flex().h(22).gap(7).items_center()
           .child(this.avatar(t, role, null, 18))
@@ -720,7 +772,13 @@ export class Desks {
     const said = this.messages.some((m) => !EVENTS.includes(m.kind));
     // Consecutive "started X" events by one person read as one line: "You added CTO, Frontend and Backend".
     const shown = [];
+    // Permission requests: how each ended (bin/team's permission-done), and the ones still waiting.
+    this.permitDone = new Map(this.messages.filter((m) => m.kind === "permission-done").map((m) => [m.re, m.decision]));
+    const live = new Set(members.map((m) => m.address));
+    const waiting = this.messages.filter((m) => m.kind === "permission" && !this.permitDone.has(m.id) && live.has(m.address) && Date.now() - m.at < PERMIT_WAIT);
+    this.waitingFor = new Set(waiting.map((m) => m.address));
     for (const m of this.messages) {
+      if (m.kind === "permission-done") continue;
       const last = shown.at(-1);
       if (m.kind === "start" && last?.kind === "start" && last.from === m.from && m.at - last.at < 600000) {
         shown[shown.length - 1] = { ...last, roles: [...(last.roles ?? [last.role]), m.role] };
@@ -751,6 +809,7 @@ export class Desks {
     const text = this.input.value().trim();
     const canSend = Boolean(text) && to.length > 0 && !this.acting;
     const composer = v_flex().px(12).pt(8).pb(this.wide ? 18 : 12).gap(6).when(this.wide, (el) => el.w_full().max_w(COLUMN + 24))
+      .children(waiting.map((m) => this.permitCard(t, d, m)))
       .when(sugg.length > 0, (el) => el.child(h_flex().gap(5).flex_wrap()
         .children(sugg.map((o, i) => this.chip(t, `sg-${o.id}`, i === 0, o.name, (_e, cx) => this.pickMention(o, cx),
           o.id === "all" ? icon("team", 13) : roleTile(div, svg, t, o, 16))))))

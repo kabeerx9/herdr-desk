@@ -25,6 +25,13 @@ export class Rail {
     if (c === "chat") return showTerminals(!shared("deskchat.terminals"));
     // desk.new-here: a fresh desk for the current space, in the chat (what a space click does there).
     if (c === "new-here") { setShared("desk.here", { at: Date.now() }); setShared("desk.view", "new"); return showTerminals(false); }
+    // desk.open-<slug>: that desk's chat (a permission toast's click).
+    if (c.startsWith("open-")) {
+      setShared("desk.view", c.slice(5));
+      if (shared("layout") === "desk-chat") return showTerminals(false);
+      setShared("desk.tab", "desks");
+      return setOpen(true);
+    }
     if (c === "toggle") setOpen(!isOpen());
     else if (TABS.some((t) => t.id === c) && !(isOpen() && currentTab() === c)) choose(c);
   }
