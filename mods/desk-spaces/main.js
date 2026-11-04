@@ -1,7 +1,9 @@
 // Workspace spaces: stable colored avatars, worktrees under their checkout, grouped by
-// machine when more than one is known. Each row: the repo its first terminal is in now
-// (a name you gave the space after it), the branch below with ahead/behind, and on the
-// right its most urgent agent's status (the Desk's badge). Click to switch,
+// machine when more than one is known. Each row is one 28px line: the repo its first terminal
+// is in now (a name you gave the space after it), its branch only when it's off main,
+// ahead/behind only when non-zero, and the Desk's status mark. Its agents hang under it, named
+// by their session's title when the runtime has one; Settle / Snooze on hover put a finished
+// one on the space's Settled shelf. Rows never re-sort under the pointer. Click to switch,
 // right-click for its menu, drag to reorder.
 
 import { View, div, svg, image } from "gpui-kit";
@@ -26,7 +28,7 @@ function place(s, ps) {
   const tabs = new Set((s.tabs ?? []).map((c) => c.id));
   return ps.find((p) => tabs.has(p.tab) && p.cwd)?.cwd || s.folder;
 }
-const rowHeight = ({ tree }) => (tree ? 30 : 42);
+const rowHeight = () => 28;
 const where = (s, ps) => JSON.stringify([s.machine ?? null, place(s, ps)]);
 const base = (path) => path.replace(/\/+$/, "").split("/").pop();
 // Changes made outside Herdr (an editor's save, a commit in another app): looked
@@ -46,17 +48,47 @@ export function tone(t, status) {
   return t[status] ?? t.unknown;
 }
 
-// The Desk's status badge (mods/desk/ui.js), kept the same here: a mod can't import another's files.
-const LABEL = { working: "Working", blocked: "Needs you", done: "Done", idle: "Idle" };
-function statusBadge(t, status) {
-  if (!LABEL[status]) return null;
-  const color = t[status] ?? t.dim;
-  const mark = status === "working" ? svg("mods/workspace-chrome/spinner.svg").size(10).flex_none().spin(900)
-    : status === "blocked" ? div().size(6).rounded(3).flex_none().bg(color).loop("opacity", { from: 0.35, to: 1, period: 1400 })
-    : status === "idle" ? div().size(6).rounded(3).flex_none().bg(color)
-    : svg("mods/desk/icons/check.svg").size(10).flex_none();
-  return h_flex().flex_none().h(20).pl(6).pr(7).gap(4).items_center().rounded(10).bg(color + "1f")
-    .text_size(10.5).font_semibold().text_color(color).child(mark).child(LABEL[status]);
+// The Desk's one status mark set (mods/desk/ui.js statusMark), kept the same here: a mod can't
+// import another's files, but it can draw its icons.
+const MARKS = ["working", "blocked", "done", "idle", "queued", "failed", "disconnected"];
+const MARK_COLOR = { working: "working", blocked: "blocked", done: "done", idle: "dim", queued: "muted", failed: "blocked", disconnected: "dim" };
+function statusMark(t, status, size = 12) {
+  const kind = MARKS.includes(status) ? status : "idle";
+  const el = svg(`mods/desk/icons/marks/${kind}.svg`).size(size).flex_none().text_color(t[MARK_COLOR[kind]] ?? t.dim);
+  if (kind === "working") return el.spin(900);
+  if (kind === "blocked") return el.loop("opacity", { from: 0.45, to: 1, period: 1400 });
+  return el;
+}
+const offMain = (branch) => Boolean(branch) && !["main", "master", "trunk", "HEAD"].includes(branch);
+
+// The Desk runtime (bin/team state, polled by the Desk's rail into shared "desk.runtime"):
+// session titles and settle / snooze. Controls hide until the runtime reports the fields.
+const runtime = () => shared("desk.runtime") ?? { sessions: [] };
+const sessionOf = (address) => (runtime().sessions ?? []).find((s) => s.address === address && s.state !== "finished") ?? null;
+const triageOn = () => !shared("desk.triage.off") && (runtime().sessions ?? []).some((s) => "settled_at" in s || "snoozed_until" in s);
+function putAway(session, status) {
+  if (!session || status === "working" || status === "blocked") return false;
+  return (session.snoozed_until ?? 0) > Date.now() || Boolean(session.settled_at);
+}
+function snoozeOptions(now = Date.now()) {
+  const at = (days, hour) => { const d = new Date(now); d.setDate(d.getDate() + days); d.setHours(hour, 0, 0, 0); return d.getTime(); };
+  const tonight = at(0, 19);
+  return [{ id: "1h", label: "1 hour", until: now + 3600000 },
+    ...(tonight - now > 3600000 ? [{ id: "tonight", label: "Tonight", until: tonight }] : []),
+    { id: "tomorrow", label: "Tomorrow", until: at(1, 9) }];
+}
+function triage(cx, action, address, until) {
+  const args = action === "snooze" ? ["snooze", "--address", address, "--until-ms", String(until)] : [action, "--address", address];
+  cx.spawn(async (cx) => {
+    const r = await exec(`${appHome()}/bin/team`, args).catch((e) => ({ code: 1, stderr: String(e) }));
+    if (r.code !== 0) {
+      let why = (r.stderr || r.stdout || "").trim();
+      try { why = JSON.parse(why).error ?? why; } catch {}
+      if (/invalid choice|unrecognized|unknown command|usage:/i.test(why)) setShared("desk.triage.off", true);
+      else notify({ title: "Couldn't update that agent", body: why.slice(0, 200), level: "error", timeout: 6000 });
+    } else setShared("desk.runtime.dirty", Date.now());
+    cx.notify();
+  });
 }
 
 // desk-chat's center is a stack: the chat, or the shown tab's terminals (mods/desk/desks.js
@@ -145,6 +177,10 @@ export default class Spaces extends View {
     if (props()?.spaceMenu) { this.part = new SpaceMenu(); return; }
     if (props()?.joinMenu) { this.part = new JoinMenu(); return; }
     this.hoverAgent = null;
+    this.snoozing = null; // the agent row whose snooze times show
+    this.shelves = new Set(); // spaces whose Settled shelf is open
+    this.order = {}; // space -> its agents' order at the last draw
+    this.pointerIn = false;
     this.git = {}; // where() -> { name, branch, ahead, behind, repo, linked }, null: not a repo
     this.checked = {}; // where() -> when it was last looked at
     this.unsure = new Set(); // where()s git couldn't answer for (a machine away)
@@ -338,32 +374,37 @@ export default class Spaces extends View {
     run("pane.focus", { pane: a.pane });
   }
 
-  // One agent row: its tile, its role (else program), the worktree branch when it isn't the
-  // space's, and its status.
-  // Every agent wears its status in words: Working (spinner), Needs you (pulsing dot),
-  // Done (check), Idle (quiet dot). Same badge as the Desk's.
-  mark(t, status) {
-    return statusBadge(t, status);
-  }
-
   // One agent under its space, aligned with the space's title. A desk member: its role's avatar
   // and name. An agent outside the desk: plain, with "Add to desk" on hover when the space has one.
-  agentRow({ a, l }, g, ps, t, desk) {
+  agentRow({ a, l }, g, ps, t, desk, put = false) {
     const role = l.role ? this.roles.get(l.role) : null;
     const member = Boolean(role && l.task);
     const pane = ps.find((p) => p.pane === a.pane);
     const branch = pane?.branch && g?.branch && pane.branch !== g.branch ? pane.branch : null;
-    const name = role?.name ?? ((/^\d+$/.test(a.tab_name) ? a.title || a.program?.name : a.tab_name) || "Agent");
-    const idle = a.status === "idle";
+    const session = sessionOf(a.address);
+    const fallback = role?.name ?? ((/^\d+$/.test(a.tab_name) ? a.title || a.program?.name : a.tab_name) || "Agent");
+    const name = session?.title || fallback;
+    const idle = a.status === "idle" || put;
     const id = `agent-${a.address}`, hovered = this.hoverAgent === id;
     // Focus only means something where terminals show; there it's a raised row in the group.
     const focused = a.focused && (!chatLayout() || shared("deskchat.terminals"));
     const tint = this.groupOn ? t.accent + "12" : t.hover, sub = this.groupOn ? t.muted : t.dim;
     const canJoin = !member && desk && !a.space.includes("/");
+    const triageIcon = (key, file, tip, onClick) => div().id(`${id}-${key}`).size(20).flex_none().flex().items_center().justify_center().rounded(5)
+      .text_color(this.snoozing === id && key === "snooze" ? t.accent : sub).hover((s) => s.bg(t.hover).text_color(t.foreground)).tooltip(tip)
+      .on_mouse_down("left", (_e, cx) => cx.stop_propagation())
+      .on_click((_e, cx) => { cx.stop_propagation(); onClick(cx); })
+      .child(svg(`mods/desk/icons/${file}.svg`).size(12));
+    const triageable = Boolean(session) && triageOn() && !["working", "blocked"].includes(a.status);
+    const tools = hovered && triageable ? h_flex().flex_none().gap(1).children(put
+      ? [triageIcon("back", "back", "Bring it back", (cx) => triage(cx, "unsettle", a.address))]
+      : [triageIcon("settle", "check", "Settle: put it away until it has new work", (cx) => triage(cx, "settle", a.address)),
+         triageIcon("snooze", "clock", "Snooze", (cx) => { this.snoozing = this.snoozing === id ? null : id; cx.notify(); })]) : null;
     const add = canJoin && hovered ? h_flex().id(`${id}-join`).flex_none().h(20).px(7).items_center().rounded(10)
       .text_size(11).font_medium().text_color(t.accent).bg(t.accent + "14").hover((s) => s.bg(t.accent + "26"))
       .on_click((_e, cx) => { cx.stop_propagation(); this.joinMenu(a, name, desk); }).child("Add to desk") : null;
-    return h_flex().id(id).h(28).flex_none().pl(39).pr(6).gap(8).items_center().rounded(7).cursor_pointer()
+    const row = h_flex().id(id).h(28).flex_none().pl(37).pr(6).gap(8).items_center().rounded(8).cursor_pointer()
+      .tooltip(session?.title ? `${fallback} · ${session.title}` : fallback)
       .when(focused, (el) => el.bg(t.chrome).border_1().border_color(t.border))
       .when(!focused, (el) => el.hover((s) => s.bg(tint)))
       .on_hover((h, cx) => { if (h) this.hoverAgent = id; else if (this.hoverAgent === id) this.hoverAgent = null; cx.notify(); })
@@ -373,10 +414,26 @@ export default class Spaces extends View {
         : h_flex().size(16).flex_none().items_center().justify_center().child(svg("mods/desk/icons/terminal.svg").size(12).text_color(sub)))
       .child(div().min_w(0).flex_shrink_1().truncate().text_size(12.5)
         .text_color(member ? (idle ? t.muted : t.foreground) : t.muted).child(name))
-      .when(Boolean(branch), (el) => el.child(h_flex().min_w(0).flex_shrink_1().gap(3).items_center().text_size(11).text_color(sub)
+      .when(Boolean(branch) && offMain(branch), (el) => el.child(h_flex().min_w(0).flex_shrink_1().gap(3).items_center().text_size(11).text_color(sub)
         .child(svg("mods/workspace-chrome/branch.svg").size(10).flex_none()).child(div().min_w(0).truncate().child(branch))))
       .child(div().flex_1())
-      .child(add ?? this.mark(t, a.status) ?? div());
+      .child(add ?? tools ?? h_flex().w(16).flex_none().justify_center().child(statusMark(t, a.status, 12)));
+    if (this.snoozing !== id || !triageable || put) return [row];
+    return [row, h_flex().id(`${id}-times`).h(28).flex_none().pl(37).pr(6).gap(4).items_center()
+      .children(snoozeOptions().map((o) => div().id(`${id}-snz-${o.id}`).h(22).px(7).flex().items_center().rounded(6).cursor_pointer()
+        .border_1().border_color(t.border).text_size(11).text_color(t.muted).hover((s) => s.bg(t.hover).text_color(t.foreground))
+        .on_click((_e, cx) => { cx.stop_propagation(); this.snoozing = null; triage(cx, "snooze", a.address, o.until); }).child(o.label)))];
+  }
+
+  // While the pointer is over the list, a space's agents keep the order they had; new ones go last.
+  held(space, kids) {
+    const before = this.order[space];
+    if (this.pointerIn && before) {
+      const at = new Map(before.map((a, i) => [a, i]));
+      kids = [...kids].sort((x, y) => (at.get(x.a.address) ?? 1e9) - (at.get(y.a.address) ?? 1e9));
+    }
+    this.order[space] = kids.map((k) => k.a.address);
+    return kids;
   }
 
   joinMenu(a, name, desk) {
@@ -433,17 +490,26 @@ export default class Spaces extends View {
     // A space and the worktree spaces under it are one group: a container that fills when one of
     // them is active, each space's agents hanging off a hairline under its avatar.
     const draw = (r) => {
-      const kids = spaceAgents(r.w, all, labels);
+      const kids = this.held(r.w.id, spaceAgents(r.w, all, labels));
       order.push(...kids.map((k) => k.a.address));
       if (collapsed) return [this.compact(r, t)];
-      const members = kids.filter((k) => k.l.role && k.l.task), outside = kids.filter((k) => !(k.l.role && k.l.task));
+      const shelf = kids.filter((k) => putAway(sessionOf(k.a.address), k.a.status));
+      const live = kids.filter((k) => !shelf.includes(k));
+      const members = live.filter((k) => k.l.role && k.l.task), outside = live.filter((k) => !(k.l.role && k.l.task));
       // The space's desk (its members' task), so an outside agent can be added to it.
       const desk = members.length ? { slug: members[0].l.task, roles: members.map((k) => k.l.role) } : null;
-      const divider = div().pl(39).pt(6).pb(2).h(24).flex_none().text_size(10.5).text_color(this.groupOn ? t.muted : t.dim).child("Not in a desk");
+      const divider = div().pl(37).pt(4).h(22).flex_none().text_size(10.5).text_color(this.groupOn ? t.muted : t.dim).child("Not in a desk");
+      const open = this.shelves.has(r.w.id);
+      const shelfRow = h_flex().id(`shelf-${r.w.id}`).h(24).flex_none().pl(37).pr(6).gap(5).items_center().rounded(8).cursor_pointer()
+        .text_size(11).text_color(this.groupOn ? t.muted : t.dim).hover((s) => s.text_color(t.foreground))
+        .on_click((_e, cx) => { open ? this.shelves.delete(r.w.id) : this.shelves.add(r.w.id); cx.notify(); })
+        .child(svg(`mods/workspace-chrome/chevron-${open ? "down" : "right"}.svg`).size(10).flex_none()).child(`Settled · ${shelf.length}`);
       return [this.row({ ...r, kids: kids.length }, t),
-        ...members.map((k) => this.agentRow(k, r.g, ps, t, desk)),
+        ...members.flatMap((k) => this.agentRow(k, r.g, ps, t, desk)),
         ...(desk && outside.length ? [divider] : []),
-        ...outside.map((k) => this.agentRow(k, r.g, ps, t, desk))];
+        ...outside.flatMap((k) => this.agentRow(k, r.g, ps, t, desk)),
+        ...(shelf.length ? [shelfRow] : []),
+        ...(shelf.length && open ? shelf.flatMap((k) => this.agentRow(k, r.g, ps, t, desk, true)) : [])];
     };
     const groups = (list) => {
       if (collapsed) return list.flatMap(draw);
@@ -452,7 +518,7 @@ export default class Spaces extends View {
       return chunks.map((c) => {
         const on = c.some((r) => r.w.active);
         this.groupOn = on;
-        return v_flex().id(`group-${c[0].w.id}`).flex_none().p(3).rounded(11)
+        return v_flex().id(`group-${c[0].w.id}`).flex_none().p(3).rounded(10)
           .when(on, (el) => el.bg(t.selected))
           .children(c.flatMap(draw));
       });
@@ -495,13 +561,13 @@ export default class Spaces extends View {
     }));
   }
 
-  // Under the title: the branch (a worktree row's title is its branch already), then ahead/behind.
+  // Beside the title: the branch when it's off main (else, with no repo, the folder), then ahead/behind.
   subline(g, w, t) {
     const dim = this.groupOn ? t.muted : t.dim; // on the active group's tint, a step darker
-    if (!g) return div().min_w(0).truncate().text_size(11.5).text_color(dim).child(base(place(w, panes()) ?? "") || "~");
-    return h_flex().min_w(0).gap(5).items_center().text_size(11.5).text_color(dim)
-      .child(svg("mods/workspace-chrome/branch.svg").size(11).flex_none())
-      .child(div().min_w(0).truncate().child(g.branch ?? "detached"))
+    if (!g) return div().min_w(0).flex_shrink_1().truncate().text_size(11).text_color(dim).child(base(place(w, panes()) ?? "") || "~");
+    return h_flex().min_w(0).flex_shrink_1().gap(4).items_center().text_size(11).text_color(dim)
+      .when(offMain(g.branch ?? "detached"), (el) => el.child(svg("mods/workspace-chrome/branch.svg").size(10).flex_none())
+        .child(div().min_w(0).truncate().child(g.branch ?? "detached")))
       .when(g.ahead > 0, (el) => el.child(div().flex_none().text_color(t.ansi2).child(`\u2191${g.ahead}`)))
       .when(g.behind > 0, (el) => el.child(div().flex_none().text_color(t.ansi1).child(`\u2193${g.behind}`)));
   }
@@ -553,29 +619,28 @@ export default class Spaces extends View {
   }
 
   // A space: its repo (else its name), and a name you gave it when that says something else.
-  // Its agents are listed under it, so the space's own badge only shows when it has none.
+  // Its agents are listed under it, so the space's own mark only shows when it has none.
   spaceLines(w, g, fill, t, kids) {
     const title = g?.name ?? (w.name === "~" ? "Home" : w.name);
     const extra = w.named && g && w.name.toLowerCase() !== g.name.toLowerCase() ? w.name : null;
-    return h_flex().gap(9).items_center()
-      .child(h_flex().size(22).flex_none().rounded(6).bg(fill).items_center().justify_center().text_size(11).font_bold().text_color("#ffffff")
+    return h_flex().gap(8).items_center()
+      .child(h_flex().size(18).flex_none().rounded(5).bg(fill).items_center().justify_center().text_size(10).font_bold().text_color("#ffffff")
         .child([...title][0]?.toUpperCase() ?? "?"))
-      .child(v_flex().flex_1().min_w(0).gap(1)
-        .child(h_flex().min_w(0).gap(5).items_center()
-          .child(div().min_w(0).flex_shrink_1().truncate().font_medium().text_color(t.foreground).child(title))
-          .when(Boolean(extra), (el) => el.child(div().min_w(0).flex_shrink_1().truncate().text_size(11.5).text_color(this.groupOn ? t.muted : t.dim).child(extra))))
-        .child(this.subline(g, w, t)))
-      .child((!kids && statusBadge(t, w.status)) || div());
+      .child(div().min_w(0).flex_shrink_1().truncate().text_size(13).font_medium().text_color(t.foreground).child(title))
+      .when(Boolean(extra), (el) => el.child(div().min_w(0).flex_shrink_1().truncate().text_size(11).text_color(this.groupOn ? t.muted : t.dim).child(extra)))
+      .when(Boolean(g) || (base(place(w, panes()) ?? "") || "~") !== title, (el) => el.child(this.subline(g, w, t)))
+      .child(div().flex_1())
+      .when(!kids && w.status && w.status !== "idle", (el) => el.child(h_flex().w(16).flex_none().justify_center().child(statusMark(t, w.status, 12))));
   }
 
   // A worktree under its repo: its branch, ahead/behind, its status.
   worktreeLine(w, g, t, kids) {
-    return h_flex().pl(31).gap(6).items_center()
-      .child(svg("mods/workspace-chrome/branch.svg").size(12).flex_none().text_color(this.groupOn ? t.muted : t.dim))
+    return h_flex().pl(26).gap(6).items_center()
+      .child(svg("mods/workspace-chrome/branch.svg").size(11).flex_none().text_color(this.groupOn ? t.muted : t.dim))
       .child(div().min_w(0).flex_1().truncate().text_size(12.5).text_color(t.foreground).child(g?.branch ?? w.name))
-      .when((g?.ahead ?? 0) > 0, (el) => el.child(div().flex_none().text_size(11.5).text_color(t.ansi2).child(`\u2191${g.ahead}`)))
-      .when((g?.behind ?? 0) > 0, (el) => el.child(div().flex_none().text_size(11.5).text_color(t.ansi1).child(`\u2193${g.behind}`)))
-      .child((!kids && statusBadge(t, w.status)) || div());
+      .when((g?.ahead ?? 0) > 0, (el) => el.child(div().flex_none().text_size(11).text_color(t.ansi2).child(`\u2191${g.ahead}`)))
+      .when((g?.behind ?? 0) > 0, (el) => el.child(div().flex_none().text_size(11).text_color(t.ansi1).child(`\u2193${g.behind}`)))
+      .when(!kids && w.status && w.status !== "idle", (el) => el.child(h_flex().w(16).flex_none().justify_center().child(statusMark(t, w.status, 12))));
   }
 
   compact({ w, i }, t) {
@@ -589,7 +654,7 @@ export default class Spaces extends View {
       .hover((s) => s.bg(t.hover))
       .on_click(() => this.pick(w))
       .child(div().text_color(w.active ? t.foreground : t.muted).child(String(i + 1)))
-      .child(div().text_color(tone(t, w.status)).child(glyph(w.status)));
+      .child(statusMark(t, w.status, 10));
   }
 
   render() {
@@ -614,7 +679,8 @@ export default class Spaces extends View {
         .child(div().id("space-new").size(26).flex_none().flex().items_center().justify_center().rounded(6).hover(s => s.bg(t.hover).text_color(t.foreground))
           .tooltip(chatLayout() ? "New desk: pick a folder" : "New space")
           .on_click((_e, cx) => this.newSession(null, cx)).child(svg("mods/workspace-chrome/plus.svg").size(14))))
-      .child(v_flex().flex_1().min_h(0).px(8).pb(14).gap(6).overflow_y_scrollbar().mode("always")
+      .child(v_flex().id("spaces-list").flex_1().min_h(0).px(8).pb(14).gap(4).overflow_y_scrollbar().mode("always")
+        .on_hover((inside, cx) => { this.pointerIn = inside; if (!inside) { this.snoozing = null; cx.notify(); } })
         .on_mouse_up("left", (_e, cx) => { this.pressed = null; cx.notify(); })
         .children(this.grouped(t, collapsed)));
   }

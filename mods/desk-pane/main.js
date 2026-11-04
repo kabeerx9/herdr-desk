@@ -1,11 +1,12 @@
 // A pane's header for the desk layout, cloned from the shipped `pane` mod.
-// Left: program, repo/folder, branch with uncommitted count, agent status with
-// how long it has been working. On hover, five buttons, the hovered one named:
+// Left: program, the agent's session title (from the Desk runtime, shared "desk.runtime")
+// else its program, repo/folder, the branch only when it's off main (with its uncommitted
+// count), and the Desk's status mark with how long it has been working. On hover, five buttons, the hovered one named:
 // Claude beside, open in Zed, split, zoom, close. Props from the app: { pane, terminal }.
 
 import { View, div, svg, image } from "gpui-kit";
 import { h_flex } from "gpui-base";
-import { panes, spaces, props, run, theme, home, exec } from "herdr";
+import { panes, spaces, props, run, theme, home, exec, shared } from "herdr";
 
 const CLAUDE = "#d97757";
 
@@ -24,6 +25,20 @@ function split(cwd, root) {
   }
   return { lead: "", name: short(cwd), rest: "" };
 }
+
+// The Desk's one status mark set (mods/desk/ui.js statusMark); mods can't import each other's files.
+const MARKS = ["working", "blocked", "done", "idle", "queued", "failed", "disconnected"];
+const MARK_COLOR = { working: "working", blocked: "blocked", done: "done", idle: "dim", queued: "muted", failed: "blocked", disconnected: "dim" };
+function statusMark(t, status, size = 12) {
+  const kind = MARKS.includes(status) ? status : "idle";
+  const el = svg(`mods/desk/icons/marks/${kind}.svg`).size(size).flex_none().text_color(t[MARK_COLOR[kind]] ?? t.dim);
+  if (kind === "working") return el.spin(900);
+  if (kind === "blocked") return el.loop("opacity", { from: 0.45, to: 1, period: 1400 });
+  return el;
+}
+const offMain = (branch) => Boolean(branch) && !["main", "master", "trunk", "HEAD"].includes(branch);
+const sessionTitle = (address) => address
+  ? (shared("desk.runtime")?.sessions ?? []).find((s) => s.address === address && s.state !== "finished")?.title ?? null : null;
 
 const elapsed = (since) => {
   const m = Math.floor((Date.now() - since) / 60000);
@@ -73,7 +88,9 @@ export default class Pane extends View {
     if (!p) return div();
     if (p.cwd && this.git && this.git.cwd !== p.cwd) { this.git = null; this.refresh(cx); }
     const pane = p.pane, cwd = p.cwd;
-    const name = ((p.program?.agent || p.program?.shell) && p.program.name) || p.title || p.program?.name || "shell";
+    const program = ((p.program?.agent || p.program?.shell) && p.program.name) || p.title || p.program?.name || "shell";
+    const title = sessionTitle(props()?.terminal ?? p.terminal);
+    const name = title || program;
     const pic = programIcon(p.program, 14, t.dim);
     const st = p.status;
     const since = spaces().flatMap((s) => s.tabs).find((x) => x.id === p.tab)?.working_since;
@@ -89,24 +106,22 @@ export default class Pane extends View {
       .on_hover((hovered, cx) => { this.hovered = hovered; if (!hovered) this.tip = null; cx.notify(); })
       .on_click(() => run("pane.focus", { pane }))
       .when(Boolean(pic), (el) => el.child(pic))
-      .child(div().flex_none().truncate().max_w(220).font_medium().text_color(p.focused ? t.foreground : t.muted).child(name))
+      .child(div().flex_none().truncate().max_w(260).font_medium().text_color(p.focused ? t.foreground : t.muted).child(name)
+        .when(Boolean(title), (el) => el.tooltip(`${program} · ${title}`)))
       // repo-relative path: the repo name stands out, its parents fade.
       .child(h_flex().flex_1().min_w(0).items_center()
         .child(div().flex_none().text_color(t.dim).child(path.lead))
         .child(div().flex_none().text_color(this.git ? t.muted : t.dim).when(Boolean(this.git), (el) => el.font_medium()).child(path.name))
         .child(div().min_w(0).truncate().text_color(t.dim).child(path.rest))
-        .when(Boolean(p.branch), (el) => el.child(h_flex().ml(8).flex_none().gap(4).items_center().px(6).h(18).rounded(5)
-          .bg(t.raised).text_size(11).text_color(t.muted)
+        .when(offMain(p.branch), (el) => el.child(h_flex().ml(8).flex_none().gap(4).items_center().text_size(11).text_color(t.dim)
           .child(ic("branch", 11))
-          .child(div().max_w(180).truncate().child(p.branch))
-          .when(Boolean(this.git?.dirty), (el) => el.child(div().text_color(t.blocked).child(`●${this.git.dirty}`))))))
-      .when(st === "working", (el) => el.child(h_flex().flex_none().gap(5).items_center().text_size(11).text_color(t.working)
-        .child(svg("mods/workspace-chrome/spinner.svg").size(12).spin(900))
-        .when(Boolean(since), (el) => el.child(elapsed(since)))))
-      .when(st === "blocked", (el) => el.child(div().flex_none().px(6).h(18).flex().items_center().rounded(5).bg(t.blocked + "26")
-        .text_size(10.5).font_semibold().text_color(t.blocked).child("Needs you")))
-      .when(st === "done", (el) => el.child(div().flex_none().px(6).h(18).flex().items_center().rounded(5).bg(t.done + "26")
-        .text_size(10.5).font_semibold().text_color(t.done).child("Done")))
+          .child(div().max_w(180).truncate().child(p.branch))))
+        .when(Boolean(this.git?.dirty), (el) => el.child(div().ml(6).flex_none().text_size(11).text_color(t.dim)
+          .tooltip(`${this.git.dirty} uncommitted`).child(`${this.git.dirty} changed`))))
+      .when(["working", "blocked", "done"].includes(st), (el) => el.child(h_flex().flex_none().gap(5).items_center().text_size(11).text_color(t.dim)
+        .tooltip(st === "working" ? "Working" : st === "blocked" ? "Needs you" : "Done")
+        .when(st === "working" && Boolean(since), (el) => el.child(elapsed(since)))
+        .child(statusMark(t, st, 12))))
       .when(this.hovered, (el) => el
         // The hovered button's name, spelled out beside the buttons.
         .when(Boolean(this.tip), (el) => el.child(div().flex_none().mr(2).text_size(11).text_color(t.muted).child(this.tip)))

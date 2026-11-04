@@ -1,9 +1,9 @@
-import { div, svg, image } from "gpui-kit";
+import { div } from "gpui-kit";
 import { h_flex, v_flex } from "gpui-base";
 import { agents, panes, spaces, run, shared, notify } from "herdr";
-import { icon, pill, button, section, empty, card } from "./ui.js";
+import { icon, button, section, empty, statusMark, offMain, ROW } from "./ui.js";
 import { openTerminal } from "./desks.js";
-import { runtimeData, runTeam, refreshRuntime, openDesk } from "./workflows.js";
+import { runtimeData, runTeam, refreshRuntime, openDesk, sessionOf, settledState, settledNote, triageIcons, snoozeChips } from "./workflows.js";
 
 // The Inbox tab: every agent, grouped by what it needs from me, with enough
 // context (space › tab, what it's doing, branch, how long) to tell them apart.
@@ -15,9 +15,14 @@ const GROUPS = [
 ];
 
 // What the rail badge counts: agents waiting on me.
+// A settled or snoozed agent's reports wait on its shelf; permissions and disconnects never do.
+const putAway = (item) => item.address && !["permission", "disconnected"].includes(item.kind)
+  && settledState(sessionOf(item.address), agents().find((a) => a.address === item.address)?.status);
+const waiting = () => (runtimeData().attention ?? []).filter((i) => !putAway(i));
+
 export function inboxCount() {
-  const items = runtimeData().attention ?? [], covered = new Set(items.map((i) => i.address).filter(Boolean));
-  const rest = agents().filter((a) => !covered.has(a.address) && ["blocked", "done"].includes(a.status));
+  const items = waiting(), covered = new Set(items.map((i) => i.address).filter(Boolean));
+  const rest = agents().filter((a) => !covered.has(a.address) && ["blocked", "done"].includes(a.status) && !settledState(sessionOf(a.address), a.status));
   return { n: items.length + rest.length, blocked: items.some((i) => i.kind !== "done") || rest.some((a) => a.status === "blocked") };
 }
 
@@ -33,9 +38,11 @@ function attentionCard(panel, t, item) {
       cx.notify();
     });
   };
-  return v_flex().id(id).mx(10).mb(7).px(10).py(9).gap(6).rounded(9).border_1().border_color(t.border).bg(t.raised)
-    .child(h_flex().gap(6).items_center()
-      .child(icon(item.kind === "disconnected" ? "terminal" : item.kind === "done" ? "check" : "bell", 13).text_color(item.kind === "done" ? t.done : t.blocked))
+  const live = item.address ? agents().find((a) => a.address === item.address) : null;
+  const canPut = item.address && !["permission", "disconnected"].includes(item.kind) && !["working", "blocked"].includes(live?.status);
+  return v_flex().id(id).mx(8).mb(6).px(10).py(8).gap(6).rounded(8).border_1().border_color(t.border)
+    .child(h_flex().gap(8).items_center()
+      .child(statusMark(t, ATTENTION_MARK[item.kind] ?? "blocked", 12))
       .child(div().min_w(0).flex_1().truncate().text_size(12).font_semibold().text_color(t.foreground).child(item.title || item.kind))
       .child(div().text_size(10.5).text_color(t.dim).child(since(item.at) ?? "")))
     .child(div().h(16).flex_none().text_size(10.5).text_color(t.dim).truncate().child(item.desk_name ?? item.task ?? item.address ?? "Desk"))
@@ -46,8 +53,11 @@ function attentionCard(panel, t, item) {
       .when(Boolean(recoverable), (el) => el.child(button(t, `${id}-resume`, "Resume", (_e, cx) => act(["recover", "--session", session.id], cx))))
       .when(Boolean(item.text?.length > 150), (el) => el.child(button(t, `${id}-more`, expanded ? "Less" : "Details", (_e, cx) => panel.toggle(id, cx))))
       .child(div().flex_1())
-      .when(!["permission", "disconnected"].includes(item.kind), (el) => el.child(button(t, `${id}-dismiss`, "Acknowledge", (_e, cx) => act(["attention-dismiss", "--id", item.id], cx), { tip: "Mark this item seen; no message is sent" }))));
+      .when(Boolean(canPut), (el) => el.children(triageIcons(t, id, panel, item.address, false)))
+      .when(!["permission", "disconnected"].includes(item.kind), (el) => el.child(button(t, `${id}-dismiss`, "Acknowledge", (_e, cx) => act(["attention-dismiss", "--id", item.id], cx), { tip: "Mark this item seen; no message is sent" }))))
+    .when(Boolean(canPut), (el) => el.child(snoozeChips(t, id, panel, item.address, { indent: 0 }) ?? div()));
 }
+const ATTENTION_MARK = { disconnected: "disconnected", done: "done", failed: "failed", uncertain: "failed", permission: "blocked", blocked: "blocked", ask: "blocked" };
 
 const since = (ms) => {
   if (!ms) return null;
@@ -60,53 +70,58 @@ const since = (ms) => {
 
 const shortPath = (cwd) => (cwd ? cwd.replace(/^\/Users\/[^/]+/, "~").split("/").slice(-2).join("/") : null);
 
-function programIcon(t, program, color) {
-  const glyph = program?.icon ? (program.tint ? svg(program.icon).size(15).text_color(color) : image(program.icon).w(15).h(15)) : icon("terminal", 15).text_color(color);
-  return div().size(28).flex_none().rounded(7).flex().items_center().justify_center().bg(color + "1f").child(glyph);
-}
-
-function agentCard(panel, t, a, group, pane, tab) {
-  const id = `inbox-${a.address}`, hovered = panel.hovered === id, color = t[group.color] ?? t.accent;
+// One agent, one 28px row: its mark, space › tab (or its session's title), where, how long.
+// Hover: settle / snooze when it's a desk session, else Go.
+function agentRow(panel, t, a, group, pane, tab, put) {
+  const id = `inbox-${a.address}`, hovered = panel.hovered === id, s = sessionOf(a.address);
   const time = group.status === "working" ? since(tab?.working_since) : since(tab?.changed_at);
-  const where = [a.program?.name, pane?.branch ?? shortPath(pane?.cwd)].filter(Boolean).join(" · ");
-  return card(t, id, hovered).cursor_pointer().relative()
+  const where = put ? settledNote(s) : [offMain(pane?.branch) ? pane.branch : shortPath(pane?.cwd), time].filter(Boolean).join(" · ");
+  const name = s?.title || a.title || a.tab_name;
+  const actions = s ? triageIcons(t, id, panel, a.address, Boolean(put)) : [];
+  return v_flex().child(h_flex().id(id).h(ROW).mx(8).px(8).gap(8).items_center().rounded(8).cursor_pointer()
+    .bg(hovered ? t.hover : "#00000000")
     .on_hover((h, cx) => panel.hover(id, h, cx))
     .on_click(() => openTerminal(a.address))
-    .child(div().absolute().left(0).top(8).bottom(8).w(3).rounded(2).bg(color))
-    .child(h_flex().pl(4).gap(10).items_start()
-      .child(programIcon(t, a.program, color))
-      .child(v_flex().flex_1().min_w(0).gap(3)
-        .child(h_flex().gap(4).items_center().min_w(0)
-          .child(div().truncate().text_size(12.5).font_semibold().text_color(t.foreground).child(a.space_name))
-          .child(div().flex_none().text_size(12).text_color(t.dim).child("›"))
-          .child(div().truncate().text_size(12.5).text_color(t.muted).child(a.tab_name))
-          .child(div().flex_1())
-          .child(pill(t, time && group.status !== "idle" ? `${group.label} · ${time}` : group.label, color).flex_none()))
-        .when(Boolean(a.title), (el) => el.child(div().truncate().text_size(12).text_color(t.foreground).child(a.title)))
-        .child(h_flex().gap(6).items_center()
-          .child(div().flex_1().truncate().text_size(11).text_color(t.dim).child(where))
-          .when(hovered, (el) => el.child(button(t, `${id}-go`, "Go", () => openTerminal(a.address))))))
-    );
+    .tooltip(`${a.space_name} › ${a.tab_name}${a.program?.name ? ` · ${a.program.name}` : ""}`)
+    .child(h_flex().w(14).flex_none().justify_center().child(statusMark(t, a.status, 12)))
+    .child(div().flex_none().max_w(110).truncate().text_size(12.5).font_medium().text_color(put ? t.muted : t.foreground).child(a.space_name))
+    .child(div().min_w(0).flex_shrink_1().truncate().text_size(12.5).text_color(t.muted).child(name))
+    .child(div().flex_1())
+    .when(!hovered || !actions.length, (el) => el.child(div().flex_none().max_w(110).truncate().text_size(11).text_color(t.dim).child(where)))
+    .when(hovered && actions.length > 0, (el) => el.child(h_flex().flex_none().gap(1).children(actions))))
+    .child(snoozeChips(t, id, panel, a.address, { indent: 38 }) ?? div());
+}
+
+// Never re-sort under the pointer: while it's over the list, each agent keeps the group it was in.
+let held = null;
+function groupOf(a) {
+  if (held?.has(a.address)) return held.get(a.address);
+  return settledState(sessionOf(a.address), a.status) ? "settled" : a.status;
 }
 
 export function inboxView(panel, t) {
   const list = agents();
-  const attention = runtimeData().attention ?? [];
+  const attention = waiting();
   const notices = v_flex().gap(2)
     .child(section(t, "attention-heading", "Needs you", attention.length, true, () => {}))
     .when(Boolean(shared("desk.runtime.error")), (el) => el.child(empty(t, "Session inbox unavailable: " + shared("desk.runtime.error"))))
     .children(attention.map((item) => attentionCard(panel, t, item)));
-  if (!list.length) return v_flex().py(8).child(notices).when(!attention.length, (el) => el.child(empty(t, "Nothing waiting on you.")));
+  if (!list.length) return v_flex().py(8).child(notices).when(!attention.length, (el) => el.child(empty(t, "Nothing waiting on you. Agents that need you land here.")));
   const paneById = new Map(panes().map((p) => [p.pane, p]));
   const tabById = new Map(spaces().flatMap((s) => s.tabs).map((tab) => [tab.id, tab]));
-  return v_flex().py(8).child(notices).children(GROUPS.map((group) => {
-    const members = list.filter((a) => a.status === group.status).sort((x, y) => y.seq - x.seq);
-    if (!members.length) return null;
-    const key = `inbox-${group.status}`;
-    // Idle agents start folded (they rarely need anything), so for them the stored flag means shown.
-    const open = group.status === "idle" ? Boolean(panel.collapsed[key]) : !panel.collapsed[key];
-    return v_flex().pb(6)
-      .child(section(t, key, group.title, members.length, open, (_e, cx) => panel.toggle(key, cx)))
-      .when(open, (el) => el.gap(2).children(members.map((a) => agentCard(panel, t, a, group, paneById.get(a.pane), tabById.get(a.tab)))));
-  }).filter(Boolean));
+  const groupBy = new Map(list.map((a) => [a.address, groupOf(a)]));
+  return v_flex().id("inbox-list").py(8)
+    .on_hover((inside, cx) => { held = inside ? groupBy : null; if (!inside) cx.notify(); })
+    .child(notices).children([...GROUPS, SETTLED].map((group) => {
+      const members = list.filter((a) => groupBy.get(a.address) === group.status).sort((x, y) => y.seq - x.seq);
+      if (!members.length) return null;
+      const key = `inbox-${group.status}`;
+      // Idle and Settled start folded (they rarely need anything), so for them the stored flag means shown.
+      const quiet = group.status === "idle" || group.status === "settled";
+      const open = quiet ? Boolean(panel.collapsed[key]) : !panel.collapsed[key];
+      return v_flex().pb(6)
+        .child(section(t, key, group.title, members.length, open, (_e, cx) => panel.toggle(key, cx)))
+        .when(open, (el) => el.children(members.map((a) => agentRow(panel, t, a, group, paneById.get(a.pane), tabById.get(a.tab), group.status === "settled"))));
+    }).filter(Boolean));
 }
+const SETTLED = { status: "settled", title: "Settled", label: "Settled", color: "dim" };

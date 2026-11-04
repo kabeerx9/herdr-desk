@@ -1,7 +1,7 @@
 import { div } from "gpui-kit";
 import { h_flex, v_flex, TextareaState, Textarea } from "gpui-base";
-import { exec, appHome, shared, setShared, run, notify } from "herdr";
-import { button, icon, pill } from "./ui.js";
+import { exec, appHome, shared, setShared, run, notify, window } from "herdr";
+import { button, icon, pill, iconButton, chip, snoozeOptions } from "./ui.js";
 
 export const runtimeData = () => shared("desk.runtime") ?? { sessions: [], queue: [], attention: [] };
 export async function runTeam(args) {
@@ -59,7 +59,95 @@ export function refreshRuntime(cx, force = false) {
 }
 
 export class RuntimeWatch {
-  init(cx) { refreshRuntime(cx, true); cx.timer.every(3000, (cx) => refreshRuntime(cx)); }
+  init(cx) {
+    this.needsYou = new NeedsYouAlerts();
+    refreshRuntime(cx, true);
+    cx.timer.every(3000, (cx) => { refreshRuntime(cx); this.needsYou.check(); });
+  }
+}
+
+// ── Triage: settle / snooze (bin/team settle|unsettle|snooze; session settled_at, snoozed_until) ──
+
+// The live (not finished) runtime session of a terminal.
+export const sessionOf = (address) => (runtimeData().sessions ?? []).find((s) => s.address === address && s.state !== "finished") ?? null;
+// The controls show only once the runtime reports the fields, and hide after a command the runtime doesn't know.
+export const triageOn = () => !shared("desk.triage.off") && (runtimeData().sessions ?? []).some((s) => "settled_at" in s || "snoozed_until" in s);
+// "settled" | "snoozed" | null. Busy work is never shown as put away, whatever the runtime says.
+export function settledState(session, status) {
+  if (!session || status === "working" || status === "blocked") return null;
+  if ((session.snoozed_until ?? 0) > Date.now()) return "snoozed";
+  return session.settled_at ? "settled" : null;
+}
+export function triage(cx, action, address, until) {
+  const args = action === "snooze" ? ["snooze", "--address", address, "--until-ms", String(until)] : [action, "--address", address];
+  cx.spawn(async (cx) => {
+    try { await runTeam(args); }
+    catch (e) {
+      const why = String(e?.message ?? e);
+      if (/invalid choice|unrecognized|unknown command|usage:/i.test(why)) setShared("desk.triage.off", true);
+      else notify({ title: action === "snooze" ? "Couldn't snooze" : action === "settle" ? "Couldn't settle" : "Couldn't bring it back", body: why.slice(0, 200), level: "error", timeout: 6000 });
+    }
+    refreshRuntime(cx, true);
+    cx.notify();
+  });
+}
+const untilLabel = (ms) => {
+  const d = new Date(ms), pad = (n) => String(n).padStart(2, "0");
+  return `${new Date().toDateString() === d.toDateString() ? "" : "tomorrow "}${pad(d.getHours())}:${pad(d.getMinutes())}`;
+};
+export const settledNote = (session) => (session?.snoozed_until ?? 0) > Date.now() ? `until ${untilLabel(session.snoozed_until)}` : "settled";
+
+// A row's triage: Settle and Snooze as icons; Snooze opens its times as chips (owner.snoozing = id).
+export function triageIcons(t, id, owner, address, put) {
+  if (!triageOn()) return [];
+  if (put) return [iconButton(t, `${id}-unsettle`, "back", "Bring it back", (_e, cx) => triage(cx, "unsettle", address))];
+  return [
+    iconButton(t, `${id}-settle`, "check", "Settle: put it away until it has new work", (_e, cx) => triage(cx, "settle", address)),
+    iconButton(t, `${id}-snooze`, "clock", "Snooze", (_e, cx) => { owner.snoozing = owner.snoozing === id ? null : id; cx.notify(); },
+      { color: owner.snoozing === id ? t.accent : undefined }),
+  ];
+}
+export function snoozeChips(t, id, owner, address, { indent = 36 } = {}) {
+  if (owner.snoozing !== id || !triageOn()) return null;
+  return h_flex().id(`${id}-times`).h(30).pl(indent).pr(8).gap(5).items_center()
+    .child(div().text_size(11).text_color(t.dim).child("Snooze"))
+    .children(snoozeOptions().map((o) => chip(t, `${id}-snz-${o.id}`, o.label, (_e, cx) => { owner.snoozing = null; triage(cx, "snooze", address, o.until); })));
+}
+
+// ── Needs-you alerts: one macOS notification per item, only while Herdr isn't the active app ──
+
+const ALERT = { permission: "asks permission", blocked: "is blocked", ask: "has a question", failed: "delivery failed", uncertain: "delivery may not have arrived", delivery: "needs you" };
+const alertStore = {
+  get() { try { return JSON.parse(localStorage.getItem("desk.alerted")); } catch { return null; } },
+  set(v) { try { localStorage.setItem("desk.alerted", JSON.stringify(v)); } catch {} },
+};
+class NeedsYouAlerts {
+  constructor() { this.seen = alertStore.get(); this.last = null; }
+  check() {
+    const data = shared("desk.runtime");
+    if (!data || data === this.last) return;   // nothing new since the last look
+    this.last = data;
+    const items = (data.attention ?? []).filter((i) => ALERT[i.kind]);
+    // The first look after install only learns what's already waiting.
+    if (!this.seen) { this.seen = items.map((i) => i.id); return alertStore.set(this.seen); }
+    const seen = new Set(this.seen), fresh = items.filter((i) => !seen.has(i.id));
+    if (!fresh.length) return;
+    for (const item of fresh) {
+      const title = item.title || `Agent ${ALERT[item.kind]}`, where = item.desk_name ?? item.task ?? "";
+      const body = (item.text ?? "").replace(/\s+/g, " ").slice(0, 160);
+      if (!window().active) {
+        exec("osascript", ["-e", "on run argv", "-e", "display notification (item 2 of argv) with title (item 1 of argv) subtitle (item 3 of argv)", "-e", "end run",
+          title, body || "Open the Desk to answer", where]).catch(() => {});
+      }
+      // In-app too, with the jump. The panel already toasts permissions outside desk-chat.
+      if (item.kind !== "permission" || shared("layout") === "desk-chat") {
+        notify({ title: where ? `${title} · ${where}` : title, body: body || "Click to open its desk", level: "warning", timeout: 12000,
+          ...(item.task ? { action: { name: `desk.open-${item.task}` } } : {}) });
+      }
+    }
+    this.seen = [...this.seen, ...fresh.map((i) => i.id)].slice(-400);
+    alertStore.set(this.seen);
+  }
 }
 
 export class WorkflowControls {
@@ -125,16 +213,19 @@ export class WorkflowControls {
             (result) => { this.side = null; openDesk(result.task); });
         }, { primary: true, disabled: Boolean(this.owner.acting) || (!fork && !this.question.value().trim()) })));
   }
-  queue(t, task) {
+  // The queued messages of a desk. The chat shows them under its own "N messages queued" status
+  // line, so the list draws header-less by default; { header: true } adds its own fold.
+  queue(t, task, { header = false } = {}) {
     const items = (runtimeData().queue ?? []).filter((q) => q.task === task && !["delivered", "cancelled", "sent"].includes(q.state)).sort((a, b) => (a.position ?? 0) - (b.position ?? 0));
     if (!items.length) return div().h(0);
     const busy = Boolean(this.owner.acting), pending = items.filter((q) => q.state === "pending");
+    const open = header ? this.queueOpen : true;
     return v_flex().max_h(240).overflow_y_scrollbar().gap(5).py(5)
-      .child(h_flex().gap(6).items_center()
+      .when(header, (el) => el.child(h_flex().gap(6).items_center()
         .child(button(t, "queue-fold", `${items.length} queued message${items.length === 1 ? "" : "s"}`, (_e, cx) => { this.queueOpen = !this.queueOpen; cx.notify(); }, { iconName: this.queueOpen ? "chevron-down" : "chevron" }))
         .child(div().flex_1())
-        .child(div().text_size(10.5).text_color(t.dim).child("Sent when each recipient is idle")))
-      .when(this.queueOpen, (el) => el.children(items.map((q) => {
+        .child(div().text_size(10.5).text_color(t.dim).child("Sent when each recipient is idle"))))
+      .when(open, (el) => el.children(items.map((q) => {
         const editing = this.editId === q.id, isPending = q.state === "pending", index = pending.findIndex((x) => x.id === q.id);
         return v_flex().id(`queued-${q.id}`).gap(5).px(10).py(8).rounded(8).bg(t.raised).border_1().border_color(t.border)
           .child(h_flex().gap(5).items_center()

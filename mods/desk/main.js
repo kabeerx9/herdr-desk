@@ -86,7 +86,9 @@ class MainChat {
   init(_p, cx) { this.chat = new Desks(null, cx, { wide: true }); }
   render(_cx) {
     const t = theme();
+    // The floating card sits over this same center: it sizes its density from this height.
     return v_flex().id("chat-main").size_full().bg(t.background).text_color(t.foreground)
+      .on_size_change((size) => { if (Math.abs((shared("desk.center.h") ?? 0) - size.height) > 4) setShared("desk.center.h", Math.round(size.height)); })
       .child(this.chat.render(t));
   }
 }
