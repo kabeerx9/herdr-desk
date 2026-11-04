@@ -18,6 +18,11 @@
   team join --task SLUG --address T --role R   (the Desk) bring an agent you started yourself into a desk
   team compact --address T                  a long context: Claude's /compact (same session, history summarized)
   team fresh --address T [--force]          or a new session: it writes a handoff, then a new one of it takes over
+  team timeline --address T [--since-ms N]  what a Claude agent is doing this turn (from its transcript)
+  team settle|unsettle --address T          put an agent away until it works, blocks or reports done again
+  team snooze --address T --until-ms N      the same, until a time
+  team review-send --address T --file F     (the Desk) send a batch of review comments; empty = approved
+  team gate --address T                     (CTO) may this engineer's branch be integrated? JSON verdict
   team roles
 
 One launcher for everyone (the CTO, the Desk's buttons, you): it reads roles.json,
@@ -29,6 +34,8 @@ from desk_runtime import Store as RuntimeStore, RuntimeError as DeskRuntimeError
 from desk_runtime import attention as runtime_attention
 from desk_runtime import find_queue as runtime_find_queue, queue_item as runtime_queue_item
 from desk_runtime import foreground_agent, recover_interrupted_claims, reorder as runtime_reorder, session_view as runtime_session_view, upsert_session
+from desk_runtime import (classify_launch_failure, find_transcript, gate_verdict, parse_contract, parse_criteria, runner_variants,
+                          session_cli, step_text, transcript_timeline, transcript_title, triage_apply, triage_clear)
 
 APP = os.environ.get("HERDR_APP_HOME") or os.path.expanduser("~/.config/herdr-app")
 DESK = os.path.join(APP, "mods", "desk")
@@ -152,7 +159,9 @@ def argv_for(role, task):
         # PermissionRequest: what it would ask in its terminal, asked in the desk chat (team permit answers).
         base += ["--settings", json.dumps({"hooks": {
             "Stop": [{"hooks": [{"type": "command", "command": f"{SELF} hook claude", "timeout": 20}]}],
-            "PreToolUse": [{"matcher": "*", "hooks": [{"type": "command", "command": f"{SELF} hook claude-tool", "timeout": 5}]}],
+            "PreToolUse": [{"matcher": "*", "hooks": [{"type": "command", "command": f"{SELF} hook claude-tool", "timeout": 10}]}],
+            # UserPromptSubmit: the turn starts; snapshot the worktree for the Last turn review.
+            "UserPromptSubmit": [{"hooks": [{"type": "command", "command": f"{SELF} hook claude-prompt", "timeout": 15}]}],
             "SessionStart": [{"matcher": "startup|resume|clear", "hooks": [{"type": "command", "command": f"{SELF} hook session", "timeout": 10}]}, {"matcher": "compact", "hooks": [{"type": "command", "command": f"{SELF} hook claude-compact", "timeout": 20}]}],
             "PermissionRequest": [{"matcher": "*", "hooks": [{"type": "command", "command": f"{SELF} hook claude-permission", "timeout": PERMIT_TIMEOUT}]}]}})]
         base += ["--append-system-prompt", prompt] if prompt else []
@@ -198,7 +207,7 @@ def runtime_terminals():
     return result
 
 
-def runtime_record(address, role, task, cwd, cli, conversation=None, parent_task=None, capabilities=None, role_config=None, space=None, tab=None):
+def runtime_record(address, role, task, cwd, cli, conversation=None, parent_task=None, capabilities=None, role_config=None, space=None, tab=None, **extra):
     """Record a launched/adopted role. Runtime state is private and never part of a repo."""
     if not address:
         return None
@@ -206,46 +215,53 @@ def runtime_record(address, role, task, cwd, cli, conversation=None, parent_task
     git_repo = repo_of(cwd) if role_config and cwd else None
     return store.mutate(lambda data: dict(upsert_session(data, {"address": address, "role": role, "task": task, "cwd": cwd,
         "cli": cli or "claude", "conversation": conversation, "parent_task": parent_task, "capabilities": capabilities, "recovering": False,
-        "role_config": role_config, "git_root": git_repo["top"] if git_repo else None, "space": space, "tab": tab, "at": int(time.time() * 1000)})))
+        "role_config": role_config, "git_root": git_repo["top"] if git_repo else None, "space": space, "tab": tab, "at": int(time.time() * 1000),
+        **extra})))
 
 
 def activity_file(addr):
     return os.path.join(ACTIVITY, f"{addr}.jsonl")
 
 
-def step_text(name, inp):
-    """One short line for a tool call, the way a person would say it."""
-    inp = inp if isinstance(inp, dict) else {}
-    base = lambda v: os.path.basename(str(v or "").rstrip("/")) or str(v or "")
-    if name == "Bash":
-        return (inp.get("description") or " ".join((inp.get("command") or "").split())[:90] or "Run a command")
-    if name in ("Read", "Edit", "Write", "MultiEdit", "NotebookEdit"):
-        verb = {"Read": "Read", "Edit": "Edit", "MultiEdit": "Edit", "Write": "Write", "NotebookEdit": "Edit"}[name]
-        return f"{verb} {base(inp.get('file_path') or inp.get('notebook_path'))}"
-    if name == "Glob":
-        return f"Find files {inp.get('pattern') or ''}".strip()
-    if name == "Grep":
-        return f"Search for {inp.get('pattern') or ''}".strip()
-    if name == "WebFetch":
-        host = re.sub(r"^https?://([^/]+).*$", r"\1", inp.get("url") or "")
-        return f"Fetch {host}"
-    if name == "WebSearch":
-        return f"Search the web: {inp.get('query') or ''}"
-    if name == "TodoWrite":
-        return "Update the plan"
-    if name in ("Task", "Agent"):
-        return f"Start a sub-agent: {inp.get('description') or ''}".strip(": ")
-    if name.startswith("mcp__"):
-        return name.split("__")[-1].replace("_", " ").capitalize()
-    return name
+def turn_mark(addr):
+    return os.path.join(ACTIVITY, f"{addr}.turn")
+
+
+def snapshot_turn(cwd):
+    """The worktree as the turn starts, at refs/worktree/desk/turn-base (private index; the real
+    index and files are untouched). Once per turn: the Stop hook clears the mark."""
+    if not ME or not cwd:
+        return
+    try:
+        os.makedirs(ACTIVITY, exist_ok=True)
+        with open(turn_mark(ME), "w") as f:
+            f.write(str(int(time.time() * 1000)))
+        import desk_review
+        desk_review.snapshot_turn(cwd)
+    except Exception:
+        pass  # not a git folder, or git failed: the Last turn view says there's no snapshot
+
+
+def prompt_hook():
+    """Claude's UserPromptSubmit hook. Prints nothing: its output would join the prompt."""
+    try:
+        payload = json.load(sys.stdin)
+    except ValueError:
+        payload = {}
+    snapshot_turn((payload if isinstance(payload, dict) else {}).get("cwd") or os.getcwd())
 
 
 def tool_step():
-    """Claude's PreToolUse hook: append this call to the agent's activity feed. Quick; never blocks."""
+    """Claude's PreToolUse hook: append this call to the agent's activity feed. Quick; never blocks.
+    The turn's first call also snapshots the worktree if the prompt hook didn't (no edit has run yet)."""
     if not ME:
         return
     try:
         payload = json.load(sys.stdin)
+        if not isinstance(payload, dict):
+            return
+        if not os.path.exists(turn_mark(ME)):
+            snapshot_turn(payload.get("cwd") or os.getcwd())
         rec = {"at": int(time.time() * 1000), "tool": payload.get("tool_name") or "?",
                "text": step_text(payload.get("tool_name") or "", payload.get("tool_input"))[:160]}
         os.makedirs(ACTIVITY, exist_ok=True)
@@ -263,10 +279,11 @@ def tool_step():
 
 
 def clear_activity(addr):
-    try:
-        os.remove(activity_file(addr))
-    except OSError:
-        pass
+    for path in (activity_file(addr), turn_mark(addr)):
+        try:
+            os.remove(path)
+        except OSError:
+            pass
 PERMIT_TIMEOUT = 600  # the hook's timeout in Claude's settings, seconds
 PERMIT_WAIT = float(os.environ.get("TEAM_PERMIT_WAIT", PERMIT_TIMEOUT - 60))  # give up well before Claude kills it
 
@@ -479,12 +496,24 @@ def start(args):
         note = f"own worktree on {branch} (from HEAD; uncommitted changes in {repo['name']} aren't in it)"
 
     task = args.task or ""
+    contract = None
     if args.brief:
-        brief = file_brief(os.path.abspath(os.path.expanduser(args.brief)), role["id"])
+        brief_path = os.path.abspath(os.path.expanduser(args.brief))
+        try:
+            with open(brief_path, encoding="utf-8") as f:
+                contract = parse_contract(f.read())
+        except (OSError, UnicodeDecodeError):
+            contract = None
+        brief = file_brief(brief_path, role["id"])
         task = (f"Your brief is in {brief}. Read it, then carry it out within the files and contract it gives you. "
                 + task).strip()
     if task:
         task += f"\n\n(Team task: {slug}. Report with `{SELF} report done|blocked \"<summary>\"` when done or stuck.)"
+    if task and contract and contract["acceptance"]:
+        ids = ", ".join(x["id"] for x in contract["acceptance"])
+        task += (f" Your done report must answer every acceptance criterion ({ids}): "
+                 f"`--criteria '{{\"{contract['acceptance'][0]['id']}\":\"pass: how you know\"}}'` (pass, fail or n/a, each with a note), "
+                 "and `--evidence verified` only if you ran every check yourself and saw it pass.")
 
     space = args.space or caller_labels.get("herdr.space") or "spteam" + secrets.token_hex(8)
     tab = args.tab or "tb" + secrets.token_hex(16)
@@ -505,19 +534,34 @@ def start(args):
                       + ("keep it current, rewritten not appended, under 100 lines." if role["id"] == "cto"
                          else "read it before you start, if it exists."))
     role = {**role, "promptText": role["promptText"] + desk_note}
-    identity = str(uuid.uuid4()) if adapter_config(role).get("session_args") else None
-    command = argv_for(role, "") + (adapter_args(role, "session", identity) if identity else []) + ([task] if task else [])
-    cmd += ["--", shell, "-lic", 'exec "$@"', "team-role"] + command
-    r = sh(cmd)
-    if r.returncode != 0:
-        die(f"hc run failed: {(r.stderr or r.stdout).strip()}")
-    try:
-        launched = json.loads(r.stdout)
-    except ValueError:
-        launched = {"raw": r.stdout.strip()}
+    variants = runner_variants(role)
+    fallbacks, trusted = [], None
+    for n, variant in enumerate(variants):
+        identity = str(uuid.uuid4()) if adapter_config(variant).get("session_args") else None
+        command = argv_for(variant, "") + (adapter_args(variant, "session", identity) if identity else []) + ([task] if task else [])
+        r = sh(cmd + ["--", shell, "-lic", 'exec "$@"', "team-role"] + command)
+        if r.returncode != 0:
+            die(f"hc run failed: {(r.stderr or r.stdout).strip()}")
+        try:
+            launched = json.loads(r.stdout)
+        except ValueError:
+            launched = {"raw": r.stdout.strip()}
+        if len(variants) == 1:
+            break
+        # A runner list: watch the launch, and only a usage limit or a sign-in failure moves on.
+        trusted = accept_trust(name, variant.get("cli")) if branch else None
+        why = watch_launch(launched.get("address") or name, task)
+        if not why or n == len(variants) - 1:
+            if why:
+                note = ((note + "; ") if note else "") + f"every runner failed ({why}); the last one is left open"
+            break
+        fallbacks.append({"cli": variant.get("cli"), "model": variant.get("model"), "why": why})
+        sh(["hc", "kill", launched.get("address") or name]); sh(["hc", "rm", launched.get("address") or name])
+    role = variant
     runtime_record(launched.get("address"), role["id"], slug, folder, role.get("cli"), identity,
                    capabilities={"resume": bool(adapter_config(role).get("resume_args")), "fork": bool(adapter_config(role).get("fork_args"))},
-                   role_config=role, space=space, tab=tab)
+                   role_config=role, space=space, tab=tab, contract=contract, runner=role.get("runner"),
+                   parent=None if args.no_parent else (args.parent or ME))
     if initial_chat:
         chat_append(slug, {"from": "kabeer", "kind": "say", "text": initial_chat,
                           "to": [role["id"]], "delivered": [role["id"]], "delivered_to": [launched.get("address")]})
@@ -530,17 +574,46 @@ def start(args):
         chat_append(slug, {"from": role["id"], "kind": "fresh", "role": role["id"], "address": launched.get("address"),
                            "replaces": args.fresh_of, "text": args.note or f"{role['name']} started fresh"})
     else:
+        fell = (f" ({fallbacks[-1]['cli']} failed with {fallbacks[-1]['why'].replace('_', ' ')}; running on {role.get('cli')})"
+                if fallbacks else "")
         chat_append(slug, {"from": starter, "kind": "start", "role": role["id"], "address": launched.get("address"),
-                           "text": f"Started {role['name']} in {os.path.basename(folder)}" + (f" on {branch}" if branch else "")})
+                           "text": f"Started {role['name']} in {os.path.basename(folder)}" + (f" on {branch}" if branch else "") + fell,
+                           **({"contract": contract} if contract else {}), **({"runner": role["runner"], "fallbacks": fallbacks} if role.get("runner") else {})})
         if starter == "kabeer":
             tell_cto(slug, f"Kabeer added {role['name']} ({launched.get('address')}) to the desk"
                      + (f", working in {os.path.basename(folder)}" + (f" on {branch}" if branch else "") + "." if folder else "."),
                      skip=launched.get("address"))
     renamed = rename_tab(tab, role["name"])
-    trusted = accept_trust(name, role.get("cli")) if branch else None
+    if len(variants) == 1:
+        trusted = accept_trust(name, role.get("cli")) if branch else None
     print(json.dumps({"address": launched.get("address"), "name": name, "role": role["id"], "task": slug,
                       "cwd": folder, "branch": branch, "note": note, "tab": tab, "tab_named": renamed, "trust_accepted": trusted,
+                      "runner": role.get("runner"), "fallbacks": fallbacks, "contract": contract,
                       "hint": "A trust prompt in a new folder shows as 'Needs you'; its task runs once accepted."}))
+
+
+RUNNER_WATCH = float(os.environ.get("TEAM_RUNNER_WATCH", 12))
+
+
+def watch_launch(address, task, seconds=None):
+    """A just-launched runner: "usage_limit" / "auth" when its screen says it can't run, else None
+    (it worked a turn, it is still fine when the watch ends, or it exited for another reason)."""
+    deadline, seen_working = time.time() + (RUNNER_WATCH if seconds is None else seconds), False
+    while True:
+        info = terminal(address)
+        why = classify_launch_failure(sh(["hc", "read", "--lines", "200", address]).stdout, task)
+        if why:
+            return why
+        if info.get("state") and info.get("state") != "live":
+            return None
+        state = (info.get("status") or {}).get("state")
+        if state == "working":
+            seen_working = True
+        elif seen_working and state in ("idle", "done"):
+            return None
+        if time.time() >= deadline:
+            return None
+        time.sleep(0.5)
 
 
 SANDBOX_HINT = ("hc can't reach herdr-core from here. If you're in a sandbox (Codex's blocks hc's socket), "
@@ -562,6 +635,28 @@ def report(args):
     text = " ".join(args.text).strip()
     if not text:
         die("say what happened: team report done \"<what changed, what you verified>\"")
+    store = runtime_store()
+    try:
+        mine = session_by_address(store.load(), ME) or {}
+    except (DeskRuntimeError, OSError):
+        mine = {}  # an unreadable registry never stops a report
+    contract = mine.get("contract") or None
+    criteria, evidence = None, getattr(args, "evidence", None) or "asserted"
+    try:
+        if getattr(args, "criteria", None):
+            criteria = parse_criteria(args.criteria, contract)
+        elif args.kind == "done" and contract and contract.get("acceptance"):
+            die("your brief has acceptance criteria; report each one: --criteria '{"
+                + ",".join(f'"{x["id"]}":"pass: note"' for x in contract["acceptance"]) + "}'", 2)
+    except DeskRuntimeError as exc:
+        die(str(exc), 2)
+    blocking = getattr(args, "blocking", None)
+    if blocking is not None and blocking < 0:
+        die("--blocking is a count of blocking findings (0 or more)", 2)
+    if args.kind == "done" and labels.get("role") == "reviewer" and blocking is None:
+        die("a review's done report says how many findings block the merge: --blocking N (0 when none)", 2)
+    cwd = (me.get("foreground") or {}).get("cwd") or me.get("cwd")
+    head = getattr(args, "head", None) or (git_out(cwd, "rev-parse", "HEAD") if cwd and args.kind == "done" else None)
     lr = sh(["hc", "label", ME, f"phase={args.kind}", f"note={text[:240]}"])
     if lr.returncode != 0:
         die(f"couldn't record the report: {(lr.stderr or lr.stdout).strip()[:200]}", 3)
@@ -571,14 +666,30 @@ def report(args):
     if not (parent and terminal(parent).get("state") == "live") and labels.get("task") and labels.get("role") != "cto":
         cto = next((t for t in desk_members(labels["task"]) if t["labels"]["role"] == "cto" and t["address"] != ME), None)
         parent = cto["address"] if cto else None
+    extra = ""
+    if criteria:
+        extra += "\nCriteria: " + "; ".join(f"{c['id']} {c['result']}" + (f" ({c['note'][:80]})" if c["note"] else "") for c in criteria)
+    if args.kind == "done":
+        extra += f"\nEvidence: {evidence}" + (f". Blocking findings: {blocking}" if blocking is not None else "") + (f". HEAD {head[:10]}" if head else "")
     if parent:
-        r = sh(["hc", "send", parent, f"[{who} {args.kind}] {text}"])
+        r = sh(["hc", "send", parent, f"[{who} {args.kind}] {text}{extra}"])
         sent = r.returncode == 0
         if not sent:
             print(json.dumps({"warning": f"recorded, but not delivered to {parent}: {(r.stderr or r.stdout).strip()[:200]}"}), file=sys.stderr)
-    chat_append(labels.get("task"), {"from": who, "address": ME, "kind": args.kind, "text": text,
-                                     **({"delivered_to": [parent]} if sent else {})})
-    print(json.dumps({"ok": True, "phase": args.kind, "sent_to_parent": parent if sent else None}))
+    facts = {**({"criteria": criteria} if criteria else {}), **({"evidence": evidence} if args.kind == "done" else {}),
+             **({"head": head} if head else {}), **({"blocking": blocking} if blocking is not None else {})}
+    rec = chat_append(labels.get("task"), {"from": who, "address": ME, "kind": args.kind, "text": text, **facts,
+                                           **({"delivered_to": [parent]} if sent else {})})
+    if args.kind == "done" and mine:
+        def record(data):
+            session = session_by_address(data, ME)
+            if session:
+                session.update(evidence=evidence, evidence_at=rec["at"], criteria=criteria, last_done_head=head)
+        try:
+            store.mutate(record)
+        except (DeskRuntimeError, OSError):
+            pass
+    print(json.dumps({"ok": True, "phase": args.kind, "sent_to_parent": parent if sent else None, **facts}))
 
 
 def me_in_desk():
@@ -682,6 +793,8 @@ def hook(args):
         return permission_request()
     if args.cli == "claude-tool":
         return tool_step()
+    if args.cli == "claude-prompt":
+        return prompt_hook()
     try:
         if args.cli == "codex":
             payload = json.loads(args.payload[-1]) if args.payload else {}
@@ -1090,18 +1203,151 @@ def runtime_chats():
     return records
 
 
+def session_by_address(data, address):
+    """The registry record for a terminal: the unfinished one, else the newest."""
+    found = [x for x in data.get("sessions", []) if address and x.get("address") == address]
+    found.sort(key=lambda x: (not x.get("finished"), x.get("at") or 0))
+    return found[-1] if found else None
+
+
+TITLES = lambda: os.path.join(CHAT, ".titles.json")
+
+
+def session_title(rec):
+    if session_cli(rec) != "claude" or not rec.get("conversation"):
+        return None
+    try:
+        path = find_transcript(rec["conversation"])
+        return transcript_title(path, TITLES()) if path else None
+    except OSError:
+        return None
+
+
 def runtime_state(args):
     store = runtime_store(); data = store.load(); terminal_map = runtime_terminals()
+    chats = runtime_chats(); now = int(time.time() * 1000)
+    # Settled/snoozed agents come back on their own; decided here, where status and reports meet.
+    if any(triage_clear(x, terminal_map.get(x.get("address")), chats, now) for x in data["sessions"]):
+        def wake(value):
+            for rec in value["sessions"]:
+                triage_apply(rec, triage_clear(rec, terminal_map.get(rec.get("address")), chats, now))
+        store.mutate(wake)
+        data = store.load()
     if any(x.get("state") == "dispatching" for x in data["queue"]):
         with store.dispatch_lock():
             store.mutate(recover_interrupted_claims)
         data = store.load()
     if any(x.get("state") == "pending" for x in data["queue"]): wake_queue()
-    sessions = [runtime_session_view(x, terminal_map) for x in data["sessions"]]
-    if args.task: sessions = [x for x in sessions if x.get("task") == args.task]
+    records = [x for x in data["sessions"] if not args.task or x.get("task") == args.task]
+    sessions = []
+    for rec in records:
+        view = runtime_session_view(rec, terminal_map)
+        for key in ("settled_at", "snoozed_until", "evidence"):
+            view.setdefault(key, None)
+        view["title"] = session_title(rec)
+        sessions.append(view)
     queue = [x for x in data["queue"] if not args.task or x.get("task") == args.task]
     print(json.dumps({"sessions": sessions, "queue": queue,
-                      "attention": runtime_attention(data, terminal_map, runtime_chats())}))
+                      "attention": runtime_attention(data, terminal_map, chats)}))
+
+
+def runtime_triage(args):
+    """settle / unsettle / snooze one agent (by terminal address) in the runtime registry."""
+    now = int(time.time() * 1000)
+    if args.cmd == "snooze" and (args.until_ms is None or args.until_ms <= now):
+        die("--until-ms must be a time in the future (ms since the epoch)")
+    info = terminal(args.address) if args.cmd != "unsettle" else {}
+    turn = info.get("turn") if isinstance(info.get("turn"), int) else None
+    def change(data):
+        rec = session_by_address(data, args.address)
+        if not rec:
+            raise DeskRuntimeError("No saved session has address %s" % args.address)
+        if args.cmd == "settle":
+            rec.update(settled_at=now, settled_turn=turn)
+        elif args.cmd == "snooze":
+            rec.update(snoozed_until=args.until_ms, snoozed_at=now, snoozed_turn=turn)
+        else:
+            triage_apply(rec, ["settled_at", "snoozed_until"])
+        return {"address": rec["address"], "id": rec["id"], "settled_at": rec.get("settled_at"), "snoozed_until": rec.get("snoozed_until")}
+    print(json.dumps(runtime_store().mutate(change)))
+
+
+def runtime_timeline(args):
+    rec = session_by_address(runtime_store().load(), args.address)
+    if not rec:
+        die("No saved session has address %s" % args.address)
+    empty = {"address": args.address, "supported": False, "turn": None, "thought": None, "tools": None,
+             "subagents": None, "context": None, "title": None}
+    if session_cli(rec) != "claude":
+        print(json.dumps({**empty, "reason": "%s doesn't write a transcript the Desk can read" % session_cli(rec)})); return
+    path = find_transcript(rec.get("conversation"))
+    if not path:
+        print(json.dumps({**empty, "supported": True, "reason": "No transcript yet"})); return
+    try:
+        out = transcript_timeline(path, args.since_ms)
+    except OSError as exc:
+        die("Couldn't read the transcript: %s" % exc)
+    if out["title"] is None:
+        out["title"] = transcript_title(path, TITLES())
+    # The transcript can end on prompts with no reply (a message that arrived while it was
+    # stopping): Herdr's own status for the terminal decides whether the turn is still going.
+    live = ((terminal(args.address).get("status") or {}).get("state"))
+    if out.get("turn") and live is not None and live != "working":
+        out["turn"]["working"] = False
+    print(json.dumps({"address": args.address, **out}))
+
+
+REVIEW_MAX = 256 * 1024
+REVIEW_PREFIX = "Fix each comment, then run the checks."
+REVIEW_APPROVED = "Kabeer approved the changes."
+
+
+def review_send(args):
+    """The Desk's review batch to one agent. On any failure it exits nonzero and leaves the file."""
+    try:
+        size = os.path.getsize(args.file)
+        if size > REVIEW_MAX:
+            die(f"the review batch is {size // 1024} KiB; the limit is {REVIEW_MAX // 1024} KiB. Nothing was sent; it's still in {args.file}")
+        with open(args.file, encoding="utf-8") as f:
+            batch = f.read().strip()
+    except (OSError, UnicodeDecodeError) as exc:
+        die(f"couldn't read the review batch {args.file}: {exc}")
+    info = terminal(args.address)
+    addr, labels = info.get("address") or args.address, info.get("labels") or {}
+    if not is_agent(info):
+        die(f"{args.address} isn't running its agent (disconnected or at a shell). Nothing was sent; the batch is still in {args.file}")
+    if (info.get("status") or {}).get("state") == "blocked":
+        die(f"{labels.get('role') or addr} is waiting on a permission prompt. Answer it first; the batch is still in {args.file}")
+    rec = session_by_address(runtime_store().load(), addr) or {}
+    worktree = (info.get("foreground") or {}).get("cwd") or rec.get("cwd") or info.get("cwd")
+    text = REVIEW_APPROVED if not batch else f"{REVIEW_PREFIX}\nWorktree: {worktree}\n\n{batch}"
+    if not expect_reply(addr, "chat"):
+        die(f"couldn't reserve its reply, so nothing was sent; the batch is still in {args.file}")
+    why = send_text(addr, text)
+    if why:
+        sh(["hc", "label", addr, "awaiting="])
+        die(f"not sent ({why}); the batch is still in {args.file}")
+    role = labels.get("role") or rec.get("role")
+    chat_append(labels.get("task") or rec.get("task"), {"from": "kabeer", "kind": "review", "to": [role], "text": text,
+                "approved": not batch, "worktree": worktree, "delivered": [role], "delivered_to": [addr]})
+    print(json.dumps({"ok": True, "address": addr, "approved": not batch, "bytes": len(text.encode("utf-8"))}))
+
+
+def runtime_gate(args):
+    """The CTO's merge gate for one engineer: JSON verdict on stdout, exit 1 unless it's pass."""
+    data = runtime_store().load()
+    eng = session_by_address(data, args.address)
+    if not eng:
+        die("No saved session has address %s" % args.address)
+    cwd = eng.get("cwd")
+    head = git_out(cwd, "rev-parse", "HEAD") if cwd else None
+    dirty = bool(git_out(cwd, "status", "--porcelain", "--untracked-files=no")) if head else False
+    chats = [{**r, "task": r.get("task") or eng.get("task")} for r in chat_read(eng.get("task"))]
+    verdict = gate_verdict(eng, data["sessions"], chats, head, dirty)
+    print(json.dumps({"address": args.address, "role": eng.get("role"), "cwd": cwd,
+                      "branch": git_out(cwd, "rev-parse", "--abbrev-ref", "HEAD") if head else None, **verdict}))
+    if verdict["verdict"] != "pass":
+        sys.exit(1)
 
 
 def runtime_adopt(_args):
@@ -1672,6 +1918,11 @@ def main():
     s.add_argument("--tab"); s.add_argument("--fresh-of"); s.add_argument("--note")
     r = sub.add_parser("report")
     r.add_argument("kind", choices=["done", "blocked", "update"])
+    r.add_argument("--criteria", help='JSON: {"A1":"pass: note","A2":"fail: why","A3":"n/a"}')
+    r.add_argument("--evidence", choices=["verified", "reported", "asserted"], default="asserted",
+                   help="verified: you ran the checks and saw them pass; reported: a tool or person said so; asserted: neither")
+    r.add_argument("--blocking", type=int, help="(Reviewer) how many findings block the merge")
+    r.add_argument("--head", help="the commit this report is about (default: your worktree's HEAD)")
     r.add_argument("text", nargs="+")
     y = sub.add_parser("say")
     y.add_argument("text", nargs="+")
@@ -1680,7 +1931,7 @@ def main():
     ro = sub.add_parser("route")
     ro.add_argument("role"); ro.add_argument("text", nargs="+")
     hk = sub.add_parser("hook")
-    hk.add_argument("cli", choices=["claude", "claude-compact", "claude-permission", "claude-tool", "codex", "session"]); hk.add_argument("payload", nargs="*")
+    hk.add_argument("cli", choices=["claude", "claude-compact", "claude-permission", "claude-tool", "claude-prompt", "codex", "session"]); hk.add_argument("payload", nargs="*")
     pm = sub.add_parser("permit")
     pm.add_argument("--task", required=True); pm.add_argument("id"); pm.add_argument("decision", choices=["allow", "always", "deny"])
     pm.add_argument("--message", help="with deny: tell it what to do instead")
@@ -1729,6 +1980,16 @@ def main():
     ad.add_argument("--id", required=True)
     sd = sub.add_parser("side")
     sd.add_argument("--session", required=True); sd.add_argument("--kind", choices=["side", "fork"], required=True); sd.add_argument("--text")
+    for name in ("settle", "unsettle"):
+        sub.add_parser(name).add_argument("--address", required=True)
+    sn = sub.add_parser("snooze")
+    sn.add_argument("--address", required=True); sn.add_argument("--until-ms", type=int, required=True)
+    tl = sub.add_parser("timeline")
+    tl.add_argument("--address", required=True); tl.add_argument("--since-ms", type=int)
+    rs = sub.add_parser("review-send")
+    rs.add_argument("--address", required=True); rs.add_argument("--file", required=True)
+    ga = sub.add_parser("gate")
+    ga.add_argument("--address", required=True)
     sub.add_parser("roles")
     args = p.parse_args()
     if args.cmd == "start":
@@ -1787,6 +2048,14 @@ def main():
         runtime_attention_dismiss(args)
     elif args.cmd == "side":
         runtime_side(args)
+    elif args.cmd in ("settle", "unsettle", "snooze"):
+        runtime_triage(args)
+    elif args.cmd == "timeline":
+        runtime_timeline(args)
+    elif args.cmd == "review-send":
+        review_send(args)
+    elif args.cmd == "gate":
+        runtime_gate(args)
     else:
         print(json.dumps([{k: r.get(k) for k in ("id", "name", "cli", "model", "worktree", "on_request")} for r in load_roles()]))
 

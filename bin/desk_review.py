@@ -5,18 +5,75 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import shutil
 import subprocess
 import sys
+import tempfile
+from contextlib import contextmanager
 from pathlib import Path
 
 MAX_DIFF = 120_000
+TURN_REF = "refs/worktree/desk/turn-base"
 
 
-def git(root: str, *args: str) -> subprocess.CompletedProcess[str]:
+def git(root: str, *args: str, env: dict[str, str] | None = None) -> subprocess.CompletedProcess[str]:
     return subprocess.run(
         ["git", "--no-optional-locks", "-c", "core.fsmonitor=false", *args],
         cwd=root, capture_output=True, text=True, errors="replace",
+        env={**os.environ, **env} if env else None,
     )
+
+
+@contextmanager
+def private_index(root: str):
+    """A throwaway copy of this worktree's index, so `git add -A` never touches the real one."""
+    index = git(root, "rev-parse", "--path-format=absolute", "--git-path", "index")
+    gitdir = git(root, "rev-parse", "--path-format=absolute", "--git-dir")
+    if index.returncode or gitdir.returncode:
+        raise ValueError("Not a git repository")
+    fd, path = tempfile.mkstemp(prefix="desk-index-", dir=gitdir.stdout.strip())
+    os.close(fd)
+    try:
+        real = index.stdout.strip()
+        if os.path.exists(real):
+            shutil.copyfile(real, path)
+        else:
+            os.unlink(path)  # git creates a fresh index here
+        yield {"GIT_INDEX_FILE": path}
+    finally:
+        for leftover in (path, path + ".lock"):
+            if os.path.exists(leftover):
+                os.unlink(leftover)
+
+
+def worktree_tree(root: str) -> str:
+    """The tree of the working tree as it is now (tracked and untracked, minus ignored files).
+    Writes blob/tree objects only; the index, HEAD and the files are left alone."""
+    with private_index(root) as env:
+        added = git(root, "add", "-A", env=env)
+        if added.returncode:
+            raise ValueError(added.stderr.strip() or "Couldn't snapshot the worktree")
+        tree = git(root, "write-tree", env=env)
+        if tree.returncode:
+            raise ValueError(tree.stderr.strip() or "Couldn't write the snapshot tree")
+        return tree.stdout.strip()
+
+
+def snapshot_turn(repo: str) -> dict[str, str]:
+    """Remember the worktree at the start of an agent's turn, for the Last turn review."""
+    root = top(repo)
+    tree = worktree_tree(root)
+    ref = git(root, "update-ref", TURN_REF, tree)
+    if ref.returncode:
+        raise ValueError(ref.stderr.strip() or "Couldn't record the turn snapshot")
+    return {"root": root, "ref": TURN_REF, "tree": tree}
+
+
+def turn_base(root: str) -> str:
+    base = git(root, "rev-parse", "--verify", "--quiet", TURN_REF + "^{tree}")
+    if base.returncode or not base.stdout.strip():
+        raise ValueError("No turn snapshot yet: it is taken when the agent's next turn starts")
+    return base.stdout.strip()
 
 
 def top(repo: str) -> str:
@@ -59,7 +116,7 @@ def permitted_path(path: str, files: list[dict[str, object]]) -> str | None:
     return path
 
 
-def numstat(root: str, mode: str, base: str | None) -> dict[str, tuple[int, int, bool]]:
+def numstat(root: str, mode: str, base: str | None, env: dict[str, str] | None = None) -> dict[str, tuple[int, int, bool]]:
     args = ["diff", "--no-ext-diff", "--no-textconv", "--numstat", "-z"]
     if mode == "staged":
         args.append("--cached")
@@ -67,7 +124,9 @@ def numstat(root: str, mode: str, base: str | None) -> dict[str, tuple[int, int,
         args.extend([base, "HEAD"])
     elif mode == "working":
         args.append("HEAD")
-    result = git(root, *args)
+    elif mode == "turn":
+        args.extend(["--cached", str(base)])
+    result = git(root, *args, env=env)
     values: dict[str, tuple[int, int, bool]] = {}
     parts = result.stdout.split("\0")
     index = 0
@@ -88,7 +147,7 @@ def numstat(root: str, mode: str, base: str | None) -> dict[str, tuple[int, int,
     return values
 
 
-def diff_paths(root: str, mode: str, base: str | None) -> dict[str, str]:
+def diff_paths(root: str, mode: str, base: str | None, env: dict[str, str] | None = None) -> dict[str, str]:
     args = ["diff", "--no-ext-diff", "--no-textconv", "--name-status", "-z"]
     if mode == "staged":
         args.append("--cached")
@@ -96,7 +155,9 @@ def diff_paths(root: str, mode: str, base: str | None) -> dict[str, str]:
         args.extend([base, "HEAD"])
     elif mode == "working":
         args.append("HEAD")
-    result = git(root, *args)
+    elif mode == "turn":
+        args.extend(["--cached", str(base)])
+    result = git(root, *args, env=env)
     values: dict[str, str] = {}
     parts = result.stdout.split("\0")
     index = 0
@@ -166,6 +227,8 @@ def untracked_diff(root: str, path: str | None) -> str:
 
 
 def review(repo: str, mode: str, path: str | None = None) -> dict[str, object]:
+    if mode == "turn":
+        return turn_review(repo, path)
     root = top(repo)
     files = status(root)
     if path and (path.startswith("/") or "\0" in path or any(part == ".." for part in Path(path).parts)):
@@ -213,13 +276,49 @@ def review(repo: str, mode: str, path: str | None = None) -> dict[str, object]:
             "binary": "Binary files differ" in text or any(bool(item["binary"]) for item in selected_files)}
 
 
+def turn_review(repo: str, path: str | None = None) -> dict[str, object]:
+    """What changed since the agent's turn started: the turn-base tree against a private-index
+    snapshot of the worktree now, so untracked text is included. Same caps as the other modes."""
+    root = top(repo)
+    if path and (path.startswith("/") or "\0" in path or any(part == ".." for part in Path(path).parts)):
+        raise ValueError("Path must be a changed repository-relative file")
+    base = turn_base(root)
+    with private_index(root) as env:
+        added = git(root, "add", "-A", env=env)
+        if added.returncode:
+            raise ValueError(added.stderr.strip() or "Couldn't read the worktree")
+        stats = numstat(root, "turn", base, env)
+        changed = diff_paths(root, "turn", base, env)
+        files: list[dict[str, object]] = []
+        for path_name, state in changed.items():
+            add, rem, binary = stats.get(path_name, (0, 0, False))
+            files.append({"path": path_name, "status": state, "code": "", "added": add, "removed": rem, "binary": binary})
+        path = permitted_path(path, files)
+        args = ["diff", "--no-ext-diff", "--no-textconv", "--binary", "--no-color", "--cached", base]
+        if path:
+            args.extend(["--", path])
+        result = git(root, *args, env=env)
+    if result.returncode:
+        raise ValueError(result.stderr.strip() or "Couldn't read diff")
+    text = result.stdout
+    truncated = len(text.encode("utf-8")) > MAX_DIFF
+    if truncated:
+        text = text.encode("utf-8")[:MAX_DIFF].decode("utf-8", "ignore") + "\n… diff truncated …\n"
+    return {"root": root, "mode": "turn", "base": base, "files": files, "diff": text, "truncated": truncated,
+            "binary": "Binary files differ" in text or any(bool(item["binary"]) for item in files)}
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--repo", required=True)
-    parser.add_argument("--mode", choices=("working", "staged", "branch"), default="working")
+    parser.add_argument("--mode", choices=("working", "staged", "branch", "turn"), default="working")
     parser.add_argument("--path")
+    parser.add_argument("--snapshot", action="store_true", help="record the turn-base snapshot instead of reviewing")
     args = parser.parse_args()
     try:
+        if args.snapshot:
+            print(json.dumps(snapshot_turn(args.repo)))
+            return 0
         print(json.dumps(review(args.repo, args.mode, args.path), ensure_ascii=False))
         return 0
     except (ValueError, OSError) as exc:

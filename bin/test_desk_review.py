@@ -89,5 +89,81 @@ class ReviewTests(unittest.TestCase):
                 desk_review.review(bad, "working")
 
 
+class TurnReviewTests(unittest.TestCase):
+    def setUp(self):
+        ReviewTests.setUp(self)
+
+    def tearDown(self):
+        self.tmp.cleanup()
+
+    def git(self, *args):
+        return subprocess.run(["git", *args], cwd=self.root, check=True, capture_output=True, text=True).stdout
+
+    def test_turn_before_snapshot_is_a_clear_error(self):
+        with self.assertRaisesRegex(ValueError, "No turn snapshot"):
+            desk_review.review(self.root, "turn")
+
+    def test_snapshot_never_touches_index_or_working_tree(self):
+        Path(self.root, "base.txt").write_text("edited before the turn\n")
+        Path(self.root, "staged.txt").write_text("staged\n")
+        self.git("add", "staged.txt")
+        Path(self.root, "untracked.txt").write_text("loose\n")
+        index_before = Path(self.root, ".git", "index").read_bytes()
+        status_before = self.git("status", "--porcelain")
+        out = desk_review.snapshot_turn(self.root)
+        self.assertEqual(index_before, Path(self.root, ".git", "index").read_bytes())
+        self.assertEqual(status_before, self.git("status", "--porcelain"))
+        self.assertEqual("tree", self.git("cat-file", "-t", desk_review.TURN_REF).strip())
+        self.assertEqual(out["tree"], self.git("rev-parse", desk_review.TURN_REF).strip())
+        self.assertFalse([p for p in os.listdir(Path(self.root, ".git")) if p.startswith("desk-index-")])
+
+    def test_turn_shows_only_this_turns_changes_including_untracked(self):
+        Path(self.root, "base.txt").write_text("edited before the turn\n")
+        Path(self.root, "old-untracked.txt").write_text("was here\n")
+        desk_review.snapshot_turn(self.root)
+        Path(self.root, "base.txt").write_text("edited before the turn\nand during it\n")
+        Path(self.root, "new.txt").write_text("brand new\n")
+        Path(self.root, "blob.bin").write_bytes(b"x\0y")
+        out = desk_review.review(self.root, "turn")
+        files = {f["path"]: f for f in out["files"]}
+        self.assertEqual({"base.txt", "new.txt", "blob.bin"}, set(files))
+        self.assertEqual("added", files["new.txt"]["status"])
+        self.assertEqual((1, 0), (files["base.txt"]["added"], files["base.txt"]["removed"]))
+        self.assertTrue(files["blob.bin"]["binary"])
+        self.assertIn("+and during it", out["diff"])
+        self.assertNotIn("+edited before the turn", out["diff"])
+        self.assertNotIn("old-untracked", out["diff"])
+        self.assertTrue(out["binary"])
+
+    def test_turn_deletion_path_filter_and_escape(self):
+        desk_review.snapshot_turn(self.root)
+        os.unlink(Path(self.root, "base.txt"))
+        Path(self.root, "other.txt").write_text("x\n")
+        out = desk_review.review(self.root, "turn", "base.txt")
+        self.assertEqual("deleted", out["files"][0]["status"])
+        self.assertNotIn("other.txt", out["diff"])
+        with self.assertRaises(ValueError): desk_review.review(self.root, "turn", "../x")
+        with self.assertRaises(ValueError): desk_review.review(self.root, "turn", "unchanged.txt")
+
+    def test_turn_diff_is_capped(self):
+        desk_review.snapshot_turn(self.root)
+        Path(self.root, "big.txt").write_text("line\n" * 60_000)
+        out = desk_review.review(self.root, "turn")
+        self.assertTrue(out["truncated"])
+        self.assertLess(len(out["diff"].encode()), desk_review.MAX_DIFF + 100)
+
+    def test_linked_worktrees_keep_their_own_turn_base(self):
+        other = os.path.join(self.tmp.name, "..", os.path.basename(self.tmp.name) + "-wt")
+        self.git("worktree", "add", "-b", "wt", other)
+        self.addCleanup(lambda: subprocess.run(["rm", "-rf", other]))
+        desk_review.snapshot_turn(self.root)
+        with self.assertRaisesRegex(ValueError, "No turn snapshot"):
+            desk_review.review(other, "turn")
+        desk_review.snapshot_turn(other)
+        Path(other, "base.txt").write_text("in the worktree\n")
+        self.assertEqual(["base.txt"], [f["path"] for f in desk_review.review(other, "turn")["files"]])
+        self.assertEqual([], desk_review.review(self.root, "turn")["files"])
+
+
 if __name__ == "__main__":
     unittest.main()
