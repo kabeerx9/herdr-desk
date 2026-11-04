@@ -6,6 +6,7 @@ import { GitPanel } from "./git.js";
 import { TABS, currentTab, setOpen } from "./tabs.js";
 import { Rail } from "./rail.js";
 import { inboxView } from "./inbox.js";
+import { Team } from "./team.js";
 import { UsagePopover } from "./usage.js";
 
 const ME = "kabeerx9";
@@ -76,6 +77,8 @@ class Panel {
     this.status = {};
     this.reviews = []; this.mine = []; this.issues = {};
     this.git = new GitPanel(this, cx);
+    this.team = new Team(this, cx);
+    cx.timer.every(5000, (cx) => { if (this.tab === "team") this.team.load(cx); });
     cx.timer.every(15000, (cx) => this.refreshStatus(cx));
     cx.timer.every(120000, (cx) => this.refreshGitHub(cx));
     cx.timer.every(8000, (cx) => { if (this.tab === "git") this.git.refresh(cx); });
@@ -210,6 +213,7 @@ class Panel {
     setShared("desk.tab", tab);
     if (tab === "git") this.git.refresh(cx);
     if (tab === "pages") this.refreshPages(cx);
+    if (tab === "team") this.team.load(cx);
     cx.notify();
   }
 
@@ -393,7 +397,7 @@ class Panel {
 
   render(cx) {
     const t = theme();
-    const view = { inbox: () => inboxView(this, t), projects: () => this.projectsView(t), prs: () => this.prsView(t),
+    const view = { inbox: () => inboxView(this, t), team: () => this.team.render(t, cx), projects: () => this.projectsView(t), prs: () => this.prsView(t),
       issues: () => this.issuesView(t), git: () => this.git.render(t, cx), pages: () => this.pagesView(t) }[this.tab];
     return v_flex().id("desk").size_full().bg(t.chrome).text_color(t.foreground)
       .child(this.header(t))

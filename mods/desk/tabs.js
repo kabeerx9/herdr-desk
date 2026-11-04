@@ -3,6 +3,7 @@ import { run, shared, setShared } from "herdr";
 // Shared by the panel (desk) and its icon rail (desk-rail).
 export const TABS = [
   { id: "inbox", label: "Inbox", icon: "bell" },
+  { id: "team", label: "Team", icon: "team" },
   { id: "projects", label: "Projects", icon: "projects" },
   { id: "prs", label: "Pull requests", icon: "pr" },
   { id: "issues", label: "Issues", icon: "issue" },
