@@ -46,17 +46,26 @@ export function statusBadge(t, status, { idle = true } = {}) {
     .text_size(10.5).font_semibold().text_color(color).child(mark).child(STATUS_LABEL[status]);
 }
 
+// A quiet label: outlined, muted text; `color` tints only its text (status words, PR states).
 export function pill(t, text, color) {
-  return div().px(6).h(18).flex().items_center().rounded(9).text_size(10.5).font_medium()
-    .bg(color + "22").text_color(color).child(text);
+  return div().px(6).h(18).flex().flex_none().items_center().rounded(5).border_1().border_color(t.border)
+    .text_size(11).font_medium().text_color(color ?? t.muted).child(text);
 }
 
 // A small action button; stops the press so rows underneath don't also click.
-export function button(t, id, label, onClick, { iconName, primary, disabled, tip } = {}) {
-  return h_flex().id(id).h(24).px(label ? 8 : 6).gap(5).items_center().rounded(6).flex_none().text_size(11.5).font_medium()
-    .bg(primary && !disabled ? t.solid : t.raised).text_color(disabled ? t.dim : primary ? t.solid_foreground : t.foreground)
-    .border_1().border_color(primary ? (disabled ? t.border : t.solid) : t.border)
-    .when(!disabled, (el) => el.cursor_pointer().hover((s) => s.bg(primary ? t.solid : t.hover)))
+// variant: "ghost" (text only, hover fill), "outline" (hairline; the default), "solid" (the one
+// primary action: accent). `primary: true` is "solid". Hover and press each step one shade.
+export function button(t, id, label, onClick, { iconName, primary, disabled, tip, variant } = {}) {
+  const kind = variant ?? (primary ? "solid" : "outline");
+  const solid = kind === "solid", ghost = kind === "ghost";
+  const bg = disabled ? (solid ? t.raised : "#00000000") : solid ? t.accent : ghost ? "#00000000" : t.background;
+  const fg = disabled ? t.dim : solid ? t.accent_foreground : ghost ? t.muted : t.foreground;
+  return h_flex().id(id).h(26).px(label ? 10 : 6).gap(6).items_center().justify_center().rounded(6).flex_none().text_size(12).font_medium()
+    .bg(bg).text_color(fg)
+    .when(!ghost, (el) => el.border_1().border_color(solid && !disabled ? t.accent : t.border))
+    .when(!disabled, (el) => el.cursor_pointer()
+      .hover((s) => (solid ? s.opacity(0.9) : s.bg(t.hover).text_color(t.foreground)))
+      .active((s) => (solid ? s.opacity(0.8) : s.bg(t.selected))))
     .when(Boolean(tip), (el) => el.tooltip(tip))
     .on_mouse_down("left", (_e, cx) => cx.stop_propagation())
     .on_click((e, cx) => { cx.stop_propagation(); if (!disabled) onClick(e, cx); })
@@ -64,23 +73,26 @@ export function button(t, id, label, onClick, { iconName, primary, disabled, tip
     .when(Boolean(label), (el) => el.child(label));
 }
 
+// A section's title: sentence case, 12 semibold, a quiet count, the fold chevron after it.
 export function section(t, id, title, count, open, onToggle, extra) {
-  return h_flex().id(id).h(28).px(12).gap(6).items_center().cursor_pointer().on_click(onToggle)
-    .child(icon(open ? "chevron-down" : "chevron", 12).text_color(t.dim))
-    .child(div().text_size(11).font_semibold().text_color(t.muted).child(title.toUpperCase()))
+  return h_flex().id(id).h(28).px(14).gap(6).items_center().cursor_pointer().on_click(onToggle)
+    .hover((s) => s.text_color(t.foreground))
+    .child(div().text_size(12).font_semibold().text_color(t.foreground).child(title))
     .when(count !== null && count !== undefined, (el) => el.child(div().text_size(11).text_color(t.dim).child(String(count))))
+    .child(icon(open ? "chevron-down" : "chevron", 11).text_color(t.dim))
     .child(div().flex_1())
     .when(Boolean(extra), (el) => el.child(extra));
 }
 
+// An empty state: one quiet line on the surface, no box.
 export function empty(t, text) {
-  return div().mx(12).my(4).px(12).py(10).rounded(8).border_1().border_color(t.border)
-    .text_size(12).text_color(t.dim).child(text);
+  return div().mx(14).my(4).py(6).text_size(12).text_color(t.dim).child(text);
 }
 
+// A list card: a hairline outline always (white on white reads by its edge), hover fills.
 export function card(t, id, hovered) {
   return v_flex().id(id).mx(8).px(10).py(8).gap(4).rounded(8).border_1()
-    .border_color(hovered ? t.input : "#00000000").bg(hovered ? t.hover : "#00000000");
+    .border_color(hovered ? t.input : t.border).bg(hovered ? t.hover : "#00000000");
 }
 
 // ── Shared rhythm (docs/plans/2026-11-04-desk-overhaul.md): 28px rows, radius 8, hairlines ──
@@ -92,7 +104,7 @@ export const hairline = (t) => div().h(1).flex_none().mx(12).bg(t.border);
 export function iconButton(t, id, name, tip, onClick, { size = 22, color, disabled } = {}) {
   return h_flex().id(id).size(size).flex_none().items_center().justify_center().rounded(6)
     .text_color(disabled ? t.dim : color ?? t.muted)
-    .when(!disabled, (el) => el.cursor_pointer().hover((s) => s.bg(t.raised).text_color(t.foreground)))
+    .when(!disabled, (el) => el.cursor_pointer().hover((s) => s.bg(t.hover).text_color(t.foreground)).active((s) => s.bg(t.selected)))
     .when(Boolean(tip), (el) => el.tooltip(tip))
     .on_mouse_down("left", (_e, cx) => cx.stop_propagation())
     .on_click((e, cx) => { cx.stop_propagation(); if (!disabled) onClick(e, cx); })

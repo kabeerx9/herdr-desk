@@ -2,13 +2,11 @@
 // Left: program, the agent's session title (from the Desk runtime, shared "desk.runtime")
 // else its program, repo/folder, the branch only when it's off main (with its uncommitted
 // count), and the Desk's status mark with how long it has been working. On hover, five buttons, the hovered one named:
-// Claude beside, open in Zed, split, zoom, close. Props from the app: { pane, terminal }.
+// Claude beside, open in Zed, split, zoom, close. Every glyph one colour (the text's). Props from the app: { pane, terminal }.
 
 import { View, div, svg, image } from "gpui-kit";
 import { h_flex } from "gpui-base";
 import { panes, spaces, props, run, theme, home, exec, shared } from "herdr";
-
-const CLAUDE = "#d97757";
 
 function programIcon(p, size, color) {
   if (!p?.icon) return null;
@@ -75,8 +73,8 @@ export default class Pane extends View {
   }
 
   button(t, id, iconEl, tip, onClick) {
-    return div().id(id).p(3).rounded(4).flex_none().text_color(t.dim).cursor_pointer().tooltip(tip)
-      .hover((s) => s.bg(t.hover).text_color(t.foreground))
+    return div().id(id).p(3).rounded(5).flex_none().text_color(t.dim).cursor_pointer().tooltip(tip)
+      .hover((s) => s.bg(t.hover).text_color(t.foreground)).active((s) => s.bg(t.selected))
       .on_hover((h, cx) => { this.tip = h ? tip : this.tip === tip ? null : this.tip; cx.notify(); })
       .on_click((_e, cx) => { cx.stop_propagation(); onClick(cx); })
       .child(iconEl);
@@ -100,7 +98,7 @@ export default class Pane extends View {
     return h_flex()
       .id(`pane-head-${pane}`)
       .size_full().px(10).gap(8).items_center()
-      .bg(p.focused ? t.background : t.surface)
+      .bg(t.background)
       .border_b(1).border_color(t.border)
       .text_size(12)
       .on_hover((hovered, cx) => { this.hovered = hovered; if (!hovered) this.tip = null; cx.notify(); })
@@ -126,7 +124,7 @@ export default class Pane extends View {
         // The hovered button's name, spelled out beside the buttons.
         .when(Boolean(this.tip), (el) => el.child(div().flex_none().mr(2).text_size(11).text_color(t.muted).child(this.tip)))
         .when(Boolean(cwd), (el) => el
-          .child(this.button(t, `ph-c-${pane}`, svg("icons/claude.svg").size(14).text_color(CLAUDE), "New Claude beside",
+          .child(this.button(t, `ph-c-${pane}`, svg("icons/claude.svg").size(14), "New Claude beside",
             () => run("pane.split", { direction: "right", pane, argv: ["claude"] })))
           .child(this.button(t, `ph-e-${pane}`, ic("editor"), "Open in Zed", () => exec("open", ["-a", "Zed", this.git?.root ?? cwd]))))
         .child(this.button(t, `ph-r-${pane}`, ic("split-right"), "Split", () => run("pane.split", { direction: "right", pane })))

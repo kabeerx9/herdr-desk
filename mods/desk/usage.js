@@ -96,7 +96,7 @@ export class UsagePopover {
         .child(div().text_size(13.5).font_semibold().text_color(t.foreground).child(p.provider))
         .child(div().flex_1())
         .when(Boolean(p.plan), (el) => el.child(div().px(7).h(20).flex().items_center().rounded(10)
-          .bg(t.accent + "22").text_color(t.accent).text_size(11).font_medium().child(p.plan))))
+          .border_1().border_color(t.border).text_color(t.muted).text_size(11).font_medium().child(p.plan))))
       .when(Boolean(p.error), (el) => el.child(div().text_size(11.5).text_color(t.ansi1).child(p.error)))
       .children(p.windows.map((w) => v_flex().gap(6)
         .child(h_flex().items_center()

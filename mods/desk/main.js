@@ -1,7 +1,7 @@
 import { View, div } from "gpui-kit";
 import { v_flex, h_flex } from "gpui-base";
 import { exec, spaces, theme, run, props, notify, home, shared, setShared, nextCommand } from "herdr";
-import { icon, tileColor, ago, pill, button, section, empty, card } from "./ui.js";
+import { icon, tileColor, ago, pill, button, section, empty, card, statusMark } from "./ui.js";
 import { GitPanel } from "./git.js";
 import { TABS, currentTab, setOpen } from "./tabs.js";
 import { Rail } from "./rail.js";
@@ -319,18 +319,17 @@ class Panel {
       const prs = this.reviews.filter((r) => r.project === p || r.project?.name === p.name).length;
       const mine = this.mine.filter((r) => r.project?.name === p.name).length;
       const issues = this.issues[p.name]?.length ?? 0;
-      const tile = tileColor(t, p.name);
       const counts = [prs && `${prs} to review`, mine && `${mine} mine`, issues && `${issues} issues`].filter(Boolean).join(" · ");
       return card(t, id, hovered).cursor_pointer()
         .on_hover((h, cx) => this.hover(id, h, cx))
         .on_click(() => this.openProject(p))
         .child(h_flex().gap(10).items_center()
           .child(div().size(30).flex_none().rounded(8).flex().items_center().justify_center()
-            .bg(tile + "26").text_color(tile).text_size(13).font_semibold().child(p.name[0].toUpperCase()))
+            .border_1().border_color(t.border).text_color(t.dim).child(icon("projects", 14)))
           .child(v_flex().flex_1().min_w(0).gap(2)
             .child(h_flex().gap(6).items_center()
               .child(div().min_w(0).truncate().text_size(13).font_semibold().text_color(space?.active ? t.foreground : t.muted).child(p.name))
-              .when(Boolean(space?.status), (el) => el.child(pill(t, space.status, t[space.status]))))
+              .when(Boolean(space?.status) && space.status !== "idle", (el) => el.child(statusMark(t, space.status, 12))))
             .child(h_flex().gap(5).items_center().text_size(11).text_color(t.dim)
               .child(icon("branch", 11))
               .child(div().min_w(0).truncate().child(g ? g.branch : "—"))

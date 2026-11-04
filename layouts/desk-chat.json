@@ -10,10 +10,13 @@
           "id": "brand",
           "type": "block",
           "content": {
-            "mod": "workspace-chrome"
+            "mod": "desk-spaces",
+            "props": {
+              "top": true
+            }
           },
           "size": {
-            "px": 46
+            "px": 44
           },
           "window_drag": true
         },
@@ -90,12 +93,7 @@
                       "main": true
                     }
                   },
-                  "background": "background",
-                  "border": {
-                    "width": 1,
-                    "color": "border"
-                  },
-                  "radius": 10
+                  "background": "background"
                 },
                 {
                   "id": "main",
@@ -120,11 +118,12 @@
                         "width": 1,
                         "color": "accent"
                       },
-                      "radius": 10,
+                      "radius": 8,
                       "gap": 8,
                       "lone": true
                     }
-                  }
+                  },
+                  "padding": 8
                 }
               ],
               "floating": [
@@ -175,8 +174,12 @@
               "hidden": true
             }
           ],
-          "padding": 8,
-          "gap": 8
+          "padding": 0,
+          "gap": 0,
+          "divider": {
+            "width": 1,
+            "color": "border"
+          }
         },
         {
           "id": "status",

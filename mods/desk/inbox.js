@@ -40,13 +40,13 @@ function attentionCard(panel, t, item) {
   };
   const live = item.address ? agents().find((a) => a.address === item.address) : null;
   const canPut = item.address && !["permission", "disconnected"].includes(item.kind) && !["working", "blocked"].includes(live?.status);
-  return v_flex().id(id).mx(8).mb(6).px(10).py(8).gap(6).rounded(8).border_1().border_color(t.border)
+  return v_flex().id(id).mx(8).mb(6).px(12).py(10).gap(6).rounded(10).border_1().border_color(t.border).bg(t.background)
     .child(h_flex().gap(8).items_center()
       .child(statusMark(t, ATTENTION_MARK[item.kind] ?? "blocked", 12))
-      .child(div().min_w(0).flex_1().truncate().text_size(12).font_semibold().text_color(t.foreground).child(item.title || item.kind))
+      .child(div().min_w(0).flex_1().truncate().text_size(13).font_semibold().text_color(t.foreground).child(item.title || item.kind))
       .child(div().text_size(10.5).text_color(t.dim).child(since(item.at) ?? "")))
-    .child(div().h(16).flex_none().text_size(10.5).text_color(t.dim).truncate().child(item.desk_name ?? item.task ?? item.address ?? "Desk"))
-    .when(Boolean(item.text), (el) => el.child(div().id(`${id}-text`).max_h(expanded ? 200 : 48).overflow_y_scrollbar().text_size(11.5).line_height(1.4).text_color(t.muted)
+    .child(div().h(16).flex_none().text_size(11).text_color(t.dim).truncate().child(item.desk_name ?? item.task ?? item.address ?? "Desk"))
+    .when(Boolean(item.text), (el) => el.child(div().id(`${id}-text`).max_h(expanded ? 200 : 48).overflow_y_scrollbar().text_size(12).line_height(1.5).text_color(t.muted)
       .child(item.text)))
     .child(h_flex().gap(5).items_center().flex_wrap()
       .child(button(t, `${id}-open`, "Open", open, { primary: true, disabled: !item.task && !item.address }))
@@ -54,7 +54,7 @@ function attentionCard(panel, t, item) {
       .when(Boolean(item.text?.length > 150), (el) => el.child(button(t, `${id}-more`, expanded ? "Less" : "Details", (_e, cx) => panel.toggle(id, cx))))
       .child(div().flex_1())
       .when(Boolean(canPut), (el) => el.children(triageIcons(t, id, panel, item.address, false)))
-      .when(!["permission", "disconnected"].includes(item.kind), (el) => el.child(button(t, `${id}-dismiss`, "Acknowledge", (_e, cx) => act(["attention-dismiss", "--id", item.id], cx), { tip: "Mark this item seen; no message is sent" }))))
+      .when(!["permission", "disconnected"].includes(item.kind), (el) => el.child(button(t, `${id}-dismiss`, "Acknowledge", (_e, cx) => act(["attention-dismiss", "--id", item.id], cx), { variant: "ghost", tip: "Mark this item seen; no message is sent" }))))
     .when(Boolean(canPut), (el) => el.child(snoozeChips(t, id, panel, item.address, { indent: 0 }) ?? div()));
 }
 const ATTENTION_MARK = { disconnected: "disconnected", done: "done", failed: "failed", uncertain: "failed", permission: "blocked", blocked: "blocked", ask: "blocked" };
@@ -78,14 +78,14 @@ function agentRow(panel, t, a, group, pane, tab, put) {
   const where = put ? settledNote(s) : [offMain(pane?.branch) ? pane.branch : shortPath(pane?.cwd), time].filter(Boolean).join(" · ");
   const name = s?.title || a.title || a.tab_name;
   const actions = s ? triageIcons(t, id, panel, a.address, Boolean(put)) : [];
-  return v_flex().child(h_flex().id(id).h(ROW).mx(8).px(8).gap(8).items_center().rounded(8).cursor_pointer()
+  return v_flex().child(h_flex().id(id).h(ROW).mx(8).px(8).gap(8).items_center().rounded(6).cursor_pointer()
     .bg(hovered ? t.hover : "#00000000")
     .on_hover((h, cx) => panel.hover(id, h, cx))
     .on_click(() => openTerminal(a.address))
     .tooltip(`${a.space_name} › ${a.tab_name}${a.program?.name ? ` · ${a.program.name}` : ""}`)
     .child(h_flex().w(14).flex_none().justify_center().child(statusMark(t, a.status, 12)))
-    .child(div().flex_none().max_w(110).truncate().text_size(12.5).font_medium().text_color(put ? t.muted : t.foreground).child(a.space_name))
-    .child(div().min_w(0).flex_shrink_1().truncate().text_size(12.5).text_color(t.muted).child(name))
+    .child(div().flex_none().max_w(110).truncate().text_size(13).font_medium().text_color(put ? t.muted : t.foreground).child(a.space_name))
+    .child(div().min_w(0).flex_shrink_1().truncate().text_size(12).text_color(t.dim).child(name))
     .child(div().flex_1())
     .when(!hovered || !actions.length, (el) => el.child(div().flex_none().max_w(110).truncate().text_size(11).text_color(t.dim).child(where)))
     .when(hovered && actions.length > 0, (el) => el.child(h_flex().flex_none().gap(1).children(actions))))

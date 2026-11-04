@@ -2,7 +2,7 @@ import { div, svg } from "gpui-kit";
 import { h_flex, v_flex } from "gpui-base";
 import { theme, shared, setShared, terminals, agents, exec, appHome, notify } from "herdr";
 import { icon, button, tileColor, statusMark, iconButton, offMain, mostUrgent, ROW } from "./ui.js";
-import { roleTile } from "./roles.js";
+// Roles draw as one-colour glyphs here (no tinted tiles): see glyph().
 import { runtimeData, openDesk, sessionOf, settledState, settledNote, triageIcons, snoozeChips, refreshRuntime } from "./workflows.js";
 import { Desks, deskMembers, showTerminals, openTerminal } from "./desks.js";
 import { openLimits } from "./usage.js";
@@ -152,7 +152,7 @@ export class DeskCard {
   // One 28px row: lead, name, quiet meta, then its hover actions (or what it shows at rest) and mark.
   row(t, id, { lead, name, meta, metaColor, rest, mark, actions = [], onClick, tip, indent = 0, muted = false }) {
     const hovered = this.hovered === id;
-    return h_flex().id(id).h(ROW).flex_none().mx(6).pl(6 + indent).pr(4).gap(8).items_center().rounded(8)
+    return h_flex().id(id).h(ROW).flex_none().mx(6).pl(8 + indent).pr(4).gap(8).items_center().rounded(6)
       .when(Boolean(onClick), (el) => el.cursor_pointer())
       .bg(hovered ? t.hover : "#00000000")
       .on_hover((h, cx) => this.hover(id, h, cx))
@@ -160,7 +160,7 @@ export class DeskCard {
       .on_click((_e, cx) => { cx.stop_propagation(); onClick?.(cx); })
       .when(Boolean(tip), (el) => el.tooltip(tip))
       .when(Boolean(lead), (el) => el.child(lead))
-      .child(div().min_w(0).flex_shrink_1().truncate().text_size(12.5).text_color(muted ? t.muted : t.foreground).child(name))
+      .child(div().min_w(0).flex_shrink_1().truncate().text_size(13).text_color(muted ? t.muted : t.foreground).child(name))
       .when(Boolean(meta), (el) => el.child(div().min_w(0).flex_shrink_1().truncate().text_size(11).text_color(metaColor ?? t.dim).child(meta)))
       .child(div().flex_1())
       .when(hovered && actions.length > 0, (el) => el.child(h_flex().flex_none().gap(1).children(actions)))
@@ -179,8 +179,8 @@ export class DeskCard {
 
   // A folded group ("Settled · 2", "Previous · 3").
   shelfRow(t, id, label, count, open, onToggle) {
-    return h_flex().id(id).h(ROW).flex_none().mx(6).pl(6).pr(8).gap(6).items_center().rounded(8).cursor_pointer()
-      .text_size(11.5).text_color(t.dim).hover((s) => s.bg(t.hover).text_color(t.muted))
+    return h_flex().id(id).h(ROW).flex_none().mx(6).pl(8).pr(8).gap(6).items_center().rounded(6).cursor_pointer()
+      .text_size(12).text_color(t.dim).hover((s) => s.bg(t.hover).text_color(t.muted))
       .on_mouse_down("left", (_e, cx) => cx.stop_propagation())
       .on_click((_e, cx) => { cx.stop_propagation(); onToggle(); cx.notify(); })
       .child(icon(open ? "chevron-down" : "chevron", 11)).child(`${label} · ${count}`);
@@ -194,20 +194,20 @@ export class DeskCard {
   switcher(t) {
     const terms = Boolean(shared("deskchat.terminals"));
     const seg = (id, name, text, on, onClick) => h_flex().id(id).h(24).w(28).justify_center().items_center().rounded(6).cursor_pointer()
-      .bg(on ? t.background : "#00000000").text_color(on ? t.foreground : t.muted)
+      .bg(on ? t.background : "#00000000").text_color(on ? t.foreground : t.dim)
+      .when(on, (el) => el.border_1().border_color(t.border))
       .when(!on, (el) => el.hover((s) => s.text_color(t.foreground)))
       .on_mouse_down("left", (_e, cx) => cx.stop_propagation())
       .on_click((_e, cx) => { cx.stop_propagation(); onClick(); })
       .tooltip(text).child(icon(name, 13));
-    return h_flex().flex_none().p(2).gap(2).rounded(8).bg(t.raised)
+    return h_flex().flex_none().p(2).gap(2).rounded(8).bg(t.raised).border_1().border_color(t.border)
       .child(seg("sw-chat", "chat", "Chat", !terms, () => showTerminals(false)))
       .child(seg("sw-terms", "terminal", "Terminals", terms, () => showTerminals(true)));
   }
 
-  tile(t, name, size) {
-    return div().size(size).flex_none().rounded(Math.round(size * 0.3)).flex().items_center().justify_center()
-      .bg(tileColor(t, name)).text_color("#ffffff").text_size(Math.round(size * 0.46)).font_bold()
-      .child([...name][0]?.toUpperCase() ?? "?");
+  // A role's glyph in one colour: the text's, a step down.
+  glyph(t, role, size = 14) {
+    return svg(`mods/desk/icons/${role?.icon ?? "terminal"}.svg`).size(size).flex_none().text_color(t.dim);
   }
 
   summary(members, trees) {
@@ -307,7 +307,7 @@ export class DeskCard {
       const more = iconButton(t, `${id}-more`, open ? "chevron-down" : "chevron", open ? "Hide its actions" : "Its actions: compact, fresh start, review, QA, PR",
         (_e, cx) => { this.open = open ? null : m.address; cx.notify(); }, { color: open ? t.foreground : undefined });
       const rows = [this.row(t, id, {
-        indent: m.depth * 12, lead: role ? roleTile(div, svg, t, role, 16) : div().size(16),
+        indent: m.depth * 12, lead: role ? this.glyph(t, role) : div().size(16),
         name: role?.name ?? m.role, meta: quiet ? settledNote(s) : s?.title ?? null, muted: quiet,
         mark: statusMark(t, m.status ?? "idle", 12), actions: [...triageIcons(t, id, this, m.address, quiet), more],
         onClick: () => openTerminal(m.address), tip: m.note ?? s?.title ?? "Open its terminal",
@@ -336,7 +336,7 @@ export class DeskCard {
     const present = new Set(members.map((m) => m.role));
     const adder = this.adding ? h_flex().px(14).pb(6).gap(5).flex_wrap()
       .children((this.roles.list ?? []).map((r) => this.desks.chip(t, `cadd-${r.id}`, false, `${r.name}${present.has(r.id) ? " +1" : ""}`,
-        (_e, cx) => { this.adding = false; this.desks.busy(`add-${r.id}`, () => this.desks.addMember(r, d), cx); }, roleTile(div, svg, t, r, 16)))) : null;
+        (_e, cx) => { this.adding = false; this.desks.busy(`add-${r.id}`, () => this.desks.addMember(r, d), cx); }, this.glyph(t, r, 13)))) : null;
     const add = iconButton(t, "card-add", this.adding ? "minus" : "plus", this.adding ? "Cancel" : "Add an agent",
       (_e, cx) => { this.adding = !this.adding; cx.notify(); }, { color: t.accent });
     const n = (k) => members.filter((m) => m.status === k).length;
@@ -370,7 +370,7 @@ export class DeskCard {
     }
     const rows = trees.map((m) => {
       const g = this.git[m.cwd], role = this.roles.byId(m.role), read = m.cwd in this.git;
-      const lead = role ? roleTile(div, svg, t, role, 16) : icon("branch", 13).text_color(t.dim);
+      const lead = role ? this.glyph(t, role) : icon("branch", 13).text_color(t.dim);
       if (read && !g) return this.row(t, `ch-${m.address}`, { lead, name: role?.name ?? m.role, meta: "not a git repo", muted: true, onClick: () => openTerminal(m.address), tip: m.cwd });
       const meta = g ? [offMain(g.branch, g.base) ? g.branch : null, g.ahead ? `↑${g.ahead}` : null].filter(Boolean).join(" ") : "…";
       const tip = g ? [`${plural(g.files, "file")} changed since ${g.base || "HEAD"}`, g.branch, g.dirty ? `${g.dirty} uncommitted` : null].filter(Boolean).join(" · ") : "Reading git…";
@@ -409,7 +409,7 @@ export class DeskCard {
         onClick: () => openLimits(providers[0].provider), tip: "Weekly plan limits" }));
     return v_flex().child(this.head(t, "usage", "Usage", "this week")).children(providers.map((p) => {
       const w = week(p), id = `usage-${p.provider}`, hovered = this.hovered === id;
-      return v_flex().id(id).h(36).flex_none().mx(6).px(8).gap(5).justify_center().rounded(8).cursor_pointer()
+      return v_flex().id(id).h(36).flex_none().mx(6).px(8).gap(5).justify_center().rounded(6).cursor_pointer()
         .bg(hovered ? t.hover : "#00000000").on_hover((h, cx) => this.hover(id, h, cx))
         .on_mouse_down("left", (_e, cx) => cx.stop_propagation())
         .on_click((_e, cx) => { cx.stop_propagation(); openLimits(p.provider); })
@@ -448,9 +448,8 @@ export class DeskCard {
     const sub = folded && members.length ? this.summary(members, trees) : where;
     const toggle = iconButton(t, "card-toggle", folded ? "chevron-down" : "up", folded ? "Show the desk's team, lineage, changes and pull requests" : "Fold",
       (_e, cx) => { this.collapsed = !folded; store.set("card.compact", this.collapsed); this.refresh(cx, { prs: true }); }, { size: 24 });
-    const header = h_flex().id("card-head").h(HEAD).flex_none().pl(12).pr(8).gap(10).items_center()
+    const header = h_flex().id("card-head").h(HEAD).flex_none().pl(14).pr(8).gap(10).items_center()
       .on_mouse_down("left", (_e, cx) => cx.stop_propagation())
-      .child(this.tile(t, name, 24))
       .child(v_flex().min_w(0).flex_1().gap(1)
         .child(h_flex().min_w(0).gap(6).items_center()
           .child(div().truncate().text_size(13).font_semibold().text_color(t.foreground).child(name))

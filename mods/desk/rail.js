@@ -41,20 +41,23 @@ export class Rail {
 
   render() {
     const t = theme(), open = isOpen(), active = currentTab(), counts = shared("desk.counts") ?? {}, inbox = inboxCount();
-    return v_flex().id("desk-rail").size_full().pt(10).gap(4).items_center().bg(t.chrome)
+    return v_flex().id("desk-rail").size_full().pt(10).gap(2).items_center().bg(t.chrome)
       .children(TABS.map((tab) => {
         const on = open && tab.id === active, n = tab.id === "inbox" ? inbox.n : counts[tab.id], hovered = this.hovered === tab.id;
-        return div().id(`rail-${tab.id}`).relative().size(34).flex().items_center().justify_center().rounded(8).cursor_pointer()
+        return div().id(`rail-${tab.id}`).relative().size(32).flex().items_center().justify_center().rounded(6).cursor_pointer()
           .bg(on ? t.selected : hovered ? t.hover : "#00000000")
-          .text_color(on ? t.foreground : hovered ? t.foreground : t.muted)
+          .text_color(on || hovered ? t.foreground : t.dim)
           .tooltip(tab.label)
           .on_hover((h, cx) => { this.hovered = h ? tab.id : this.hovered === tab.id ? null : this.hovered; cx.notify(); })
           .on_click(() => choose(tab.id))
-          .child(svg(`mods/desk/icons/${tab.icon}.svg`).size(17))
-          .when(on, (el) => el.child(div().absolute().right(-7).top(9).w(3).h(16).rounded(2).bg(t.accent)))
-          .when(Boolean(n), (el) => el.child(div().absolute().top(2).right(1).min_w(14).h(14).px(3).rounded(7)
-            .flex().items_center().justify_center().bg(tab.id === "git" || (tab.id === "inbox" && inbox.blocked) ? t.blocked : tab.id === "inbox" ? t.done : t.accent)
-            .text_color(t.accent_foreground).text_size(9).font_semibold().child(n > 99 ? "99+" : String(n))));
+          .child(svg(`mods/desk/icons/${tab.icon}.svg`).size(16))
+          // Counts: the accent; amber only when something waits on you. A chrome ring cuts it from the icon.
+          .when(Boolean(n), (el) => {
+            const warn = tab.id === "git" || (tab.id === "inbox" && inbox.blocked);
+            return el.child(div().absolute().top(1).right(0).min_w(15).h(15).px(3).rounded(8).border_2().border_color(t.chrome)
+              .flex().items_center().justify_center().bg(warn ? t.blocked : t.accent)
+              .text_color(warn ? t.background : t.accent_foreground).text_size(9).font_semibold().child(n > 99 ? "99+" : String(n)));
+          });
       }))
       .child(div().flex_1())
       .child(railMeters(t));
