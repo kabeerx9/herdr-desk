@@ -253,16 +253,14 @@ export default class Spaces extends View {
     setShared("desk.view", "new");
   }
 
-  // A new session in desk-chat: pick a folder, open a space there and a fresh desk for it (nothing
-  // starts until you send). Other machines and other layouts get Herdr's plain new space.
+  // A new session in desk-chat: pick a folder and the main chat starts a desk there with the CTO
+  // (team opens its space, or reuses the folder's). Other machines and layouts get a plain space.
   newSession(m, cx) {
     if (m || !chatLayout()) return run("space.new", m ? { machine: m } : {});
     cx.spawn(async () => {
-      const folder = await pickFolder({ prompt: "Open a folder for a new session" });
+      const folder = await pickFolder({ prompt: "Choose a folder for a new desk" });
       if (!folder) return;
-      run("space.new", { folder });
-      setShared("desk.here", { at: Date.now() });
-      setShared("desk.view", "new");
+      setShared("desk.start", { folder, at: Date.now() });
       showTerminals(false);
     });
   }
@@ -448,7 +446,7 @@ export default class Spaces extends View {
       .child(h_flex().h(31).pl(16).pr(10).items_center().justify_between().text_size(11.5).text_color(t.dim)
         .when(!collapsed, el => el.child("Spaces"))
         .child(div().id("space-new").size(26).flex_none().flex().items_center().justify_center().rounded(6).hover(s => s.bg(t.hover).text_color(t.foreground))
-          .tooltip(chatLayout() ? "New session: pick a folder" : "New space")
+          .tooltip(chatLayout() ? "New desk: pick a folder" : "New space")
           .on_click((_e, cx) => this.newSession(null, cx)).child(svg("mods/workspace-chrome/plus.svg").size(14))))
       .child(v_flex().flex_1().min_h(0).px(8).pb(14).overflow_y_scrollbar().mode("always")
         .on_mouse_up("left", (_e, cx) => { this.pressed = null; cx.notify(); })

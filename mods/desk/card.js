@@ -1,13 +1,14 @@
 import { div, svg } from "gpui-kit";
 import { h_flex, v_flex } from "gpui-base";
-import { theme, shared, terminals, agents, exec, home, readTextFile, run } from "herdr";
-import { icon, statusBadge } from "./ui.js";
-import { Roles, roleTile } from "./roles.js";
-import { deskMembers, showTerminals, openTerminal } from "./desks.js";
+import { theme, shared, setShared, terminals, agents, exec, run } from "herdr";
+import { icon, statusBadge, button } from "./ui.js";
+import { roleTile } from "./roles.js";
+import { Desks, deskMembers, showTerminals, openTerminal } from "./desks.js";
 
-// The floating card at the chat's top right (layouts/desk-chat.json), after Codex's: the open
-// desk's changes per worktree, its pull requests and its agents with their sub-agents, plus the
-// Chat / Terminals switch. It follows the desk the chat shows (shared "desk.view").
+// The floating card at the chat's top right (layouts/desk-chat.json), after Codex's, and the one
+// place for a desk's controls: the Chat / Terminals switch, its changes per worktree, its pull
+// requests, its agents (add one, an agent's actions), and Wrap up, then Delete. It follows the
+// desk the chat shows (shared "desk.view") and acts through the same Desks code as the chat.
 
 const WIDTH = 284;
 // One line per worktree: branch, base, commits ahead, uncommitted files, and the shortstat of
@@ -29,11 +30,12 @@ const store = {
 
 export class DeskCard {
   init(_props, cx) {
-    this.roles = new Roles();
-    this.roles.load(cx);
+    this.desks = new Desks(null, cx, {});
+    this.roles = this.desks.roles;
+    this.adding = false;   // the role chips under Agents
+    this.open = null;      // the agent whose actions are shown
     this.git = {};      // cwd → { branch, base, ahead, dirty, files, adds, dels }
     this.prs = {};      // cwd → [{ number, title, state, url }]
-    this.names = {};    // desk slug → name
     this.hovered = null;
     this.collapsed = store.get("card.collapsed", false);
     this.key = "";
@@ -70,12 +72,6 @@ export class DeskCard {
     const slug = this.slug, trees = this.worktrees();
     if (!slug || this.collapsed) return cx.notify();
     cx.spawn(async (cx) => {
-      if (!this.names[slug]) {
-        try {
-          const head = JSON.parse((await readTextFile(`${home()}/.herdr/team/${slug}.jsonl`)).split("\n")[0]);
-          this.names[slug] = head?.name ?? slug;
-        } catch { this.names[slug] = slug; }
-      }
       for (const m of trees) {
         const r = await exec("sh", ["-c", GIT, "git", m.cwd]);
         const [branch, base, ahead, dirty, stat = ""] = r.stdout.replace(/\n$/, "").split("\t");
@@ -133,19 +129,21 @@ export class DeskCard {
   }
 
   render(_cx) {
-    const t = theme(), slug = this.slug;
-    const small = Boolean(shared("deskchat.narrow")) || Boolean(shared("deskchat.terminals"));
-    if (small || !slug) return h_flex().id("desk-card").p(4).child(this.switcher(t));
-
+    const t = theme(), slug = this.slug, d = slug ? this.desks.desk(slug) : null;
+    if (!d) return h_flex().id("desk-card").p(4).child(this.switcher(t));
+    // Over the terminals, or a narrow chat: just the name and the switch, folded.
+    const folded = this.collapsed || Boolean(shared("deskchat.terminals")) || Boolean(shared("deskchat.narrow"));
     const members = deskMembers(slug), subs = this.subagents(members);
-    const name = this.names[slug] ?? slug;
-    const header = h_flex().id("card-head").h(38).pl(14).pr(6).gap(8).items_center().cursor_pointer()
+    const header = h_flex().id("card-head").h(38).pl(12).pr(6).gap(8).items_center().cursor_pointer()
       .on_mouse_down("left", (_e, cx) => cx.stop_propagation())
-      .on_click((_e, cx) => { cx.stop_propagation(); this.collapsed = !this.collapsed; store.set("card.collapsed", this.collapsed); this.refresh(cx, { prs: true }); })
-      .child(icon(this.collapsed ? "chevron" : "chevron-down", 12).text_color(t.dim))
-      .child(div().min_w(0).flex_1().truncate().text_size(12.5).font_semibold().text_color(t.foreground).child(name))
+      .on_click((_e, cx) => { cx.stop_propagation(); this.collapsed = !folded ? true : false; store.set("card.collapsed", this.collapsed);
+        if (folded) { setShared("deskchat.narrow", false); } this.refresh(cx, { prs: true }); })
+      .child(icon(folded ? "chevron" : "chevron-down", 12).text_color(t.dim))
+      .child(v_flex().min_w(0).flex_1()
+        .child(div().truncate().text_size(12.5).font_semibold().text_color(t.foreground).child(d.name))
+        .when(!folded && Boolean(d.project), (el) => el.child(div().truncate().text_size(10.5).text_color(t.dim).child(d.project))))
       .child(this.switcher(t));
-    if (this.collapsed) return v_flex().id("desk-card").w(WIDTH).child(header);
+    if (folded) return v_flex().id("desk-card").w(WIDTH).child(header);
 
     const trees = this.worktrees();
     const changes = trees.map((m) => {
@@ -175,14 +173,21 @@ export class DeskCard {
 
     const app = new Map(agents().map((a) => [a.address, a]));
     const people = [
-      ...members.map((m) => {
-        const role = this.roles.byId(m.role);
-        return this.row(t, `ag-${m.address}`, () => openTerminal(m.address), [
+      ...members.flatMap((m) => {
+        const role = this.roles.byId(m.role), open = this.open === m.address;
+        const more = h_flex().id(`ag-more-${m.address}`).size(22).flex_none().items_center().justify_center().rounded(6).cursor_pointer()
+          .text_color(open ? t.foreground : t.dim).hover((s) => s.bg(t.raised).text_color(t.foreground)).tooltip(open ? "Hide its actions" : "Its actions: compact, fresh start, review, QA, PR")
+          .on_mouse_down("left", (_e, cx) => cx.stop_propagation())
+          .on_click((_e, cx) => { cx.stop_propagation(); this.open = open ? null : m.address; cx.notify(); })
+          .child(icon(open ? "chevron-down" : "chevron", 12));
+        return [this.row(t, `ag-${m.address}`, () => openTerminal(m.address), [
           div().w(m.depth * 12).flex_none(),
           role ? roleTile(div, svg, t, role, 16) : div().size(16),
           div().min_w(0).flex_1().truncate().text_size(12.5).text_color(t.foreground).child(role?.name ?? m.role),
           statusBadge(t, m.status) ?? div(),
-        ], m.note ?? null);
+          more,
+        ], `${m.note ?? "Open its terminal"}`),
+        ...(open ? [div().pt(2).pb(4).child(this.desks.memberDetail(t, m, d))] : [])];
       }),
       ...subs.map((s) => {
         const a = app.get(s.address), status = a?.status ?? null;
@@ -194,14 +199,38 @@ export class DeskCard {
         ], "Sub-agent: peek at its terminal");
       }),
     ];
+    const present = new Set(members.map((m) => m.role));
+    const adder = this.adding ? h_flex().px(12).pb(6).gap(5).flex_wrap()
+      .children((this.roles.list ?? []).map((r) => this.desks.chip(t, `cadd-${r.id}`, false, `${r.name}${present.has(r.id) ? " +1" : ""}`,
+        (_e, cx) => { this.adding = false; this.desks.busy(`add-${r.id}`, () => this.desks.addMember(r, d), cx); }, roleTile(div, svg, t, r, 16)))) : null;
+    const add = h_flex().id("card-add").h(20).px(6).gap(4).items_center().rounded(5).cursor_pointer().text_size(11.5).text_color(t.dim)
+      .hover((s) => s.bg(t.raised).text_color(t.foreground))
+      .on_mouse_down("left", (_e, cx) => cx.stop_propagation())
+      .on_click((_e, cx) => { cx.stop_propagation(); this.adding = !this.adding; cx.notify(); })
+      .child(icon(this.adding ? "minus" : "plus", 11)).child(this.adding ? "Cancel" : "Add");
 
-    return v_flex().id("desk-card").w(WIDTH).pb(8)
+    // Wrap up while anyone's running; once they're all closed, Delete (click twice).
+    const acting = this.desks.acting, deleting = Date.now() < this.desks.confirmDelete;
+    const footer = h_flex().px(12).pt(10).gap(6).items_center()
+      .when(members.length > 0, (el) => el.child(button(t, "card-wrap", acting === "wrap" ? "Wrapping up…" : "Wrap up", (_e, cx) => this.desks.wrapUp(d, cx),
+        { disabled: Boolean(acting), tip: "Each agent flags anything left locally, or cleans up its worktree and closes" })))
+      .when(!members.length, (el) => el.child(button(t, "card-del", deleting ? "Click again to delete" : "Delete desk", (_e, cx) => this.desks.deleteDesk(d, cx),
+        { iconName: "trash", disabled: Boolean(acting), tip: "Nobody's running. Kept in ~/.herdr/team/.deleted, so it can be put back" })))
+      .child(div().flex_1())
+      .when(Boolean(acting) && acting !== "wrap", (el) => el.child(div().text_size(11).text_color(t.dim).child("Working…")));
+
+    return v_flex().id("desk-card").w(WIDTH).pb(10)
       .child(header)
-      .child(div().h(1).mx(14).bg(t.border))
+      .child(div().h(1).mx(12).bg(t.border))
       .child(this.label(t, "Changes"))
       .children(changes.length ? changes : [div().px(14).py(4).text_size(12).text_color(t.dim).child("No worktrees yet")])
       .when(prs.length > 0, (el) => el.child(this.label(t, "Pull requests")).children(prs))
-      .child(this.label(t, subs.length ? `Agents · ${subs.length} sub-agent${subs.length === 1 ? "" : "s"}` : "Agents"))
-      .children(people.length ? people : [div().px(14).py(4).text_size(12).text_color(t.dim).child("Nobody running")]);
+      .child(h_flex().pr(8).items_center()
+        .child(div().flex_1().child(this.label(t, subs.length ? `Agents · ${subs.length} sub-agent${subs.length === 1 ? "" : "s"}` : "Agents")))
+        .child(div().pt(8).child(add)))
+      .when(Boolean(adder), (el) => el.child(adder))
+      .children(people.length ? people : [div().px(14).py(4).text_size(12).text_color(t.dim).child("Nobody running")])
+      .child(div().h(1).mx(12).mt(10).bg(t.border))
+      .child(footer);
   }
 }

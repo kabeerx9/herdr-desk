@@ -142,6 +142,17 @@ export class Desks {
       const here = shared("desk.here")?.at ?? 0;
       if (here !== this.hereAt) { this.hereAt = here; if (this.loaded !== undefined) { this.newTarget = null; cx.notify(); } }
       if (this.loaded !== undefined && this.view !== this.loaded) this.reload(cx);
+      // The spaces list's "+" asks for a desk in a folder (shared "desk.start"); the main chat
+      // starts it with the CTO and clears the request, so it runs once.
+      const ask = this.wide && shared("desk.start");
+      if (ask?.folder && this.roles.list && !this.acting) {
+        setShared("desk.start", null);
+        const cto = this.roles.list.filter((r) => r.id === "cto");
+        if (cto.length) {
+          this.starting = ask.folder;
+          this.busy("new", () => this.startDesk(ask.folder, cto).finally(() => { this.starting = null; }), cx);
+        }
+      }
     });
     cx.spawn(async (cx) => {
       await exec("mkdir", ["-p", DIR()]);
@@ -293,14 +304,20 @@ export class Desks {
     const chosen = (this.roles.list ?? []).filter((r) => this.newRoles.has(r.id));
     if (!chosen.length) return notify({ title: "Pick who joins", body: "Choose at least one role for the desk.", level: "warning", timeout: 4000 });
     this.busy("new", async () => {
-      const r = await exec(TEAM(), ["new-desk", "--repo", folder, ...(name || task ? ["--name", name || task.split(/\s+/).slice(0, 6).join(" ")] : [])]);
-      if (r.code !== 0) throw new Error(r.stderr.trim() || r.stdout.trim());
-      const desk = { ...JSON.parse(r.stdout), folder };
-      const lead = chosen.find((c) => c.id === "cto");
-      for (const role of chosen) await this.addMember(role, desk, task && (!lead || role === lead) ? task : undefined);
+      await this.startDesk(folder, chosen, { name, task });
       this.newName.set_value(""); this.newTask.set_value("");
-      setShared("desk.view", desk.slug);
     }, cx);
+  }
+
+  // A desk in `folder` with these roles, opened once its first member is running. The task, if
+  // any, goes to the CTO (or to everyone when there is no CTO).
+  async startDesk(folder, roles, { name = "", task = "" } = {}) {
+    const r = await exec(TEAM(), ["new-desk", "--repo", folder, ...(name || task ? ["--name", name || task.split(/\s+/).slice(0, 6).join(" ")] : [])]);
+    if (r.code !== 0) throw new Error(r.stderr.trim() || r.stdout.trim());
+    const desk = { ...JSON.parse(r.stdout), folder };
+    const lead = roles.find((c) => c.id === "cto");
+    for (const role of roles) await this.addMember(role, desk, task && (!lead || role === lead) ? task : undefined);
+    setShared("desk.view", desk.slug);
   }
 
   wrapUp(d, cx) {
@@ -870,14 +887,18 @@ export class Desks {
     // scrolls full width so its scrollbar stays at the window's edge.
     const band = (el) => (this.wide ? h_flex().w_full().flex_none().justify_center().child(el.w_full().max_w(COLUMN + 24)) : el);
     return v_flex().size_full().min_h(0)
-      .child(band(this.wide ? header.border_b(0).pt(14) : header))
-      .when(Boolean(details), (el) => el.child(band(details)))
+      // As the main view, the desk's controls live in the floating card (card.js), not up here.
+      .when(!this.wide, (el) => el.child(header))
+      .when(Boolean(details) && !this.wide, (el) => el.child(details))
+      .when(this.wide, (el) => el.child(div().h(14).flex_none()))
       .when(Boolean(briefs), (el) => el.child(band(briefs)))
       .child(thread)
       .child(band(composer));
   }
 
   render(t) {
+    if (this.starting) return v_flex().size_full().items_center().justify_center()
+      .child(empty(t, `Starting a desk in ${this.starting.split("/").pop() || this.starting}…`));
     const view = this.view;
     const d = view !== "list" && view !== "new" ? this.desk(view) : null;
     if (d) return this.deskView(t, d);
