@@ -6,10 +6,9 @@ import { GitPanel } from "./git.js";
 import { TABS, currentTab, setOpen } from "./tabs.js";
 import { Rail } from "./rail.js";
 import { inboxView } from "./inbox.js";
-import { Team } from "./team.js";
 import { Sidebar } from "./sidebar.js";
 import { startRole } from "./roles.js";
-import { Chat } from "./chat.js";
+import { Desks } from "./desks.js";
 import { UsagePopover } from "./usage.js";
 
 const ME = "kabeerx9";
@@ -57,7 +56,7 @@ const store = {
 
 // One mod, four parts: the panel (props.projects), its icon rail (props.rail),
 // the usage popover the rail opens (props.popover), the sidebar agent list (props.agents),
-// and a team chat thread popped out as a pane (props.chat).
+// and one desk popped out as a pane (props.chat, props.task = the desk).
 export default class Desk extends View {
   init(_props, cx) {
     const p = props();
@@ -70,12 +69,12 @@ export default class Desk extends View {
   render(cx) { return this.part.render(cx); }
 }
 
-// A chat thread in its own pane, beside the terminals.
+// One desk in its own pane, beside the terminals: several can be open at once.
 class ChatPane {
-  init(p, cx) { this.chat = new Chat(cx, { fixed: p.task }); }
+  init(p, cx) { this.chat = new Desks(null, cx, { fixed: p.task }); }
   render(cx) {
     const t = theme();
-    return v_flex().id("chat-pane").size_full().bg(t.chrome).text_color(t.foreground).child(this.chat.render(t, cx));
+    return v_flex().id("chat-pane").size_full().bg(t.chrome).text_color(t.foreground).child(this.chat.render(t));
   }
 }
 
@@ -90,9 +89,7 @@ class Panel {
     this.status = {};
     this.reviews = []; this.mine = []; this.issues = {};
     this.git = new GitPanel(this, cx);
-    this.team = new Team(this, cx);
-    this.chat = new Chat(cx, { toasts: true });
-    cx.timer.every(5000, (cx) => { if (this.tab === "team") this.team.load(cx); });
+    this.desks = new Desks(this, cx, { toasts: true });
     cx.timer.every(15000, (cx) => this.refreshStatus(cx));
     cx.timer.every(120000, (cx) => this.refreshGitHub(cx));
     cx.timer.every(8000, (cx) => { if (this.tab === "git") this.git.refresh(cx); });
@@ -127,7 +124,8 @@ class Panel {
       issues: Object.values(this.issues).reduce((n, l) => n + (l?.length ?? 0), 0),
       git: d?.staged ? d.staged.length + d.unstaged.length : 0,
     };
-    if (JSON.stringify(counts) !== JSON.stringify(shared("desk.counts"))) setShared("desk.counts", counts);
+    const all = { ...shared("desk.counts"), ...counts };  // desks publishes its own count
+    if (JSON.stringify(all) !== JSON.stringify(shared("desk.counts"))) setShared("desk.counts", all);
   }
 
   projects() {
@@ -225,16 +223,16 @@ class Panel {
 
   // Reviews go to the Reviewer role (its own model and prompt) when roles.json has one.
   review(p, repo, pr) {
-    const reviewer = this.team.roles.byId("reviewer");
+    const reviewer = this.desks.roles.byId("reviewer");
     if (!reviewer) return this.agent(p, `review #${pr.number}`, REVIEW(repo, pr));
-    startRole(reviewer, { project: p, space: this.spaceFor(p), task: REVIEW(repo, pr), roles: this.team.roles.list });
+    startRole(reviewer, { project: p, space: this.spaceFor(p), task: REVIEW(repo, pr), roles: this.desks.roles.list });
   }
 
   select(tab, cx) {
     setShared("desk.tab", tab);
     if (tab === "git") this.git.refresh(cx);
     if (tab === "pages") this.refreshPages(cx);
-    if (tab === "team") this.team.load(cx);
+    if (tab === "desks") this.desks.reload(cx);
     cx.notify();
   }
 
@@ -418,12 +416,12 @@ class Panel {
 
   render(cx) {
     const t = theme();
-    const view = { inbox: () => inboxView(this, t), team: () => this.team.render(t, cx), chat: () => this.chat.render(t, cx), projects: () => this.projectsView(t), prs: () => this.prsView(t),
+    const view = { inbox: () => inboxView(this, t), desks: () => this.desks.render(t), projects: () => this.projectsView(t), prs: () => this.prsView(t),
       issues: () => this.issuesView(t), git: () => this.git.render(t, cx), pages: () => this.pagesView(t) }[this.tab];
     return v_flex().id("desk").size_full().bg(t.chrome).text_color(t.foreground)
       .child(this.header(t))
-      // The chat scrolls its own thread and keeps its composer at the bottom.
-      .child(this.tab === "chat" ? v_flex().flex_1().min_h(0).child(view())
+      // Desks scroll their own thread and keep the composer at the bottom.
+      .child(this.tab === "desks" ? v_flex().flex_1().min_h(0).child(view())
         : div().id("desk-body").flex_1().min_h(0).overflow_y_scrollbar().child(view()));
   }
 }

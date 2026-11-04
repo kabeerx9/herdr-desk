@@ -1,3 +1,4 @@
+import { image } from "gpui-kit";
 import { agents, terminals, panes, spaces, run, notify, appHome, home, readTextFile, exec, hc } from "herdr";
 
 // Team roles from roles.json, shared by the Team tab, the sidebar and the PR buttons.
@@ -94,13 +95,14 @@ export async function startRole(role, { task, project, space, folder } = {}) {
 const BRIEFS_SCRIPT = `
 for f in "$@"; do git -C "$f" rev-parse --path-format=absolute --git-common-dir 2>/dev/null; done | sort -u |
 while IFS= read -r d; do
-  for b in "$d"/team/briefs/*.md; do
+  for b in "$d"/team/briefs/*.md "$d"/team/briefs/*/*.md; do
     [ -f "$b" ] || continue
     printf '%s\\t%s\\t%s\\t%s\\n' "$d" "$b" "$(stat -f %m "$b")" "$(grep -m1 -v '^[[:space:]]*$' "$b" | sed 's/^#* *//' | cut -c1-160)"
   done
 done`;
 
-// Every brief waiting in the given folders' repos: { role, path, common, main, repo, title, at }.
+// Every brief waiting in the given folders' repos: { role, desk, path, common, main, repo, title, at }.
+// A desk's CTO writes team/briefs/<desk>/<role>.md; team/briefs/<role>.md has no desk.
 export async function findBriefs(folders) {
   const unique = [...new Set(folders.filter(Boolean))];
   if (!unique.length) return [];
@@ -108,7 +110,8 @@ export async function findBriefs(folders) {
   return r.stdout.split("\n").filter(Boolean).map((line) => {
     const [common, path, mtime, title] = line.split("\t");
     const main = common.endsWith("/.git") ? common.slice(0, -5) : common;
-    return { role: path.split("/").pop().replace(/\.md$/, ""), path, common, main, repo: main.split("/").pop(),
+    const parts = path.split("/"), desk = parts.at(-2) === "briefs" ? null : parts.at(-2);
+    return { role: parts.at(-1).replace(/\.md$/, ""), desk, path, common, main, repo: main.split("/").pop(),
       title: title || "(empty brief)", at: Number(mtime) * 1000 };
   }).sort((a, b) => b.at - a.at);
 }
@@ -123,10 +126,11 @@ export async function fileBrief(brief, to) {
 }
 
 // Starts the brief's role in the brief's repo (bin/team moves the brief to sent/).
-export async function startBrief(brief, roles, space) {
+export async function startBrief(brief, roles, space, { slug, parent } = {}) {
   const role = roles.byId(brief.role);
   if (!role) return notify({ title: `No role "${brief.role}"`, body: "Brief file names must match a role id in roles.json.", level: "error", timeout: 5000 });
-  const args = [role.id, "--repo", brief.main, "--brief", brief.path, "--no-parent", "--requested"];
+  const args = [role.id, "--repo", brief.main, "--brief", brief.path, ...(parent ? ["--parent", parent] : ["--no-parent"]), "--requested"];
+  if (slug ?? brief.desk) args.push("--slug", slug ?? brief.desk);
   if (space && !space.machine) args.push("--space", space.id);
   const out = await team(args);
   if (out) notify({ title: `${role.name} started`, body: out.note ?? brief.title, level: "info", timeout: 4000 });
@@ -149,9 +153,12 @@ export function sessionsInRepo(role, brief) {
   });
 }
 
-// The role's colored tile with its icon (or its initial, without one).
+// The role's face (its avatar, round), else its colored tile with its icon or initial.
 export function roleTile(div, svg, t, role, size, dim = false) {
   const color = t[role.color] ?? role.color ?? t.accent;
+  if (role.avatar) return div().size(size).flex_none().rounded(size / 2).overflow_hidden().bg(color + "26")
+    .when(dim, (el) => el.opacity(0.55))
+    .child(image(`mods/desk/${role.avatar}`).size(size));
   return div().size(size).flex_none().rounded(Math.round(size * 0.28)).flex().items_center().justify_center()
     .bg(color + (dim ? "1a" : "26")).text_color(dim ? color + "c0" : color)
     .child(role.icon

@@ -11,6 +11,7 @@
       "prompt": "roles/cto.md",
       "color": "ansi5",
       "icon": "roles/cto",
+      "avatar": "avatars/cto.png",
       "worktree": false,
       "on_request": false
     },
@@ -24,6 +25,7 @@
       "prompt": "roles/frontend.md",
       "color": "ansi4",
       "icon": "roles/frontend",
+      "avatar": "avatars/frontend.png",
       "worktree": true,
       "on_request": false
     },
@@ -37,6 +39,7 @@
       "prompt": "roles/backend.md",
       "color": "ansi2",
       "icon": "roles/backend",
+      "avatar": "avatars/backend.png",
       "worktree": true,
       "on_request": false
     },
@@ -54,6 +57,7 @@
       "prompt": "roles/reviewer.md",
       "color": "ansi3",
       "icon": "roles/reviewer",
+      "avatar": "avatars/reviewer.png",
       "worktree": false,
       "on_request": true
     },
@@ -67,6 +71,7 @@
       "prompt": "roles/qa.md",
       "color": "ansi6",
       "icon": "roles/qa",
+      "avatar": "avatars/qa.png",
       "worktree": true,
       "on_request": true
     }
