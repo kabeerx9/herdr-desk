@@ -7,6 +7,7 @@ import { TABS, currentTab, setOpen } from "./tabs.js";
 import { Rail } from "./rail.js";
 import { inboxView } from "./inbox.js";
 import { Team } from "./team.js";
+import { Sidebar } from "./sidebar.js";
 import { UsagePopover } from "./usage.js";
 
 const ME = "kabeerx9";
@@ -52,12 +53,12 @@ const store = {
   set(k, v) { try { localStorage.setItem(k, JSON.stringify(v)); } catch {} },
 };
 
-// One mod, three roles: the panel (props.projects), its icon rail (props.rail),
-// and the usage popover the rail opens (props.popover).
+// One mod, four parts: the panel (props.projects), its icon rail (props.rail),
+// the usage popover the rail opens (props.popover), and the sidebar agent list (props.agents).
 export default class Desk extends View {
   init(_props, cx) {
     const p = props();
-    this.part = p?.popover ? new UsagePopover() : p?.rail ? new Rail() : new Panel();
+    this.part = p?.popover ? new UsagePopover() : p?.rail ? new Rail() : p?.agents ? new Sidebar() : new Panel();
     this.part.init(p, cx);
     // Only the rail is always shown, so it takes the key commands.
     if (p?.rail) cx.spawn(async (cx) => { for (;;) { this.part.command(await nextCommand()); cx.notify(); } });

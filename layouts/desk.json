@@ -36,7 +36,10 @@
               "id": "agents",
               "type": "block",
               "content": {
-                "mod": "agents"
+                "mod": "desk",
+                "props": {
+                  "agents": true
+                }
               },
               "size": {
                 "weight": 1

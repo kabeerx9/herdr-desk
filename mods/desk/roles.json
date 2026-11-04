@@ -1,5 +1,5 @@
 {
-  "_help": "Team roles for the Desk's Team tab. cli: claude | codex (or give a full argv). model: what that CLI's --model / -m takes. prompt: a file in roles/ added to the agent's system prompt. Saved edits show within a few seconds.",
+  "_help": "Team roles for the Desk's Team tab. cli: claude | codex (or give a full argv). model: what that CLI's --model / -m takes. prompt: a file in roles/ added to the agent's system prompt. icon: an svg in icons/, without .svg. Saved edits show within a few seconds.",
   "roles": [
     {
       "id": "cto",
@@ -9,7 +9,8 @@
       "model": "claude-opus-5-5",
       "label": "Opus 5.5",
       "prompt": "roles/cto.md",
-      "color": "ansi5"
+      "color": "ansi5",
+      "icon": "roles/cto"
     },
     {
       "id": "frontend",
@@ -19,7 +20,8 @@
       "model": "claude-opus-5-5",
       "label": "Opus 5.5",
       "prompt": "roles/frontend.md",
-      "color": "ansi4"
+      "color": "ansi4",
+      "icon": "roles/frontend"
     },
     {
       "id": "backend",
@@ -29,7 +31,8 @@
       "model": "gpt-6.1-sol",
       "label": "GPT-6.1 Sol",
       "prompt": "roles/backend.md",
-      "color": "ansi2"
+      "color": "ansi2",
+      "icon": "roles/backend"
     },
     {
       "id": "reviewer",
@@ -37,10 +40,14 @@
       "title": "Read-only second opinion on a diff or PR",
       "cli": "codex",
       "model": "gpt-6.1-sol",
-      "label": "GPT-6.1 Sol · high",
-      "args": ["-c", "model_reasoning_effort=\"high\""],
+      "label": "GPT-6.1 Sol \u00b7 high",
+      "args": [
+        "-c",
+        "model_reasoning_effort=\"high\""
+      ],
       "prompt": "roles/reviewer.md",
-      "color": "ansi3"
+      "color": "ansi3",
+      "icon": "roles/reviewer"
     },
     {
       "id": "qa",
@@ -50,7 +57,8 @@
       "model": "claude-sonnet-5-5",
       "label": "Sonnet 5.5",
       "prompt": "roles/qa.md",
-      "color": "ansi6"
+      "color": "ansi6",
+      "icon": "roles/qa"
     }
   ]
 }
