@@ -1,7 +1,8 @@
-// Workspace spaces: stable colored avatars, worktrees under their checkout,
-// grouped by machine when more than one is known. After a space's name, the repo
-// its first terminal is in now, only where unusual: branch, ahead/behind. Agent state lives in the agents list, not here. Click to
-// switch, right-click for its menu, drag to reorder.
+// Workspace spaces: stable colored avatars, worktrees under their checkout, grouped by
+// machine when more than one is known. Each row: the repo its first terminal is in now
+// (a name you gave the space after it), the branch below with ahead/behind, and on the
+// right its most urgent agent's status (the Desk's badge). Click to switch,
+// right-click for its menu, drag to reorder.
 
 import { View, div, svg } from "gpui-kit";
 import { v_flex, h_flex } from "gpui-base";
@@ -25,7 +26,7 @@ function place(s, ps) {
   const tabs = new Set((s.tabs ?? []).map((c) => c.id));
   return ps.find((p) => tabs.has(p.tab) && p.cwd)?.cwd || s.folder;
 }
-const rowHeight = ({ tree }) => (tree ? 28 : 30);
+const rowHeight = ({ tree }) => (tree ? 30 : 44);
 const where = (s, ps) => JSON.stringify([s.machine ?? null, place(s, ps)]);
 const base = (path) => path.replace(/\/+$/, "").split("/").pop();
 // Changes made outside Herdr (an editor's save, a commit in another app): looked
@@ -43,6 +44,18 @@ export function glyph(status) {
 
 export function tone(t, status) {
   return t[status] ?? t.unknown;
+}
+
+// The Desk's status badge (mods/desk/ui.js), kept the same here: a mod can't import another's files.
+const LABEL = { working: "Working", blocked: "Needs you", done: "Done" };
+function statusBadge(t, status) {
+  if (!LABEL[status]) return null;
+  const color = t[status] ?? t.dim;
+  const mark = status === "working" ? svg("mods/workspace-chrome/spinner.svg").size(10).flex_none().spin(900)
+    : status === "blocked" ? div().size(6).rounded(3).flex_none().bg(color).loop("opacity", { from: 0.35, to: 1, period: 1400 })
+    : svg("mods/desk/icons/check.svg").size(10).flex_none();
+  return h_flex().flex_none().h(20).pl(6).pr(7).gap(4).items_center().rounded(10).bg(color + "1f")
+    .text_size(10.5).font_semibold().text_color(color).child(mark).child(LABEL[status]);
 }
 
 export default class Spaces extends View {
@@ -262,24 +275,12 @@ export default class Spaces extends View {
     });
   }
 
-  // Only what's unusual, after the name: "herdr \u00b7 spike \u21912 \u21931". The repo or
-  // branch goes when the name already says it (a worktree is named after its branch),
-  // and master/main go: nearly every space is on one.
-  gitTail(g, tree, name, t) {
-    const raw = g.branch ?? "detached";
-    const same = (a) => a.toLowerCase() === name.toLowerCase();
-    const branch = same(raw) || raw === "master" || raw === "main" ? "" : raw;
-    const repo = tree || same(g.name) ? "" : g.name;
-    const where = [repo, branch].filter(Boolean).join(" \u00b7 ");
-    return h_flex()
-      .flex_1()
-      .min_w(0)
-      .gap(5)
-      .justify_end()
-      .items_center()
-      .text_size(11.5)
-      .text_color(t.dim)
-      .when(Boolean(where), (el) => el.child(div().min_w(0).truncate().child(where)))
+  // Under the title: the branch (a worktree row's title is its branch already), then ahead/behind.
+  subline(g, w, t) {
+    if (!g) return div().min_w(0).truncate().text_size(11.5).text_color(t.dim).child(base(place(w, panes()) ?? "") || "~");
+    return h_flex().min_w(0).gap(5).items_center().text_size(11.5).text_color(t.dim)
+      .child(svg("mods/workspace-chrome/branch.svg").size(11).flex_none())
+      .child(div().min_w(0).truncate().child(g.branch ?? "detached"))
       .when(g.ahead > 0, (el) => el.child(div().flex_none().text_color(t.ansi2).child(`\u2191${g.ahead}`)))
       .when(g.behind > 0, (el) => el.child(div().flex_none().text_color(t.ansi1).child(`\u2193${g.behind}`)));
   }
@@ -327,25 +328,32 @@ export default class Spaces extends View {
         cx.notify();
       })
       .on_mouse_down("right", () => this.menu(w))
-      .child(
-        h_flex()
-          .gap(9)
-          .items_center()
-          .when(Boolean(tree), el => el.pl(22).child(svg("mods/workspace-chrome/branch.svg").size(13).text_color(t.dim)))
-          .when(!tree, el => el.child(h_flex().size(18).flex_none().rounded(5).bg(fill).items_center().justify_center().text_size(10.5).font_bold().text_color("#ffffff").child([...w.name][0]?.toUpperCase() ?? "?")))
-          .child(div().flex_shrink(0).max_w(150).truncate().text_color(t.foreground).child(w.name))
-          .child(g ? this.gitTail(g, tree, w.name, t) : div().flex_1())
-          .child(this.statusMark(w.status, t)),
-      );
+      .child(tree ? this.worktreeLine(w, g, t) : this.spaceLines(w, g, fill, t));
   }
 
-  // The space's most urgent agent, at a glance: a spinner while one works, a dot
-  // when one is blocked or done, and room kept for it when they're all idle.
-  statusMark(status, t) {
-    const slot = div().size(12).flex_none().flex().items_center().justify_center();
-    if (status === "working") return slot.child(svg("mods/workspace-chrome/spinner.svg").size(12).text_color(t.working).spin(900));
-    if (status === "blocked" || status === "done") return slot.child(div().size(8).rounded_full().bg(tone(t, status)));
-    return slot;
+  // A space: its repo (else its name), and a name you gave it when that says something else.
+  spaceLines(w, g, fill, t) {
+    const title = g?.name ?? w.name;
+    const extra = w.named && g && w.name.toLowerCase() !== g.name.toLowerCase() ? w.name : null;
+    return h_flex().gap(9).items_center()
+      .child(h_flex().size(22).flex_none().rounded(6).bg(fill).items_center().justify_center().text_size(11).font_bold().text_color("#ffffff")
+        .child([...title][0]?.toUpperCase() ?? "?"))
+      .child(v_flex().flex_1().min_w(0).gap(1)
+        .child(h_flex().min_w(0).gap(5).items_center()
+          .child(div().min_w(0).flex_shrink_1().truncate().font_medium().text_color(t.foreground).child(title))
+          .when(Boolean(extra), (el) => el.child(div().min_w(0).flex_shrink_1().truncate().text_size(11.5).text_color(t.dim).child(extra))))
+        .child(this.subline(g, w, t)))
+      .child(statusBadge(t, w.status, { idle: false }) ?? div());
+  }
+
+  // A worktree under its repo: its branch, ahead/behind, its status.
+  worktreeLine(w, g, t) {
+    return h_flex().pl(31).gap(6).items_center()
+      .child(svg("mods/workspace-chrome/branch.svg").size(12).flex_none().text_color(t.dim))
+      .child(div().min_w(0).flex_1().truncate().text_size(12.5).text_color(t.foreground).child(g?.branch ?? w.name))
+      .when((g?.ahead ?? 0) > 0, (el) => el.child(div().flex_none().text_size(11.5).text_color(t.ansi2).child(`\u2191${g.ahead}`)))
+      .when((g?.behind ?? 0) > 0, (el) => el.child(div().flex_none().text_size(11.5).text_color(t.ansi1).child(`\u2193${g.behind}`)))
+      .child(statusBadge(t, w.status, { idle: false }) ?? div());
   }
 
   compact({ w, i }, t) {

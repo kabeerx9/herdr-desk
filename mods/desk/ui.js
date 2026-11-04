@@ -18,6 +18,20 @@ export const ago = (iso) => {
   return `${Math.round(s / 86400)}d`;
 };
 
+// A status at a glance, in its color: working spins; needs you pulses; done has a check;
+// idle is quiet text. The Desk's agent rows and the spaces list draw the same badge.
+export const STATUS_LABEL = { working: "Working", blocked: "Needs you", done: "Done", idle: "Idle" };
+export function statusBadge(t, status, { idle = true } = {}) {
+  if (!STATUS_LABEL[status] || (status === "idle" && !idle)) return null;
+  if (status === "idle") return div().flex_none().px(2).text_size(11).text_color(t.dim).child("Idle");
+  const color = t[status] ?? t.dim;
+  const mark = status === "working" ? svg("mods/workspace-chrome/spinner.svg").size(10).flex_none().spin(900)
+    : status === "blocked" ? div().size(6).rounded(3).flex_none().bg(color).loop("opacity", { from: 0.35, to: 1, period: 1400 })
+    : svg("mods/desk/icons/check.svg").size(10).flex_none();
+  return h_flex().flex_none().h(20).pl(6).pr(7).gap(4).items_center().rounded(10).bg(color + "1f")
+    .text_size(10.5).font_semibold().text_color(color).child(mark).child(STATUS_LABEL[status]);
+}
+
 export function pill(t, text, color) {
   return div().px(6).h(18).flex().items_center().rounded(9).text_size(10.5).font_medium()
     .bg(color + "22").text_color(color).child(text);

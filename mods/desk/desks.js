@@ -1,7 +1,7 @@
 import { div, svg } from "gpui-kit";
 import { h_flex, v_flex, TextareaState, Textarea, InputState, Input, TextView } from "gpui-base";
 import { terminals, agents, panes, spaces, exec, home, appHome, readTextFile, watchFolder, notify, run, shared, setShared, hc } from "herdr";
-import { pill, button, empty, icon } from "./ui.js";
+import { pill, button, empty, icon, statusBadge } from "./ui.js";
 import { Roles, roleTile, team, folderOf, findBriefs, startBrief, fileBrief } from "./roles.js";
 
 // Desks: each one an independent team (its own agents, thread and worktrees) that
@@ -555,7 +555,7 @@ export class Desks {
         .child(this.avatar(t, role, m.status, 22))
         .child(div().text_size(12.5).font_semibold().text_color(t.foreground).child(role?.name ?? m.role))
         .child(div().min_w(0).flex_1().truncate().text_size(11).text_color(t.dim).child(where))
-        .child(div().text_size(11).text_color(t[m.status] ?? t.dim).child(STATUS[m.status] ?? "")))
+        .child(statusBadge(t, m.status) ?? div()))
       .when(Boolean(m.note), (el) => el.child(div().pl(30).text_size(11.5).line_height(1.35).text_color(t.muted).child(m.note)))
       .when(Boolean(m.ctx), (el) => el.child(div().pl(30).text_size(11).text_color(this.overLimit(m) ? t.blocked : t.dim)
         .child(`${kTokens(m.ctx)} tokens of context${this.overLimit(m) ? `, past the ${kTokens(this.roles.freshAt(m.role))} limit: start fresh when it's free` : ""}`)))

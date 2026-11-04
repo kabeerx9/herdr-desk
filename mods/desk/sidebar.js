@@ -3,6 +3,7 @@ import { h_flex, v_flex } from "gpui-base";
 import { agents, theme, run, layout, setAgentOrder, setShared, home, exec, watchFolder } from "herdr";
 import { Roles, labelsByAddress, roleTile } from "./roles.js";
 import { setOpen } from "./tabs.js";
+import { statusBadge } from "./ui.js";
 
 // The sidebar's agent list: every desk (its agents under it, each with its status;
 // a quiet desk is one row), then any other agent only while it's working or needs
@@ -69,16 +70,8 @@ export class Sidebar {
     cx.notify();
   }
 
-  // Working: a spinner; needs you: a badge; done: a dot; idle: a ring.
-  status(t, status, compact) {
-    if (status === "working") return svg("mods/workspace-chrome/spinner.svg").size(12).mx(1).flex_none().text_color(t.working).spin(900);
-    if (status === "blocked") return compact
-      ? div().size(14).flex_none().rounded(4).bg(t.blocked + "26").text_size(10.5).font_bold().text_color(t.blocked).flex().items_center().justify_center().child("!")
-      : div().flex_none().px(6).h(18).rounded(5).bg(t.blocked + "26").text_size(10.5).font_semibold().text_color(t.blocked).flex().items_center().child("Needs you");
-    if (status === "done") return div().size(7).mx(3).flex_none().rounded(4).bg(t.done);
-    if (status === "idle") return div().size(7).mx(3).flex_none().rounded(4).border(1.5).border_color(t.idle ?? t.dim);
-    return null;
-  }
+  // The shared badge; the rail (compact) keeps its dots.
+  status(t, status) { return statusBadge(t, status); }
 
   row(t, id, { lead, name, detail, status, focused, dim, onClick, hoverChild, indent = 0, height = 30 }) {
     const hovered = this.hovered === id;
