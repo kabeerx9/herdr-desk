@@ -26,7 +26,7 @@ function place(s, ps) {
   const tabs = new Set((s.tabs ?? []).map((c) => c.id));
   return ps.find((p) => tabs.has(p.tab) && p.cwd)?.cwd || s.folder;
 }
-const rowHeight = ({ tree }) => (tree ? 30 : 44);
+const rowHeight = ({ tree }) => (tree ? 30 : 42);
 const where = (s, ps) => JSON.stringify([s.machine ?? null, place(s, ps)]);
 const base = (path) => path.replace(/\/+$/, "").split("/").pop();
 // Changes made outside Herdr (an editor's save, a commit in another app): looked
@@ -305,19 +305,24 @@ export default class Spaces extends View {
 
   // One agent row: its tile, its role (else program), the worktree branch when it isn't the
   // space's, and its status.
-  agentRow({ a, l }, g, ps, t) {
+  agentRow({ a, l }, g, ps, t, last) {
     const role = l.role ? this.roles.get(l.role) : null;
     const pane = ps.find((p) => p.pane === a.pane);
     const branch = pane?.branch && g?.branch && pane.branch !== g.branch ? pane.branch : null;
     const name = role?.name ?? (l.role || (/^\d+$/.test(a.tab_name) ? a.program?.name || a.title : a.tab_name) || "Agent");
     const idle = a.status === "idle";
-    return h_flex().id(`agent-${a.address}`).h(28).flex_none().pl(39).pr(8).gap(8).items_center().rounded(7).cursor_pointer()
-      .when(a.focused && shared("deskchat.terminals"), (el) => el.bg(t.selected))
-      .hover((s) => s.bg(t.hover))
+    // Focus only means something where terminals show; there it's a raised row in the group.
+    const focused = a.focused && (!chatLayout() || shared("deskchat.terminals"));
+    const guide = t.dim + "45", tint = this.groupOn ? t.accent + "12" : t.hover;
+    return h_flex().relative().id(`agent-${a.address}`).h(28).flex_none().pl(37).pr(8).gap(8).items_center().rounded(7).cursor_pointer()
+      .child(div().absolute().left(18).top(0).w(1).bg(guide).when(last, (el) => el.h(14)).when(!last, (el) => el.bottom(0)))
+      .child(div().absolute().left(18).top(14).w(13).h(1).bg(guide))
+      .when(focused, (el) => el.bg(t.chrome).border_1().border_color(t.border))
+      .when(!focused, (el) => el.hover((s) => s.bg(tint)))
       .on_click(() => this.openAgent(a, l))
       .child(role ? roleTile(t, role, 18, idle) : h_flex().size(18).flex_none().items_center().justify_center().child(programTile(t, a.program, 18)))
       .child(div().min_w(0).flex_shrink_1().truncate().text_size(12.5).text_color(idle ? t.muted : t.foreground).child(name))
-      .when(Boolean(branch), (el) => el.child(h_flex().min_w(0).flex_1().gap(3).items_center().text_size(11).text_color(t.dim)
+      .when(Boolean(branch), (el) => el.child(h_flex().min_w(0).flex_1().gap(3).items_center().text_size(11).text_color(this.groupOn ? t.muted : t.dim)
         .child(svg("mods/workspace-chrome/branch.svg").size(10).flex_none()).child(div().min_w(0).truncate().child(branch))))
       .when(!branch, (el) => el.child(div().flex_1()))
       .child(statusBadge(t, a.status) ?? div());
@@ -366,11 +371,25 @@ export default class Spaces extends View {
     const rows = this.ordered();
     const all = agents(), labels = new Map(terminals().map((x) => [x.address, x.labels ?? {}])), ps = panes();
     const order = [];
+    // A space and the worktree spaces under it are one group: a container that fills when one of
+    // them is active, each space's agents hanging off a hairline under its avatar.
     const draw = (r) => {
       const kids = spaceAgents(r.w, all, labels);
       order.push(...kids.map((k) => k.a.address));
       if (collapsed) return [this.compact(r, t)];
-      return [this.row({ ...r, kids: kids.length }, t), ...kids.map((k) => this.agentRow(k, r.g, ps, t))];
+      return [this.row({ ...r, kids: kids.length }, t), ...kids.map((k, n) => this.agentRow(k, r.g, ps, t, n === kids.length - 1))];
+    };
+    const groups = (list) => {
+      if (collapsed) return list.flatMap(draw);
+      const chunks = [];
+      for (const r of list) (r.tree && chunks.length ? chunks[chunks.length - 1] : chunks[chunks.push([]) - 1]).push(r);
+      return chunks.map((c) => {
+        const on = c.some((r) => r.w.active);
+        this.groupOn = on;
+        return v_flex().id(`group-${c[0].w.id}`).flex_none().p(3).rounded(11)
+          .when(on, (el) => el.bg(t.selected))
+          .children(c.flatMap(draw));
+      });
     };
     // Keyboard order follows the list (Herdr's next/previous agent).
     const finish = (list) => { setAgentOrder(order); return list; };
@@ -381,7 +400,7 @@ export default class Spaces extends View {
         || spaces().some(s => (s.machine ?? null) === m && !this.shown.has(s.id));
     };
     const loadingRow = m => div().id(`machine-loading-${m ?? "local"}`).h(28).flex_none().px(8).text_size(12).text_color(t.dim).child(collapsed ? "…" : "Loading…");
-    if (!remote.length) return finish(loading(null) && !rows.length ? [loadingRow(null)] : rows.flatMap(draw));
+    if (!remote.length) return finish(loading(null) && !rows.length ? [loadingRow(null)] : groups(rows));
     const machineNames = [null, ...remote];
     return finish(machineNames.flatMap((m) => {
       const mine = rows.filter((r) => (r.w.machine ?? null) === m);
@@ -406,14 +425,15 @@ export default class Spaces extends View {
         .text_size(12).text_color(t.dim).hover(s => s.bg(t.hover).text_color(t.foreground))
         .on_click((_e, cx) => this.newSession(m, cx))
         .child(svg("mods/workspace-chrome/plus.svg").size(12)).when(!collapsed, el => el.child("New space there"));
-      return [head, ...(folded ? [] : mine.length ? mine.flatMap(draw) : [loading(m) ? loadingRow(m) : empty])];
+      return [head, ...(folded ? [] : mine.length ? groups(mine) : [loading(m) ? loadingRow(m) : empty])];
     }));
   }
 
   // Under the title: the branch (a worktree row's title is its branch already), then ahead/behind.
   subline(g, w, t) {
-    if (!g) return div().min_w(0).truncate().text_size(11.5).text_color(t.dim).child(base(place(w, panes()) ?? "") || "~");
-    return h_flex().min_w(0).gap(5).items_center().text_size(11.5).text_color(t.dim)
+    const dim = this.groupOn ? t.muted : t.dim; // on the active group's tint, a step darker
+    if (!g) return div().min_w(0).truncate().text_size(11.5).text_color(dim).child(base(place(w, panes()) ?? "") || "~");
+    return h_flex().min_w(0).gap(5).items_center().text_size(11.5).text_color(dim)
       .child(svg("mods/workspace-chrome/branch.svg").size(11).flex_none())
       .child(div().min_w(0).truncate().child(g.branch ?? "detached"))
       .when(g.ahead > 0, (el) => el.child(div().flex_none().text_color(t.ansi2).child(`\u2191${g.ahead}`)))
@@ -425,6 +445,7 @@ export default class Spaces extends View {
     const colors = shared("space.colors") ?? {};
     const color = colors[w.id] ?? "ansi6";
     const fill = color.startsWith("#") ? color : (MARK[color] ?? t[color]);
+    const tint = this.groupOn ? t.accent + "12" : t.hover; // hover, on the group's own surface
     return v_flex()
       .relative()
       .id(`space-${w.id}`)
@@ -433,8 +454,7 @@ export default class Spaces extends View {
       .flex_none()
       .justify_center()
       .rounded(8)
-      .when(on, (el) => el.bg(t.selected))
-      .when(!on, (el) => el.hover((s) => s.bg(t.hover)))
+      .hover((s) => s.bg(tint))
       .when(this.pressed === i && this.over !== i, (el) => el.opacity(0.5))
       .when(this.pressed !== null && this.over === i && this.pressed !== i, (el) => el.child(
         div().absolute().left(0).right(0).h(2).bg(t.accent)
@@ -469,7 +489,7 @@ export default class Spaces extends View {
   // A space: its repo (else its name), and a name you gave it when that says something else.
   // Its agents are listed under it, so the space's own badge only shows when it has none.
   spaceLines(w, g, fill, t, kids) {
-    const title = g?.name ?? w.name;
+    const title = g?.name ?? (w.name === "~" ? "Home" : w.name);
     const extra = w.named && g && w.name.toLowerCase() !== g.name.toLowerCase() ? w.name : null;
     return h_flex().gap(9).items_center()
       .child(h_flex().size(22).flex_none().rounded(6).bg(fill).items_center().justify_center().text_size(11).font_bold().text_color("#ffffff")
@@ -477,7 +497,7 @@ export default class Spaces extends View {
       .child(v_flex().flex_1().min_w(0).gap(1)
         .child(h_flex().min_w(0).gap(5).items_center()
           .child(div().min_w(0).flex_shrink_1().truncate().font_medium().text_color(t.foreground).child(title))
-          .when(Boolean(extra), (el) => el.child(div().min_w(0).flex_shrink_1().truncate().text_size(11.5).text_color(t.dim).child(extra))))
+          .when(Boolean(extra), (el) => el.child(div().min_w(0).flex_shrink_1().truncate().text_size(11.5).text_color(this.groupOn ? t.muted : t.dim).child(extra))))
         .child(this.subline(g, w, t)))
       .child((!kids && statusBadge(t, w.status)) || div());
   }
@@ -485,7 +505,7 @@ export default class Spaces extends View {
   // A worktree under its repo: its branch, ahead/behind, its status.
   worktreeLine(w, g, t, kids) {
     return h_flex().pl(31).gap(6).items_center()
-      .child(svg("mods/workspace-chrome/branch.svg").size(12).flex_none().text_color(t.dim))
+      .child(svg("mods/workspace-chrome/branch.svg").size(12).flex_none().text_color(this.groupOn ? t.muted : t.dim))
       .child(div().min_w(0).flex_1().truncate().text_size(12.5).text_color(t.foreground).child(g?.branch ?? w.name))
       .when((g?.ahead ?? 0) > 0, (el) => el.child(div().flex_none().text_size(11.5).text_color(t.ansi2).child(`\u2191${g.ahead}`)))
       .when((g?.behind ?? 0) > 0, (el) => el.child(div().flex_none().text_size(11.5).text_color(t.ansi1).child(`\u2193${g.behind}`)))
@@ -523,12 +543,12 @@ export default class Spaces extends View {
     }
     if (changed) setShared("space.colors", kept);
     return v_flex().size_full().min_h(0).bg(t.chrome).text_size(13)
-      .child(h_flex().h(31).pl(16).pr(10).items_center().justify_between().text_size(11.5).text_color(t.dim)
+      .child(h_flex().h(34).pl(19).pr(11).items_center().justify_between().text_size(11.5).font_medium().text_color(t.dim)
         .when(!collapsed, el => el.child("Spaces"))
         .child(div().id("space-new").size(26).flex_none().flex().items_center().justify_center().rounded(6).hover(s => s.bg(t.hover).text_color(t.foreground))
           .tooltip(chatLayout() ? "New desk: pick a folder" : "New space")
           .on_click((_e, cx) => this.newSession(null, cx)).child(svg("mods/workspace-chrome/plus.svg").size(14))))
-      .child(v_flex().flex_1().min_h(0).px(8).pb(14).overflow_y_scrollbar().mode("always")
+      .child(v_flex().flex_1().min_h(0).px(8).pb(14).gap(6).overflow_y_scrollbar().mode("always")
         .on_mouse_up("left", (_e, cx) => { this.pressed = null; cx.notify(); })
         .children(this.grouped(t, collapsed)));
   }
