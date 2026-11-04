@@ -16,7 +16,8 @@ export class ThreadViewport {
   // Rows start this far down the content (window pixels), for offsets measured from row heights.
   static top(zoom) { return 12 * zoom; }
   // overlay: elements drawn over the viewport, outside the scrolled content (the minimap).
-  render(t, key, children, wide, overlay = null) {
+  // pill: drawn instead of "Latest" while scrolled up (the desk's "N new from …" pill).
+  render(t, key, children, wide, overlay = null, pill = null) {
     const s = this.state(key), { top, height } = s.thumb;
     // Size/pointer events are window pixels; numeric styles are zoomed by Herdr.
     const zoom = settings().zoom || 1;
@@ -62,7 +63,8 @@ export class ThreadViewport {
           .hover(style => style.bg(t.dim)).cursor_pointer()
           .on_mouse_down("left", (e, cx) => { cx.stop_propagation(); this.drag = { key, y: e.position.y, offset: s.offset }; })
           .on_mouse_up("left", (_e, cx) => { this.drag = null; cx.stop_propagation(); }))))
-      .when(!s.following, el => el.child(h_flex().absolute().bottom(10).left(0).right(0).justify_center()
+      .when(!s.following && Boolean(pill), el => el.child(h_flex().absolute().bottom(10).left(0).right(0).justify_center().child(pill)))
+      .when(!s.following && !pill, el => el.child(h_flex().absolute().bottom(10).left(0).right(0).justify_center()
         .child(h_flex().id(`thread-latest-${key}`).h(32).px(12).gap(6).items_center().rounded(16)
           .bg(t.popover).border_1().border_color(t.input).shadow_sm().text_color(t.foreground).text_size(12).cursor_pointer()
           .tooltip("Jump to the latest reply and follow new messages · End")

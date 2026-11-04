@@ -2,14 +2,14 @@ import { div, svg } from "gpui-kit";
 import { h_flex, v_flex, TextareaState, Textarea, InputState, Input, TextView } from "gpui-base";
 import { terminals, agents, panes, spaces, exec, home, appHome, readTextFile, watchFolder, notify, run, shared, setShared, hc, playSound, pickFolder, settings, window as appWindow } from "herdr";
 import { button, empty, icon, statusMark } from "./ui.js";
-import { Roles, roleTile, team, folderOf, findBriefs, startBrief, fileBrief } from "./roles.js";
+import { Roles, roleTile, team, folderOf, findBriefs, startBrief, fileBrief, agentIcon, agentCli } from "./roles.js";
 import { WorkflowControls, runtimeData, runTeam, refreshRuntime, openDesk } from "./workflows.js";
 import { ReviewView } from "./review.js";
 import { ThreadViewport } from "./thread.js";
 import { buildRows, windowStart, WINDOW, splitPoll, summarizeSteps, statusLines, rowOffsets, activePrompt, kTokens, parseTranscript, buildRouteRows } from "./model.js";
-import { COLUMN, measured, messageRow, liveRows, statusLineRows, headerStrip } from "./timeline.js";
+import { COLUMN, measured, messageRow, liveRows, statusLineRows, headerStrip, approvalCard, liveState } from "./timeline.js";
 import { routeKey, routeHeader, routeRow, routeEmpty, commandMenu } from "./route.js";
-import { commandsFor, slashQuery, matchCommands, resolveCommand, menuKey, mentionQuery, matchMentions } from "./commands.js";
+import { commandsFor, slashQuery, matchCommands, resolveCommand, menuKey, mentionQuery, mentionItems } from "./commands.js";
 import { minimap } from "./minimap.js";
 
 // Desks: each one an independent team (its own agents, thread and worktrees) that
@@ -146,6 +146,7 @@ export class Desks {
       state.on("change", (_e, cx) => { if (state === this.teamInput) this.trackMention(); this.trackSlash(); cx.notify(); });
       state.on("submit", (e, cx) => {
         if (e.shift) return;
+        // Enter in an empty composer answers the newest permission card: Allow, once.
         const menu = this.slashItems();
         if (menu) { if (menu.length) this.pickCommand(menu[Math.min(this.slashIndex, menu.length - 1)], cx, true); else this.send(cx); return; }
         const sugg = state === this.teamInput ? this.suggestions() : [];
@@ -166,12 +167,19 @@ export class Desks {
     // Member routes: address -> { data (parsed team transcript), sig, at, working }; rows derived on fetch.
     this.routeData = {}; this.routeRows = { rows: [], prompts: [] }; this.routeCache = new Map(); this.routeShown = null;
     this.routeDrafts = {};
+    // Permission prompts on members' screens (team approve --peek): address -> { at, dialog, why }.
+    // Polled only for blocked members of the open desk; the answer's refusal stays on its card.
+    this.prompts = {}; this.approveErr = {}; this.enterCard = null;
+    cx.timer.every(1500, (cx) => this.pollPrompts(cx));
+    this.seenRows = {};          // thread key -> rows seen while following (the jump pill counts past it)
+    this.pendingAdd = new Set(); // roles the @ menu's Bring in is adding (sends wait for them)
 
     this.newName = InputState.new({ placeholder: "Name (optional), e.g. Health check" });
-    this.newTask = TextareaState.new({ placeholder: "What should the team do? It goes to the CTO, or to everyone you picked if there's no CTO.", rows: 4 });
+    this.newTask = TextareaState.new({ placeholder: "What should the CTO do? It brings in Frontend, Backend and the rest when the work needs them.", rows: 4 });
     this.newTask.set_auto_grow(3, 10);
     this.newTask.on("change", (_e, cx) => cx.notify());
     this.newTarget = store.get("desks.target", null);
+    // A new desk starts with the CTO alone; it brings others in (team start) when the work needs them.
     this.newRoles = new Set(["cto"]);
 
     // What each working agent is doing: its tool calls this turn, from bin/team's PreToolUse hook
@@ -226,9 +234,14 @@ export class Desks {
       // Only when desk.view changes: a sidebar member click writes desk.view, then desk.route.
       const route = shared("desk.route");
       if (this.viewSeen !== this.view) {
+        // Every visit to the new-desk form starts from the CTO alone (others stay optional).
+        if (this.view === "new") this.newRoles = new Set(["cto"]);
         if (primary && route && !this.fixed && this.viewSeen !== undefined && route.task !== this.view) setShared("desk.route", null);
         this.viewSeen = this.view;
       }
+      // The floating desk card publishes how much of the top-right it covers; the chat keeps clear.
+      const inset = JSON.stringify(shared("desk.cardInset") ?? null);
+      if (inset !== this.insetSeen) { this.insetSeen = inset; cx.notify(); }
       const shownRoute = route && route.task === this.view ? route.address : null;
       if (shownRoute !== this.routeShown) this.switchRoute(shownRoute, cx);
       const here = shared("desk.here")?.at ?? 0;
@@ -558,6 +571,80 @@ export class Desks {
       if (a === this.routeShown && changed) { this.deriveRoute(); cx.notify(); }
     });
   }
+  // An agent's face (role avatar + program badge). The CLI per address comes from this frame's map
+  // (deskView builds it once), else the role's configured one.
+  face(t, roleId, address, size = 24, ring) {
+    const role = this.roles.byId(roleId);
+    const cli = (address && this.cliBy?.get(address)) || agentCli({ role });
+    return agentIcon(t, { role: role?.avatar ? role : roleId, cli, ring }, size);
+  }
+
+  // A child of a member on its branch (a Reviewer, QA): it reports to that member.
+  spawnChild(m, d, roleId, task) {
+    const cwd = panes().find((p) => p.terminal === m.address)?.cwd ?? m.cwd ?? "";
+    return team([roleId, "--requested", "--share", "--parent", m.address, "--repo", cwd || d.folder,
+      "--slug", d.slug, ...(m.space ? ["--space", m.space] : []), "--task", task]);
+  }
+  requestReview(m, d, cx) {
+    this.busy(`rev-${m.address}`, () => this.spawnChild(m, d, "reviewer", "Review the commits on this branch against its base, and the brief if there is one. Your parent is the engineer who wrote it."), cx);
+  }
+
+  // ── permission prompts answered from the chat (team approve) ─────────────
+  // Every answer names what the card showed (--expect): the runtime refuses if the screen now asks
+  // about anything else, or shows no prompt, so a stale click can't answer a different prompt.
+  approve(c, choice, cx) {
+    const id = `ap-${c.address}`;
+    this.busy(id, async () => {
+      const r = await exec(TEAM(), ["approve", "--address", c.address, "--choice", choice, ...(c.expect ? ["--expect", c.expect] : [])]);
+      this.prompts[c.address] = { at: 0, dialog: null, why: null };   // read the screen again next tick
+      if (r.code === 0) { delete this.approveErr[c.address]; return; }
+      let e = null; try { e = JSON.parse(r.stderr.trim()); } catch {}
+      this.approveErr[c.address] = e?.code === "no_prompt" ? null : (e?.error ?? (r.stderr.trim().slice(0, 200) || "Couldn't answer it from here"));
+    }, cx);
+  }
+  pollPrompts(cx) {
+    const d = this.view !== "list" && this.view !== "new" ? this.desk(this.view) : null;
+    if (!d || this.peeking || Date.now() - (this.drawnAt ?? 0) > 15000) return;
+    const blocked = this.members(d.slug).filter((m) => m.status === "blocked");
+    const live = new Set(blocked.map((m) => m.address));
+    let changed = false;
+    for (const a of Object.keys(this.prompts)) if (!live.has(a)) { delete this.prompts[a]; delete this.approveErr[a]; changed = true; }
+    const due = blocked.filter((m) => !this.prompts[m.address] || Date.now() - this.prompts[m.address].at > 2500);
+    if (!due.length) { if (changed) cx.notify(); return; }
+    this.peeking = true;
+    cx.spawn(async (cx) => {
+      try {
+        for (const m of due) {
+          let dialog = null, why = null;
+          try {
+            const r = await exec(TEAM(), ["approve", "--address", m.address, "--peek"]);
+            if (r.code === 0) dialog = JSON.parse(r.stdout);
+            else { try { why = JSON.parse(r.stderr.trim()).code ?? null; } catch { why = "error"; } }
+          } catch { why = "error"; }
+          const before = this.prompts[m.address];
+          if (JSON.stringify(before?.dialog ?? null) !== JSON.stringify(dialog) || before?.why !== why) changed = true;
+          this.prompts[m.address] = { at: Date.now(), dialog, why };
+        }
+      } finally { this.peeking = false; }
+      if (changed) cx.notify();
+    });
+  }
+  // The open cards: a blocked member whose screen shows a Claude permission prompt, or whose
+  // PermissionRequest hook is still waiting on the desk. The hook's record names the command
+  // exactly; the screen's text is the fallback.
+  approvals(scope, waiting) {
+    const cards = [];
+    for (const m of scope) {
+      const hook = waiting.find((w) => w.address === m.address) ?? null;
+      const peek = this.prompts[m.address]?.dialog ?? null;
+      if (!(m.status === "blocked" && peek) && !hook) continue;
+      const subject = hook?.detail ?? peek?.subject ?? "";
+      cards.push({ address: m.address, role: m.role, title: peek?.title ?? hook?.tool ?? null, subject, expect: subject || null,
+        error: this.approveErr[m.address] ?? null, at: hook?.at ?? this.prompts[m.address]?.at ?? 0 });
+    }
+    return cards.sort((a, b) => a.at - b.at);
+  }
+
   nameOfAddress(address) {
     const m = terminals().find((x) => x.address === address);
     const role = m?.labels?.role && this.roles.byId(m.labels.role);
@@ -659,11 +746,10 @@ export class Desks {
   }
 
   // The open @ menu's options (empty when it's closed or Esc shut it).
+  // "Send to" the desk's members, then "Bring in" the roles not on it (commands.js mentionItems).
   suggestions() {
     if (!this.mention || this.input !== this.teamInput || this.mentionShut === this.input.value()) return [];
-    const present = [...new Set(this.members().map((m) => m.role))];
-    const options = [...present.map((id) => this.roles.byId(id)).filter(Boolean), ...(present.length > 1 ? [{ id: "all", name: "Everyone" }] : [])];
-    return matchMentions(options, this.mention.q);
+    return mentionItems(this.members(), this.roles.list ?? [], this.mention.q);
   }
   // ↑/↓ move the highlight, Tab completes it, Esc closes; Enter arrives as the textarea's submit.
   mentionKey(e, cx) {
@@ -681,6 +767,14 @@ export class Desks {
   }
 
   pickMention(option, cx) {
+    // Bring in: add the member the usual way (addMember), and address the message to it meanwhile.
+    if (option.section === "bring") {
+      const d = this.desk(), role = this.roles.byId(option.id);
+      if (!d || !role) return;
+      if (this.acting) return notify({ title: "One moment", body: "Finishing the last action first.", level: "info", timeout: 3000 });
+      this.pendingAdd.add(role.id);
+      this.busy(`add-${role.id}`, async () => { try { await this.addMember(role, d); } finally { this.pendingAdd.delete(role.id); } }, cx);
+    }
     const v = this.input.value();
     this.input.replace_range_with_token({ start: this.mention.start, end: v.length }, { id: option.id, text: `@${option.id}`, label: option.name });
     this.input.replace(" ");
@@ -694,7 +788,7 @@ export class Desks {
     const present = [...new Set(members.map((m) => m.role))];
     const content = this.input.content();
     const named = [...content.tokens.map((s) => s.token.id),
-      ...[...content.text.matchAll(/(^|\s)@([a-z]+)\b/g)].map((m) => m[2])].filter((r) => r === "all" || present.includes(r));
+      ...[...content.text.matchAll(/(^|\s)@([a-z]+)\b/g)].map((m) => m[2])].filter((r) => r === "all" || present.includes(r) || this.pendingAdd.has(r));
     if (named.includes("all")) return { roles: present, implicit: false };
     if (named.length) return { roles: [...new Set(named)], implicit: false };
     return { roles: present.includes("cto") ? ["cto"] : present, implicit: true };
@@ -720,6 +814,8 @@ export class Desks {
     }
     const { roles } = this.recipients(members);
     if (!roles.length) return notify({ title: "Nobody's here", body: "Resume or add an agent first.", level: "warning", timeout: 4000 });
+    const joining = roles.filter((r) => this.pendingAdd.has(r) && !members.some((m) => m.role === r));
+    if (joining.length) return notify({ title: `${joining.map((r) => this.roles.byId(r)?.name ?? r).join(", ")} is still joining`, body: "Send once it's in the desk.", level: "info", timeout: 4000 });
     const direct = this.directTask === d.slug && members.find((m) => m.address === this.directTarget && roles.includes(m.role));
     const targets = direct ? [direct] : members.filter((m) => roles.includes(m.role));
     const to = targets.flatMap((m) => ["--to", `${m.address}:${m.role}`]);
@@ -799,7 +895,7 @@ export class Desks {
         .child(icon("team", 22).text_color(t.dim))
         .child(div().text_size(13).font_semibold().text_color(t.foreground).child("No desks yet"))
         .child(div().text_size(12).line_height(1.45).text_color(t.muted).text_center()
-          .child("Start a desk, tell the CTO what you want, and it brings in Frontend, Backend and the rest."))
+          .child("Start a desk with the CTO, tell it what you want, and it brings in Frontend, Backend and the rest when needed."))
         .child(button(t, "desk-new-empty", "Start a desk", (_e, cx) => this.go("new", cx), { iconName: "plus", primary: true }))))
       .children(cards);
   }
@@ -845,12 +941,12 @@ export class Desks {
       .when(Boolean(picked), (el) => el.child(div().pt(6).truncate().text_size(11).text_color(t.dim).child(picked.replace(home(), "~"))))
       .when(Boolean(this.sameRepo()), (el) => el.child(div().pt(6).text_size(11).line_height(1.4).text_color(t.blocked)
         .child(`${this.sameRepo()} also works in this repo. That's fine: each engineer gets its own worktree, but keep the two desks off the same files.`)))
-      .child(label("WHO JOINS"))
+      .child(label("WHO STARTS"))
       .child(h_flex().gap(5).flex_wrap().children(roles.filter((r) => !r.on_request).map((r) => {
         const on = this.newRoles.has(r.id);
         return this.chip(t, `nr-${r.id}`, on, r.name, (_e, cx) => { on ? this.newRoles.delete(r.id) : this.newRoles.add(r.id); cx.notify(); }, roleTile(div, svg, t, r, 16, !on));
       })))
-      .child(div().pt(5).text_size(11).text_color(t.dim).child("Reviewer and QA join later, when you ask for them."))
+      .child(div().pt(5).text_size(11).line_height(1.4).text_color(t.dim).child("The CTO starts alone and brings in others when the work needs them. Add someone now only if you already know you need them."))
       .child(label("FIRST MESSAGE"))
       .child(Textarea.new(this.newTask).w_full().px(10).py(8).rounded(8).border_1().border_color(t.input).bg(t.background).text_size(12.5).text_color(t.foreground))
       .child(h_flex().pt(14).gap(8).items_center()
@@ -861,37 +957,30 @@ export class Desks {
 
   // ── a desk ────────────────────────────────────────────────────────────────
 
-  // A permission request, on top of the composer: who, the tool, exactly what (the command, the
-  // file), and the answer. Claude waits on it; with no answer in time it asks in its terminal.
-  permitCard(t, d, m) {
-    const role = this.roles.byId(m.from), id = `pm-${m.id}`, busy = this.acting === id;
-    // Claude's own three: Yes; Yes, and don't ask again for <its rule>; No, and tell it what to do
-    // instead (whatever is in the message box goes with the No).
-    const why = this.input.value().trim();
-    const answer = (decision) => (_e, cx) => this.busy(id, async () => {
-      const r = await exec(TEAM(), ["permit", "--task", d.slug, m.id, decision, ...(decision === "deny" && why ? ["--message", why] : [])]);
-      if (r.code !== 0) throw new Error(r.stderr.trim() || "couldn't answer");
-      if (decision === "deny" && why) this.input.set_value("");
-    }, cx);
-    const left = Math.max(0, Math.round((PERMIT_WAIT - (Date.now() - m.at)) / 60000));
-    const rule = typeof m.always === "string" ? m.always : null;
-    return v_flex().id(id).px(12).py(10).gap(8).rounded(14).border_1().border_color(t.blocked + "59").bg(t.blocked + "0f")
-      .child(h_flex().gap(7).items_center()
-        .child(role ? roleTile(div, svg, t, role, 18) : icon("alert", 15).text_color(t.blocked))
-        .child(div().min_w(0).flex_1().truncate().text_size(12.5).font_medium().text_color(t.foreground)
-          .child(`${role?.name ?? m.from} wants to use ${m.tool}`))
-        .child(div().id(`${id}-left`).flex_none().text_size(11).text_color(t.dim)
-          .tooltip("Then it asks in its terminal instead").child(left ? `${left} min left` : "about to ask in its terminal")))
-      .child(div().id(`${id}-detail`).max_h(110).overflow_y_scrollbar().px(10).py(7).rounded(8).bg(t.background).border_1().border_color(t.border)
-        .text_size(12).line_height(1.45).text_color(t.foreground).child(m.detail ?? ""))
-      .child(h_flex().gap(6).items_center().flex_wrap()
-        .child(button(t, `${id}-allow`, busy ? "Answering…" : "Yes", answer("allow"), { primary: true, disabled: Boolean(this.acting), tip: "Allow this once" }))
-        .when(Boolean(m.always), (el) => el.child(button(t, `${id}-always`, rule ? `Yes, don't ask again for ${rule.length > 40 ? `${rule.slice(0, 40)}…` : rule}` : "Yes, don't ask again",
-          answer("always"), { disabled: Boolean(this.acting), tip: rule ? `Saves Claude's rule: ${rule}` : "Saves the rule Claude suggests" })))
-        .child(button(t, `${id}-deny`, why ? "No, and tell it what you typed" : "No", answer("deny"),
-          { disabled: Boolean(this.acting), tip: why ? `It gets: "${why.slice(0, 80)}"` : "Type in the message box first to tell it what to do instead" }))
-        .child(div().flex_1())
-        .child(button(t, `${id}-term`, "Terminal", () => openTerminal(m.address), { iconName: "terminal", tip: "Look at what it's doing first" })));
+  // The @ menu over the composer: "Send to" the members (live status right), "Bring in" the rest.
+  // Mouse picks; ↑/↓/Tab/Enter/Esc are mentionKey's and the composer's.
+  mentionMenu(t, items, index) {
+    const rows = [];
+    let section = null;
+    items.forEach((x, i) => {
+      if (x.section !== section) {
+        section = x.section;
+        rows.push(div().id(`at-h-${section}`).h(24).px(8).flex().items_center().text_size(11).font_semibold().text_color(t.dim)
+          .child(section === "send" ? "Send to" : "Bring in"));
+      }
+      const on = i === index;
+      rows.push(h_flex().id(`at-${x.section}-${x.id}`).h(32).px(8).gap(8).items_center().rounded(8).cursor_pointer()
+        .when(on, (el) => el.bg(t.selected)).hover((st) => st.bg(on ? t.selected : t.hover))
+        .on_mouse_down("left", (_e, cx) => cx.stop_propagation())
+        .on_click((_e, cx) => this.pickMention(x, cx))
+        .child(x.id === "all" ? div().size(20).flex_none().flex().items_center().justify_center().text_color(t.muted).child(icon("team", 14))
+          : this.face(t, x.id, x.address, 20, on ? t.selected : t.popover))
+        .child(div().min_w(0).flex_1().truncate().text_size(12.5).font_medium().text_color(t.foreground).child(x.name))
+        .when(x.section === "send" && Boolean(x.status), (el) => el.child(liveState(t, x.status)))
+        .when(x.section === "bring", (el) => el.child(div().flex_none().text_size(11).text_color(t.dim).child("Tab to add"))));
+    });
+    return v_flex().id("at-menu").w(290).max_h(320).overflow_y_scrollbar().p(4).gap(1).rounded(12).border_1()
+      .border_color(this.light ? t.input : t.border).bg(t.popover).shadow_md().children(rows);
   }
 
   hoverOn(id, on, cx) {
@@ -1033,8 +1122,7 @@ export class Desks {
     const engineer = role?.worktree && !role?.on_request;
     const cwd = panes().find((p) => p.terminal === m.address)?.cwd ?? m.cwd ?? "";
     const where = cwd.includes("/.herdr/worktrees/") ? cwd.split("/").pop() : cwd.split("/").pop();
-    const child = (roleId, task) => team([roleId, "--requested", "--share", "--parent", m.address, "--repo", cwd || d.folder,
-      "--slug", d.slug, ...(m.space ? ["--space", m.space] : []), "--task", task]);
+    const child = (roleId, task) => this.spawnChild(m, d, roleId, task);
     return v_flex().id(id).ml(compact ? 0 : 10 + m.depth * 18).mr(compact ? 0 : 10).mb(4).px(10).py(7).gap(5).rounded(8).bg(t.raised)
       .when(!compact, el => el.child(h_flex().gap(8).items_center()
         .child(this.avatar(t, role, m.status, 22))
@@ -1055,7 +1143,7 @@ export class Desks {
             { disabled: Boolean(this.acting) || m.handingOff || m.status === "working",
               tip: "A new session instead: it writes a handoff, then a new one of it takes over here" })))
         .when(engineer, (el) => el
-          .child(button(t, `${id}-rev`, "Review", (_e, cx) => this.busy(`${id}-rev`, () => child("reviewer", "Review the commits on this branch against its base, and the brief if there is one. Your parent is the engineer who wrote it."), cx),
+          .child(button(t, `${id}-rev`, "Review", (_e, cx) => this.requestReview(m, d, cx),
             { iconName: "sparkles", disabled: Boolean(this.acting), tip: "A Reviewer on this branch; it reports to this engineer" }))
           .child(button(t, `${id}-qa`, "QA", (_e, cx) => this.busy(`${id}-qa`, () => child("qa", "Test the work on this branch against its brief: write tests for the intended behaviour and edge cases, and report what passes and fails. Your parent is the engineer who wrote it."), cx),
             { disabled: Boolean(this.acting), tip: "QA on this branch; it reports to this engineer" }))
@@ -1124,6 +1212,10 @@ export class Desks {
     // The thread: rows derived on reload (model.js), drawn as a window of the newest WINDOW. In a
     // member route, that member's own conversation (team transcript) instead of the team chat.
     this.drawnAt = Date.now();
+    // Which CLI each of this desk's agents runs, once per frame, for the faces' program badges.
+    const sessionBy = new Map((runtimeData().sessions ?? []).map((x) => [x.address, x]));
+    this.cliBy = new Map(terminals().filter((x) => x.labels?.task === d.slug && x.labels?.role)
+      .map((x) => [x.address, agentCli({ session: sessionBy.get(x.address), labels: x.labels, role: this.roles.byId(x.labels.role) })]));
     const route = this.routeShown ? members.find((m) => m.address === this.routeShown) ?? null : null;
     const light = !settings().dark; this.light = light;
     const model = this.model, now = Date.now();
@@ -1153,7 +1245,7 @@ export class Desks {
         .child(div().text_size(11).text_color(t.dim).child("Earlier messages are in its terminal")))); }
       rowsSrc.slice(from).forEach((row) => {
         keys.push(row.key);
-        rows.push(measured(this, key, row.key, routeRow(this, t, key, row, { role: routeRole, now })));
+        rows.push(measured(this, key, row.key, routeRow(this, t, key, row, { role: routeRole, now, member: route })));
       });
     } else {
       if (!model.said) { keys.push("__empty"); rows.push(measured(this, key, "__empty", this.emptyThread(t, members))); }
@@ -1171,7 +1263,12 @@ export class Desks {
       && (!route || (q.targets ?? []).some((x) => x.address === route.address))).length;
     if (!queued) this.queueShown = false;
     const scope = route ? [route] : members;
-    const lines = statusLines({ waiting, blocked: scope.filter((m) => m.status === "blocked" && !this.waitingFor.has(m.address)),
+    // Permission prompts answered right here: a card per member at one, the newest one Enter's.
+    const cards = this.approvals(scope, waiting), carded = new Set(cards.map((c) => c.address));
+    this.enterCard = cards.at(-1) ?? null;
+    const cardRows = cards.map((c) => approvalCard(this, t, c, { enter: false }));
+    const lines = statusLines({ waiting: waiting.filter((m) => !carded.has(m.address)),
+      blocked: scope.filter((m) => m.status === "blocked" && !this.waitingFor.has(m.address) && !carded.has(m.address)),
       disconnected: lost, handingOff: scope.filter((m) => m.handingOff && m.status !== "working"), queued, queueOpen: this.queueShown,
       error: shared("desk.runtime.error"), name: (r) => this.roles.byId(r)?.name ?? r });
     const nowLines = statusLineRows(this, t, lines);
@@ -1181,8 +1278,25 @@ export class Desks {
       const prompts = (route ? this.routeRows.prompts : model.prompts).map((p) => ({ ...p, hidden: !drawn.has(p.key) }));
       rail = minimap(this, t, key, prompts, activePrompt(prompts, offsets, s.offset, s.viewport));
     }
+    // Scrolled up while new replies land: "3 new from Backend ↓" over the composer.
+    const reply = (r) => (route ? r.type === "reply" : r.type === "agent");
+    if (s.following || this.seenRows[key] === undefined) this.seenRows[key] = rowsSrc.length;
+    const unseen = s.following ? [] : rowsSrc.slice(this.seenRows[key]).filter(reply);
+    let pill = null;
+    if (unseen.length) {
+      const authors = route ? [route.role] : [...new Set(unseen.map((r) => r.m.from))];
+      const last = unseen.at(-1), who = route ? route.role : last.m.from, at = route ? route.address : last.m.address;
+      const name = this.roles.byId(who)?.name ?? who;
+      pill = h_flex().id(`jump-${key}`).h(32).pl(6).pr(12).gap(7).items_center().rounded(16).bg(t.popover).border_1().border_color(t.input)
+        .shadow_sm().text_size(12).text_color(t.foreground).cursor_pointer().hover((x) => x.bg(t.hover))
+        .tooltip("Jump to the newest and follow · End")
+        .on_click((_e, cx) => { s.jump(); this.seenRows[key] = rowsSrc.length; cx.notify(); })
+        .child(this.face(t, who, at, 20))
+        .child(authors.length === 1 ? `${unseen.length} new from ${name}` : `${unseen.length} new`)
+        .child(icon("down", 13).text_color(t.dim));
+    }
     const thread = this.thread.render(t, key,
-      [...rows, ...liveRows(this, t, scope, now).map(col), ...(nowLines ? [col(nowLines)] : [])], this.wide, rail);
+      [...rows, ...liveRows(this, t, scope, now).map(col), ...cardRows.map(col), ...(nowLines ? [col(nowLines)] : [])], this.wide, rail, pill);
 
     // The composer: a bordered card (T3's): the text, then who it goes to, the send mode and a
     // solid accent send button. The slash menu and @mention suggestions sit just above it.
@@ -1191,19 +1305,17 @@ export class Desks {
     const text = this.input.value().trim();
     const toList = route ? [route.role] : to;
     const canSend = Boolean(text) && toList.length > 0 && !this.acting;
-    const pill = (r) => {
-      const role = this.roles.byId(r);
+    const toChip = (r) => {
+      const role = this.roles.byId(r), at = route ? route.address : members.find((m) => m.role === r)?.address;
       return h_flex().flex_none().h(22).pl(2).pr(8).gap(5).items_center().rounded(11).bg(t.raised).text_color(t.foreground)
-        .when(Boolean(role), (el) => el.child(roleTile(div, svg, t, role, 18))).child(role?.name ?? r);
+        .child(this.face(t, r, at, 18, t.raised)).child(role?.name ?? r)
+        .when(this.pendingAdd.has(r) && !members.some((m) => m.role === r), (el) => el.child(div().text_color(t.dim).child("joining…")));
     };
     const composer = v_flex().px(12).pt(8).pb(this.wide ? 18 : 12).gap(6).when(this.wide, (el) => el.w_full().max_w(COLUMN + 24))
       .when(Boolean(this.workflow.side) && !route, (el) => el.child(this.workflow.sideForm(t, d.slug)))
       .when(this.queueShown, (el) => el.child(this.workflow.queue(t, d.slug)))
-      .children(waiting.map((m) => this.permitCard(t, d, m)))
       .when(Boolean(menu), (el) => el.child(commandMenu(this, t, menu, Math.min(this.slashIndex, Math.max(0, menu.length - 1)))))
-      .when(sugg.length > 0 && !menu, (el) => el.child(h_flex().gap(5).flex_wrap()
-        .children(sugg.map((o, i) => this.chip(t, `sg-${o.id}`, i === Math.min(this.mentionIndex, sugg.length - 1), o.name, (_e, cx) => this.pickMention(o, cx),
-          o.id === "all" ? icon("team", 13) : roleTile(div, svg, t, o, 16))))))
+      .when(sugg.length > 0 && !menu, (el) => el.child(this.mentionMenu(t, sugg, Math.min(this.mentionIndex, sugg.length - 1))))
       .child(v_flex().id("composer").rounded(16).border_1().border_color(light ? t.input : t.border).bg(light ? t.background : t.popover)
         .when(Boolean(menu) || sugg.length > 0, (el) => el.key_context("DeskSlashOpen"))
         .on_action("desk_slash_up", (_e, cx) => this.slashKey({ key: "up" }, cx))
@@ -1220,7 +1332,7 @@ export class Desks {
           }))
         .child(h_flex().px(10).pb(10).gap(6).items_center()
           .child(h_flex().min_w(0).flex_1().gap(5).items_center().text_size(11.5).text_color(t.dim)
-            .when(toList.length > 0, (el) => el.child(div().flex_none().child("To")).children(toList.map(pill))
+            .when(toList.length > 0, (el) => el.child(div().flex_none().child("To")).children(toList.map(toChip))
               .when(route !== null, (el) => el.child(div().min_w(0).truncate().child("· directly")))
               .when(!route && implicit, (el) => el.child(div().min_w(0).truncate().child(this.directTarget && this.directTask === d.slug ? `· ${this.directTarget}` : "· @ to mention"))))
             .when(!toList.length, (el) => el.child(div().truncate().child("Nobody here yet: add someone above"))))
@@ -1242,15 +1354,17 @@ export class Desks {
     // scrolls full width so its scrollbar stays at the window's edge.
     const band = (el) => (this.wide ? h_flex().w_full().flex_none().justify_center().child(el.w_full().max_w(COLUMN + 24)) : el);
     const strip = route ? routeHeader(this, t, d, route) : headerStrip(this, t, members, now) ?? div().h(28);
-    return v_flex().size_full().min_h(0)
-      // As the main view, the desk's controls live in the floating card (card.js), not up here.
+    // The floating desk card (card.js) covers the top-right; keep the whole chat clear of it,
+    // centred in what's left.
+    const inset = this.wide ? Math.max(0, Number(shared("desk.cardInset")?.right) || 0) : 0;
+    return v_flex().size_full().min_h(0).when(inset > 0, (el) => el.pr(inset))
+      // As the main view, the desk's controls live in the right panel (card.js), not up here.
       .when(!this.wide, (el) => el.child(header))
       .when(!this.wide && Boolean(route), (el) => el.child(h_flex().px(8).py(4).border_b(1).border_color(t.border).child(strip)))
       .when(Boolean(details) && !this.wide, (el) => el.child(details))
-      // The floating card sits in the top band; the strip runs along the band's bottom edge.
-      // Opaque and in normal flow: the thread viewport starts below it and clips there.
-      .when(this.wide, (el) => el.child(v_flex().h(104).flex_none().justify_end().bg(t.background)
-        .child(band(h_flex().px(12).child(div().w_full().pb(4).border_b(1).border_color(t.border).child(strip))))))
+      // The top band: the lead's strip (or the route's header) over a hairline.
+      .when(this.wide, (el) => el.child(h_flex().w_full().h(44).flex_none().justify_center().bg(t.background).border_b(1).border_color(t.border)
+        .child(h_flex().h_full().w_full().max_w(COLUMN + 24).px(12).items_center().child(div().w_full().child(strip)))))
       .when(Boolean(d.parent_task) && !route, (el) => el.child(band(h_flex().px(12).py(6).gap(8).items_center()
         .child(button(t, "side-return", "Back to original desk", () => openDesk(d.parent_task), { iconName: "back" }))
         .child(div().text_size(11).text_color(t.dim).child("Separate conversation")))))

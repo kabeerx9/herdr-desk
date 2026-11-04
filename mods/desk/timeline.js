@@ -1,7 +1,6 @@
 import { div, svg } from "gpui-kit";
 import { h_flex, v_flex, TextView } from "gpui-base";
 import { button, icon, statusMark } from "./ui.js";
-import { roleTile } from "./roles.js";
 import { KIND, span, summarizeSteps, thoughtLine, subagentHeader, subStatus, subElapsed, snapshotFor, contextMeter, stepKind } from "./model.js";
 
 // The desk chat's thread, drawn from rows model.js derived on reload. Everything here reads
@@ -11,9 +10,10 @@ import { KIND, span, summarizeSteps, thoughtLine, subagentHeader, subStatus, sub
 const EVIDENCE = { verified: "It ran the checks itself", reported: "Passed on from another agent's check", asserted: "Claimed, not checked" };
 const CRITERION = { pass: "done", fail: "failed", "n/a": "idle" };
 
-// A done report against its brief's acceptance criteria: one row per criterion.
-function criteriaList(t, id, criteria, indent) {
-  return v_flex().id(`${id}-crit`).ml(indent).mt(2).py(4).gap(1).rounded(8).border_1().border_color(t.border)
+// A done report against its brief's acceptance criteria: one row per criterion. `bare`: inside
+// the done card, which draws the outline.
+function criteriaList(t, id, criteria, bare = false) {
+  return v_flex().id(`${id}-crit`).mt(2).py(4).gap(1).rounded(8).when(!bare, (el) => el.border_1().border_color(t.border)).when(bare, (el) => el.mx(-8))
     .children(criteria.map((c) => h_flex().id(`${id}-crit-${c.id}`).min_h(24).px(8).gap(7).items_center()
       .child(statusMark(t, CRITERION[c.result] ?? "idle", 11))
       .child(div().flex_none().text_size(11).font_semibold().text_color(t.muted).child(c.id))
@@ -35,13 +35,31 @@ const STEP_ICON = { read: "book", search: "book", command: "terminal", edit: "pa
 export const stepIcon = (tool) => STEP_ICON[stepKind(tool)];
 
 const gapTop = (o) => (o.wide ? 28 : 20);
-const avatarOf = (t, role, size) => (role ? roleTile(div, svg, t, role, size) : div().size(size).flex_none().rounded(size / 2).bg(t.raised));
-// An author's avatar and name; for a live member, a link to its own conversation (its route).
-function who(o, t, id, address, avatar, name) {
+export const FACE = 24;
+// An author's face or name; for a live member, a link to its own conversation (its route).
+function who(o, t, id, address, el) {
   return h_flex().id(id).flex_none().gap(8).items_center().rounded(6)
-    .when(Boolean(address), (el) => el.cursor_pointer().tooltip("Open its own conversation")
+    .when(Boolean(address), (x) => x.cursor_pointer().tooltip("Open its own conversation")
       .hover((s) => s.opacity(0.8)).on_click((_e, cx) => o.openRoute(address, cx)))
-    .child(avatar).child(name);
+    .child(el);
+}
+// "Read 9 files" → "read 9 files": the tail of "Worked for 2m 13s · …".
+const lower = (text) => (text ? text[0].toLowerCase() + text.slice(1) : "");
+// A member's live state in words and colour, for the team card and the @ menu.
+export const LIVE = {
+  working: { word: "Working", color: "working", mark: "working" }, blocked: { word: "Needs you", color: "blocked", mark: "blocked" },
+  done: { word: "Done", color: "done", mark: "done" }, idle: { word: "Idle", color: "dim", mark: null }, left: { word: "Finished", color: "dim", mark: null },
+};
+export function liveState(t, state, size = 11) {
+  const s = LIVE[state] ?? LIVE.idle, color = t[s.color] ?? t.dim;
+  return h_flex().flex_none().gap(5).items_center().text_size(11.5).font_medium().text_color(color)
+    .when(Boolean(s.mark), (el) => el.child(statusMark(t, s.mark, size))).child(s.word);
+}
+// A member's state as LIVE knows it: live status first, then what it last reported.
+export function memberState(member, reported) {
+  if (member) return member.status === "blocked" ? "blocked" : member.status === "working" ? "working"
+    : member.phase === "done" || member.status === "done" ? "done" : "idle";
+  return reported === "done" ? "done" : "left";
 }
 const nameOf = (o, id) => (id === "kabeer" ? "You" : o.roles.byId(id)?.name ?? id);
 
@@ -158,6 +176,8 @@ export function messageRow(o, t, slug, row, ctx) {
     const who = nameOf(o, m.from);
     if (m.kind === "compact") return quietLine(id, t, `${who} ${m.text}${m.trigger === "auto" ? " (Claude did it on its own)" : ""} · ${clock(m.at)}`);
     if (m.kind === "fresh") return quietLine(id, t, `${(m.text ?? "").split(". Handoff")[0]} · ${clock(m.at)}`, m.text ?? "");
+    // The CTO (or another member) bringing people in: a team card under its message.
+    if (m.kind === "start" && m.from !== "kabeer" && o.roles.byId(m.from)) return teamCard(o, t, id, m, ctx);
     const names = (m.roles ?? [m.role]).map((r) => nameOf(o, r));
     const list = names.length > 1 ? `${names.slice(0, -1).join(", ")} and ${names.at(-1)}` : names[0] ?? m.text;
     return quietLine(id, t, `${m.kind === "desk" ? `${who} started this desk${m.project ? ` in ${m.project}` : ""}` : `${who} added ${list}`} · ${clock(m.at)}`);
@@ -181,10 +201,11 @@ export function messageRow(o, t, slug, row, ctx) {
   const offer = m.kind === "context" ? ctx.members.find((x) => x.address === m.address && o.overLimit(x)) ?? null : null;
   const to = m.to?.length ? m.to.map((r) => nameOf(o, r)).join(", ") : null;
   const long = row.long && !o.expanded.has(id);
-  const tile = aside ? 16 : 18, indent = aside ? tile + 8 : 0;
+  const face = aside ? 20 : FACE;
+  const link = m.address && ctx.members.some((x) => x.address === m.address) ? m.address : null;
   const copy = copyButton(o, t, id, m.text);
 
-  // The finished turn: "Worked for 2m 13s · Read 4 files, ran 2 commands", folded.
+  // The finished turn: "Worked for 2m 13s · read 4 files, ran 2 commands", folded.
   const snap = row.worked && !aside ? snapshotFor(row, o.snapshots) : null;
   const summary = snap ? snap.summary || summarizeSteps(snap.steps) : "";
   const canOpen = Boolean(snap && (snap.steps?.length || snap.subagents?.length));
@@ -192,39 +213,43 @@ export function messageRow(o, t, slug, row, ctx) {
   const fold = row.worked && !aside ? h_flex().id(`${id}-fold`).h(22).gap(6).items_center().text_size(12).text_color(t.dim)
     .when(canOpen, (el) => el.cursor_pointer().hover((s) => s.text_color(t.foreground))
       .on_click((_e, cx) => { open ? o.folds.delete(id) : o.folds.add(id); cx.notify(); }))
-    .child(canOpen ? icon(open ? "chevron-down" : "chevron", 11) : icon("clock", 11))
-    .child(div().flex_none().child(`Worked for ${span(row.worked)}`))
-    .when(Boolean(summary), (el) => el.child(div().min_w(0).truncate().child(`· ${summary}`))) : null;
+    .child(div().min_w(0).truncate().child(`Worked for ${span(row.worked)}${summary ? ` · ${lower(summary)}` : ""}`))
+    .when(canOpen, (el) => el.child(icon(open ? "chevron-down" : "chevron", 11))) : null;
 
-  const body = v_flex().gap(4).pl(indent)
+  const body = v_flex().gap(4)
     .child(div().when(long, (el) => el.max_h(132).overflow_hidden())
       .text_size(aside ? size - 1 : size).line_height(1.6).text_color(aside ? t.muted : t.foreground)
       .child(TextView.markdown(`${id}-md`, m.text ?? "").selectable(true)))
     .when(long, (el) => el.child(div().id(`${id}-more`).text_size(12).text_color(t.accent).cursor_pointer()
       .hover((s) => s.text_color(t.foreground)).on_click((_e, cx) => { o.expanded.add(id); cx.notify(); }).child("Show more")));
 
-  return v_flex().id(id).relative().gap(6).pt(row.grouped ? 8 : aside ? 16 : gapTop(o))
-    .on_hover((h, cx) => o.hoverOn(id, h, cx))
-    .when(!row.grouped, (el) => el.child(h_flex().h(22).gap(8).items_center()
-      .child(who(o, t, `${id}-who`, m.address && ctx.members.some((x) => x.address === m.address) ? m.address : null,
-        avatarOf(t, role, tile), div().flex_none().text_size(aside ? 12 : 13).font_semibold().text_color(aside ? t.muted : t.foreground).child(role?.name ?? m.from)))
-      .when(Boolean(to), (el) => el.child(div().flex_none().text_size(12).text_color(t.dim).child(`to ${to}`)))
-      .when(Boolean(kind), (el) => el.child(h_flex().flex_none().gap(4).items_center().text_size(12).text_color(t.muted)
-        .when(Boolean(kind.mark), (x) => x.child(statusMark(t, kind.mark, 11))).child(kind.word)))
-      // How "done" was established: checked by the agent itself, passed on, or only claimed.
-      .when(Boolean(m.evidence), (el) => el.child(div().id(`${id}-ev`).flex_none().text_size(11)
-        .text_color(m.evidence === "verified" ? t.done : m.evidence === "reported" ? t.muted : t.dim)
-        .tooltip(EVIDENCE[m.evidence] ?? "").child(m.evidence)))
-      .child(div().flex_none().text_size(11).text_color(t.dim).child(clock(m.at)))
-      .child(div().flex_1())
-      .when(!latest, (el) => el.child(div().when(!hovered, (x) => x.opacity(0)).child(copy)))))
-    .when(row.grouped && !latest, (el) => el.child(div().absolute().top(4).right(0).when(!hovered, (x) => x.opacity(0)).child(copy)))
+  // A done report with a diff is a card: the report, its criteria, then what changed.
+  const diff = m.kind === "done" && m.diff?.files ? m.diff : null;
+  const report = diff
+    ? v_flex().px(12).pt(10).pb(8).gap(6).rounded(12).border_1().border_color(t.border)
+      .child(body)
+      .when(Boolean(m.criteria?.length), (el) => el.child(criteriaList(t, id, m.criteria, true)))
+      .child(diffFooter(o, t, id, m, slug, ctx.members))
+    : v_flex().gap(6).child(body).when(Boolean(m.criteria?.length), (el) => el.child(criteriaList(t, id, m.criteria)));
+
+  const nameRow = h_flex().h(face).gap(8).items_center()
+    .child(who(o, t, `${id}-who`, link, div().flex_none().text_size(aside ? 12 : 12.5).font_semibold().text_color(aside ? t.muted : t.foreground).child(role?.name ?? m.from)))
+    .when(Boolean(to), (el) => el.child(div().flex_none().text_size(11.5).text_color(t.dim).child(`to ${to}`)))
+    .when(Boolean(kind), (el) => el.child(h_flex().flex_none().gap(4).items_center().text_size(11.5).text_color(t.muted)
+      .when(Boolean(kind.mark), (x) => x.child(statusMark(t, kind.mark, 11))).child(kind.word)))
+    // How "done" was established: checked by the agent itself, passed on, or only claimed.
+    .when(Boolean(m.evidence), (el) => el.child(evidenceLabel(t, `${id}-ev`, m.evidence)))
+    .child(div().flex_none().text_size(11.5).text_color(t.dim).child(clock(m.at)))
+    .child(div().flex_1())
+    .when(!latest, (el) => el.child(div().when(!hovered, (x) => x.opacity(0)).child(copy)));
+
+  const column = v_flex().min_w(0).flex_1().gap(6)
+    .when(!row.grouped, (el) => el.child(nameRow))
     .when(Boolean(fold), (el) => el.child(fold))
     .when(open, (el) => el.child(v_flex().gap(6).pb(4)
       .when(Boolean(snap.steps?.length), (x) => x.child(stepList(t, `${id}-steps`, snap.steps, { live: false })))
-      .when(Boolean(snap.subagents?.length), (x) => x.child(subagents(o, t, `${id}-subs`, snap.subagents, ctx.now, m.address && ctx.members.some((y) => y.address === m.address) ? m.address : null)))))
-    .child(body)
-    .when(Boolean(m.criteria?.length), (el) => el.child(criteriaList(t, id, m.criteria, indent)))
+      .when(Boolean(snap.subagents?.length), (x) => x.child(subagents(o, t, `${id}-subs`, snap.subagents, ctx.now, link)))))
+    .child(report)
     .when(latest, (el) => el.child(h_flex().ml(-5).gap(2)
       .child(copy)
       .when(Boolean(live), (el) => el.child(tool(t, `${id}-term`, "terminal", `Open ${role?.name ?? m.from}'s terminal`, () => o.openTerminal(live.address))))))
@@ -232,6 +257,88 @@ export function messageRow(o, t, slug, row, ctx) {
       .child(button(t, `${id}-compact`, o.acting === `compact-${offer.address}` ? "Compacting…" : "Compact", (_e, cx) => o.compact(offer, cx),
         { primary: true, disabled: Boolean(o.acting) || offer.status === "working",
           tip: offer.status === "working" ? "Once its turn ends" : "Claude's /compact: same session, the history becomes a summary" }))));
+
+  // Consecutive messages from one agent share its face: the later ones keep the column, not the face.
+  return v_flex().id(id).relative().pt(row.grouped ? 8 : aside ? 16 : gapTop(o))
+    .on_hover((h, cx) => o.hoverOn(id, h, cx))
+    .child(h_flex().w_full().items_start().gap(10)
+      .child(row.grouped ? div().w(face).flex_none() : who(o, t, `${id}-face`, link, o.face(t, m.from, m.address, face)))
+      .child(column))
+    .when(row.grouped && !latest, (el) => el.child(div().absolute().top(4).right(0).when(!hovered, (x) => x.opacity(0)).child(copy)));
+}
+
+const EVIDENCE_COLOR = { verified: "done", reported: "muted", asserted: "dim" };
+function evidenceLabel(t, id, evidence) {
+  const color = t[EVIDENCE_COLOR[evidence]] ?? t.dim;
+  return div().id(id).flex_none().h(18).px(6).flex().items_center().rounded(5).border_1().border_color(color)
+    .text_size(11).font_medium().text_color(color).tooltip(EVIDENCE[evidence] ?? "").child(evidence);
+}
+
+// Under a done report with a diff: "+A −D · N files · branch", then Open diff and Review.
+function diffFooter(o, t, id, m, slug, members) {
+  const x = m.diff, member = members.find((y) => y.address === m.address) ?? null, d = o.desk(slug);
+  const reviewing = o.acting === `rev-${m.address}`;
+  return v_flex().mx(-12).mt(4)
+    .child(div().h(1).bg(t.border))
+    .child(h_flex().px(12).pt(8).gap(10).items_center()
+      .child(h_flex().flex_none().gap(6).font_family("JetBrains Mono").text_size(12)
+        .child(div().text_color(t.done).child(`+${x.added ?? 0}`))
+        .child(div().text_color(t.blocked).child(`−${x.removed ?? 0}`)))
+      .child(div().min_w(0).flex_1().truncate().text_size(12).text_color(t.dim)
+        .child(`${x.files} file${x.files === 1 ? "" : "s"}${x.branch ? ` · ${x.branch}` : ""}`))
+      .child(button(t, `${id}-diff`, "Open diff", (_e, cx) => d && o.openReview({ address: m.address, role: m.from, cwd: member?.cwd ?? x.cwd }, d, cx),
+        { variant: "ghost", disabled: !d, tip: "Its changes against where the branch left its base" }))
+      .child(button(t, `${id}-review`, reviewing ? "Starting…" : "Review", (_e, cx) => d && member && o.requestReview(member, d, cx),
+        { disabled: !member || !d || Boolean(o.acting), tip: member ? "A Reviewer on this branch; it reports to this engineer" : "It has left the desk" })));
+}
+
+// Under the message where the CTO brought people in: one row per member, its task and live state.
+export function teamCard(o, t, id, m, ctx) {
+  const list = m.members ?? [{ role: m.role, address: m.address ?? null, task_line: m.task_line ?? null }];
+  return v_flex().id(id).pt(10).pl(FACE + 10)
+    .child(div().pb(6).text_size(11.5).text_color(t.dim).child(`${nameOf(o, m.from)} brought in ${list.length === 1 ? nameOf(o, list[0].role) : `${list.length} people`} · ${clock(m.at)}`))
+    .child(v_flex().w_full().max_w(600).rounded(12).border_1().border_color(t.border).overflow_hidden()
+      .children(list.map((x, i) => {
+        const member = x.address ? ctx.members.find((y) => y.address === x.address) : null;
+        const state = memberState(member, x.address ? o.model.reports?.get(x.address) : null);
+        return h_flex().id(`${id}-${x.address ?? i}`).h(38).px(12).gap(10).items_center()
+          .when(i > 0, (el) => el.border_t(1).border_color(t.border))
+          .when(Boolean(member), (el) => el.cursor_pointer().hover((s) => s.bg(t.hover)).tooltip("Open its own conversation")
+            .on_click((_e, cx) => o.openRoute(member.address, cx)))
+          .child(o.face(t, x.role, x.address, 20))
+          .child(div().flex_none().text_size(12.5).font_semibold().text_color(t.foreground).child(nameOf(o, x.role)))
+          .child(div().min_w(0).flex_1().truncate().text_size(12).text_color(t.muted).child(x.task_line ?? ""))
+          .child(liveState(t, state));
+      })));
+}
+
+// A member stopped at a Claude permission prompt: who, what it wants to run, and the answer.
+// `c`: { address, role, title, subject, error, busy }. Enter in an empty composer is Allow.
+const ASKS = { "Bash command": "wants to run a command", "Edit file": "wants to edit a file", "Write file": "wants to write a file",
+  "Create file": "wants to create a file", "Read file": "wants to read a file", Bash: "wants to run a command", Edit: "wants to edit a file", Write: "wants to write a file" };
+export function approvalCard(o, t, c, { enter = false } = {}) {
+  const id = `ap-${c.address}`, name = nameOf(o, c.role), busy = o.acting === id;
+  const what = ASKS[c.title] ?? (c.title ? `wants to use ${c.title.replace(/ command$/, "")}` : "is asking for permission");
+  return v_flex().id(id).pt(gapTop(o))
+    .child(v_flex().w_full().px(12).py(12).gap(10).rounded(12).border_1().border_color(t.border)
+      .child(h_flex().gap(10).items_center()
+        .child(o.face(t, c.role, c.address, FACE))
+        .child(div().min_w(0).flex_1().truncate().text_size(12.5).font_semibold().text_color(t.foreground).child(`${name} ${what}`))
+        .child(statusMark(t, "blocked", 12)))
+      .when(Boolean(c.subject), (el) => el.child(div().id(`${id}-cmd`).max_h(132).overflow_y_scrollbar().px(10).py(8).rounded(8)
+        .border_1().border_color(t.border).font_family("JetBrains Mono").text_size(12).line_height(1.5).text_color(t.foreground)
+        .child(c.subject)))
+      .when(Boolean(c.error), (el) => el.child(h_flex().gap(6).items_center()
+        .child(statusMark(t, "failed", 11))
+        .child(div().min_w(0).flex_1().text_size(12).line_height(1.4).text_color(t.muted).child(c.error))))
+      .child(h_flex().gap(6).items_center()
+        .child(button(t, `${id}-allow`, busy ? "Answering…" : enter ? "Allow ↵" : "Allow", (_e, cx) => o.approve(c, "allow", cx),
+          { primary: true, disabled: Boolean(o.acting), tip: enter ? "Allow this once · Enter in an empty message box" : "Allow this once" }))
+        .child(button(t, `${id}-always`, "Always allow", (_e, cx) => o.approve(c, "always", cx),
+          { disabled: Boolean(o.acting), tip: "Claude's own “don't ask again” option for this prompt" }))
+        .child(button(t, `${id}-deny`, "Deny", (_e, cx) => o.approve(c, "deny", cx), { variant: "ghost", disabled: Boolean(o.acting) }))
+        .child(div().flex_1())
+        .child(button(t, `${id}-term`, "Open terminal", () => o.openTerminal(c.address), { variant: "ghost", tip: "Look at it in its terminal first" }))));
 }
 
 // Steps as a quiet list in a hairline box. While live, the newest row eases in once.
@@ -287,31 +394,35 @@ export function liveRows(o, t, members, now) {
     const caption = o.waitingFor?.has(m.address) ? "waiting for your answer below" : m.handingOff ? "writing a handoff for a fresh session"
       : !thought && !current ? (m.awaiting ? "replying" : m.note || "working") : null;
     const open = o.toolsOpen.has(m.address);
-    const pad = 26;
-    return v_flex().id(id).gap(6).pt(gapTop(o))
-      .child(h_flex().h(22).gap(8).items_center()
-        .child(o.route ? h_flex().flex_none().gap(8).items_center().child(avatarOf(t, role, 18)).child(div().text_size(13).font_semibold().text_color(t.foreground).child(name))
-          : who(o, t, `${id}-who`, m.address, avatarOf(t, role, 18), div().text_size(13).font_semibold().text_color(t.foreground).child(name)))
+    const link = o.route ? null : m.address;
+    const column = v_flex().min_w(0).flex_1().gap(6)
+      .child(h_flex().h(FACE).gap(8).items_center()
+        .child(who(o, t, `${id}-who`, link, div().text_size(12.5).font_semibold().text_color(t.foreground).child(name)))
         .child(statusMark(t, "working", 12))
-        .when(Boolean(started), (el) => el.child(div().flex_none().text_size(11).text_color(t.dim).child(span(now - started))))
+        .when(Boolean(started), (el) => el.child(div().flex_none().text_size(11.5).text_color(t.dim).child(span(now - started))))
         .when(Boolean(caption), (el) => el.child(div().min_w(0).truncate().text_size(12).text_color(t.dim).child(caption))))
-      .when(Boolean(thought), (el) => el.child(div().pl(pad).max_h(o.wide ? 66 : 60).overflow_hidden()
+      // The live thought shimmers gently until the reply lands.
+      .when(Boolean(thought), (el) => el.child(div().max_h(o.wide ? 66 : 60).overflow_hidden()
         .text_size(o.wide ? 13.5 : 12.5).line_height(1.55).text_color(t.muted).loop("opacity", { from: 0.55, to: 1, period: 2200 })
         .child(thought)))
-      .when(Boolean(current), (el) => el.child(h_flex().pl(pad).h(22).gap(8).items_center()
+      .when(Boolean(current), (el) => el.child(h_flex().h(22).gap(8).items_center()
         .child(icon(stepIcon(current.tool), 12).text_color(t.working))
         .child(div().min_w(0).flex_1().truncate().text_size(12).text_color(t.foreground).child(current.text ?? current.tool))))
-      .when(!thought && !current && !caption, (el) => el.child(div().pl(pad).child(dots(t))))
-      .when(Boolean(summary), (el) => el.child(v_flex().pl(pad).gap(4)
+      .when(!thought && !current && !caption, (el) => el.child(dots(t)))
+      .when(Boolean(summary), (el) => el.child(v_flex().gap(4)
         .child(h_flex().id(`${id}-tools`).h(22).gap(6).items_center().text_size(12).text_color(t.dim)
           .when(steps.length > 0, (x) => x.cursor_pointer().hover((s) => s.text_color(t.foreground))
             .on_click((_e, cx) => { open ? o.toolsOpen.delete(m.address) : o.toolsOpen.add(m.address); cx.notify(); }))
-          .child(icon(steps.length && open ? "chevron-down" : "chevron", 11))
-          .child(div().min_w(0).truncate().child(summary))
+          .child(div().min_w(0).truncate().child(`${started ? `Working for ${span(now - started)} · ` : ""}${started ? lower(summary) : summary}`))
+          .when(steps.length > 0, (x) => x.child(icon(open ? "chevron-down" : "chevron", 11)))
           .when(Boolean(fresh?.tools?.failed), (x) => x.child(h_flex().flex_none().gap(4).items_center()
             .child(statusMark(t, "failed", 10)).child(`${fresh.tools.failed} failed`))))
         .when(open && steps.length > 0, (x) => x.child(stepList(t, `${id}-feed`, steps.slice(-40), { fresh: o.freshStep(m.address) })))))
-      .when(subs.length > 0, (el) => el.child(div().pl(pad).child(subagents(o, t, `${id}-subs`, subs, now, o.route ? null : m.address))));
+      .when(subs.length > 0, (el) => el.child(subagents(o, t, `${id}-subs`, subs, now, link)));
+    return v_flex().id(id).pt(gapTop(o))
+      .child(h_flex().w_full().items_start().gap(10)
+        .child(who(o, t, `${id}-face`, link, o.face(t, m.role, m.address, FACE)))
+        .child(column));
   });
 }
 

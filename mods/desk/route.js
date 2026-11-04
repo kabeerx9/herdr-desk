@@ -1,9 +1,8 @@
 import { div, svg } from "gpui-kit";
 import { h_flex, v_flex, TextView } from "gpui-base";
 import { icon, statusMark } from "./ui.js";
-import { roleTile } from "./roles.js";
 import { contextMeter } from "./model.js";
-import { subagents, mineBubble, commandChip, commandResult, commandNote } from "./timeline.js";
+import { subagents, mineBubble, commandChip, commandResult, commandNote, FACE } from "./timeline.js";
 
 // A member's own conversation (shared "desk.route" = { task, address }): T3's thread-per-route.
 // Rows come from model.js buildRouteRows over `team transcript`, fetched by desks.js on the
@@ -41,7 +40,7 @@ export function routeHeader(o, t, d, m) {
       .child(div().max_w(180).truncate().child(d.name)))
     .child(div().flex_none().text_color(t.dim).child("/"))
     .child(h_flex().flex_none().gap(7).items_center()
-      .child(role ? roleTile(div, svg, t, role, 18) : div().size(18))
+      .child(o.face(t, m.role, m.address, 18))
       .child(div().font_semibold().text_color(t.foreground).child(name))
       .child(div().id("route-status").tooltip(STATUS[m.status] ?? "starting").child(statusMark(t, status, 12))))
     .when(Boolean(model), (el) => el.child(div().flex_none().min_w(0).truncate().text_size(11.5).text_color(t.dim).child(model)))
@@ -60,7 +59,7 @@ export function routeHeader(o, t, d, m) {
 
 // One row of a member's conversation. Yours: the raised bubble; commands: a chip; the CTO or the
 // Desk talking to it: a quiet aside with who; its replies: plain prose, its tool run folded above.
-export function routeRow(o, t, key, row, { role, now }) {
+export function routeRow(o, t, key, row, { role, now, member }) {
   const x = row.x, id = `rt-${key}-${row.key}`, size = o.wide ? 14 : 13;
   if (row.type === "event") return h_flex().id(id).justify_center().pt(16).pb(2)
     .child(div().text_size(11).text_color(t.dim).child(`${x.text} · ${clock(x.at)}`));
@@ -80,16 +79,23 @@ export function routeRow(o, t, key, row, { role, now }) {
       .when(x.text.length > 500 && !o.expanded.has(id), (el) => el.child(div().id(`${id}-more`).pl(18).text_size(12).text_color(t.accent).cursor_pointer()
         .hover((s) => s.text_color(t.foreground)).on_click((_e, cx) => { o.expanded.add(id); cx.notify(); }).child("Show more")));
   }
-  // An agent reply: the work before it ("Read 4 files, ran 2 commands"), subagents, then the text.
+  // An agent reply: its face (once per run of replies), the work before it ("Worked · read 4 files,
+  // ran 2 commands"), subagents, then the text.
   const subs = x.subagents ?? [];
-  return v_flex().id(id).gap(6).pt(o.wide ? 18 : 14)
+  const column = v_flex().min_w(0).flex_1().gap(6)
+    .when(!row.grouped, (el) => el.child(h_flex().h(FACE).gap(8).items_center()
+      .child(div().flex_none().text_size(12.5).font_semibold().text_color(t.foreground).child(role?.name ?? member?.role ?? "Agent"))
+      .when(Boolean(x.at), (el) => el.child(div().flex_none().text_size(11.5).text_color(t.dim).child(clock(x.at))))))
     .when(Boolean(x.tools?.summary), (el) => el.child(h_flex().h(22).gap(6).items_center().text_size(12).text_color(t.dim)
-      .child(icon("check", 11))
-      .child(div().min_w(0).truncate().child(x.tools.summary))
+      .child(div().min_w(0).truncate().child(`Worked · ${x.tools.summary[0].toLowerCase()}${x.tools.summary.slice(1)}`))
       .when(Boolean(x.tools.failed), (y) => y.child(h_flex().flex_none().gap(4).items_center().child(statusMark(t, "failed", 10)).child(`${x.tools.failed} failed`)))))
     .when(subs.length > 0, (el) => el.child(subagents(o, t, `${id}-subs`, subs, now)))
     .when(Boolean(x.text), (el) => el.child(div().text_size(size).line_height(1.6).text_color(t.foreground)
       .child(TextView.markdown(`${id}-md`, x.text).selectable(true))));
+  return v_flex().id(id).pt(row.grouped ? 8 : o.wide ? 18 : 14)
+    .child(h_flex().w_full().items_start().gap(10)
+      .child(row.grouped ? div().w(FACE).flex_none() : o.face(t, member?.role ?? role?.id, member?.address, FACE))
+      .child(column));
 }
 
 // Above the transcript: what this view is, when there's nothing (yet) or it can't be read.

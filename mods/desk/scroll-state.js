@@ -19,6 +19,8 @@ export class ScrollState {
     this.following = this.max - this.offset < 2;
   }
   latest() { this.glide = false; this.anchor = null; this.following = true; this.offset = this.max; }
+  // The jump pill: back to the tail with the follow spring (a glide), not a cut.
+  jump() { this.anchor = null; this.following = true; this.glide = true; this.offset = this.max; }
   anchorBottom() { if (!this.following) this.anchor = this.max - this.offset; }
   wheel(event) {
     const delta = event.delta_lines ? event.delta_lines.y * 24 : event.delta.y;

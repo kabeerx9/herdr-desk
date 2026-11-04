@@ -15,6 +15,8 @@
   team hook claude|codex                    (the CLIs' end-of-turn hook) posts a reply the chat is waiting for
   team hook claude-permission               (Claude's PermissionRequest hook) asks in the desk chat, waits for Allow/Deny
   team permit --task SLUG <id> allow|always|deny [--message TEXT]   (the Desk's buttons) answer a pending permission request
+  team approve --address T --choice allow|always|deny [--expect TEXT]   (the Desk) answer the permission prompt on its screen
+  team approve --address T --peek           (the Desk) the permission prompt its screen shows, as JSON (exit 2: none)
   team new-desk [--name NAME] [--repo DIR]  a desk: an independent team with its own thread; prints its slug
   team join --task SLUG --address T --role R   (the Desk) bring an agent you started yourself into a desk
   team compact --address T                  a long context: Claude's /compact (same session, history summarized)
@@ -39,6 +41,7 @@ from desk_runtime import foreground_agent, recover_interrupted_claims, reorder a
 from desk_runtime import (classify_launch_failure, find_transcript, gate_verdict, parse_contract, parse_criteria, runner_variants,
                           session_cli, step_text, transcript_timeline, transcript_title, transcript_turns, triage_apply, triage_clear)
 from desk_runtime import DIALOG_OPEN, cleared_transcript, command_result, screen_state
+from desk_runtime import diff_stat, dialog_matches, permission_dialog, pick_option, task_line
 
 APP = os.environ.get("HERDR_APP_HOME") or os.path.expanduser("~/.config/herdr-app")
 DESK = os.path.join(APP, "mods", "desk")
@@ -569,12 +572,13 @@ def start(args):
         note = f"own worktree on {branch} (from HEAD; uncommitted changes in {repo['name']} aren't in it)"
 
     task = args.task or ""
-    contract = None
+    contract, brief_text = None, None
     if args.brief:
         brief_path = os.path.abspath(os.path.expanduser(args.brief))
         try:
             with open(brief_path, encoding="utf-8") as f:
-                contract = parse_contract(f.read())
+                brief_text = f.read()
+                contract = parse_contract(brief_text)
         except (OSError, UnicodeDecodeError):
             contract = None
         brief = file_brief(brief_path, role["id"])
@@ -643,6 +647,8 @@ def start(args):
     if ME and caller_labels.get("role") == "cto" and caller_labels.get("task") != slug:
         sh(["hc", "label", ME, f"task={slug}"])
     starter = caller_labels.get("role") or ("kabeer" if args.by == "desk" else (ME or "shell"))
+    # What it was brought in to do, in one line, for the Desk's team card.
+    line = task_line(args.task, brief_text)
     if args.fresh_of:
         chat_append(slug, {"from": role["id"], "kind": "fresh", "role": role["id"], "address": launched.get("address"),
                            "replaces": args.fresh_of, "text": args.note or f"{role['name']} started fresh"})
@@ -651,6 +657,7 @@ def start(args):
                 if fallbacks else "")
         chat_append(slug, {"from": starter, "kind": "start", "role": role["id"], "address": launched.get("address"),
                            "text": f"Started {role['name']} in {os.path.basename(folder)}" + (f" on {branch}" if branch else "") + fell,
+                           **({"task_line": line} if line else {}), **({"branch": branch} if branch else {}),
                            **({"contract": contract} if contract else {}), **({"runner": role["runner"], "fallbacks": fallbacks} if role.get("runner") else {})})
         if starter == "kabeer":
             tell_cto(slug, f"Kabeer added {role['name']} ({launched.get('address')}) to the desk"
@@ -749,7 +756,9 @@ def report(args):
         sent = r.returncode == 0
         if not sent:
             print(json.dumps({"warning": f"recorded, but not delivered to {parent}: {(r.stderr or r.stdout).strip()[:200]}"}), file=sys.stderr)
+    diff = diff_stat(cwd) if args.kind == "done" and cwd else None
     facts = {**({"criteria": criteria} if criteria else {}), **({"evidence": evidence} if args.kind == "done" else {}),
+             **({"diff": {**diff, "cwd": cwd}} if diff else {}),
              **({"head": head} if head else {}), **({"blocking": blocking} if blocking is not None else {})}
     rec = chat_append(labels.get("task"), {"from": who, "address": ME, "kind": args.kind, "text": text, **facts,
                                            **({"delivered_to": [parent]} if sent else {})})
@@ -1222,6 +1231,117 @@ def inbox(args):
 
 
 RAW_KEYS_MAX = 200
+
+
+APPROVE_S = 3.0     # how long an answered permission prompt gets to close
+
+
+def refuse(code, msg, **extra):
+    """An approve that did nothing: JSON on stderr ({error, code, ...}), exit 2."""
+    print(json.dumps({"error": msg, "code": code, **extra}), file=sys.stderr)
+    sys.exit(2)
+
+
+def approve_cli(addr, info):
+    """The CLI really running there: its session's pinned runner, else the role's, else the program."""
+    try:
+        rec = session_by_address(runtime_store().load(), addr) or {}
+    except (DeskRuntimeError, OSError):
+        rec = {}
+    cli = session_cli(rec) if rec else None
+    fg = " ".join([str((info.get("foreground") or {}).get("name") or "")] + [str(x) for x in (info.get("foreground") or {}).get("argv") or []]).lower()
+    if "codex" in fg:
+        return "codex"
+    return cli or agent_identity(info) or "claude"
+
+
+def pending_permit(slug, addr):
+    """The desk chat's permission request this agent's hook is still waiting on, or None."""
+    if not slug:
+        return None
+    recs = chat_read(slug)
+    done = {r.get("re") for r in recs if r.get("kind") == "permission-done"}
+    for r in reversed(recs):
+        if r.get("kind") == "permission" and r.get("address") == addr and r.get("id") and r["id"] not in done \
+                and time.time() * 1000 - int(r.get("at") or 0) < PERMIT_WAIT * 1000 and r.get("source") != "screen":
+            return r
+    return None
+
+
+def _same_prompt(a, b):
+    return bool(a and b) and a["subject"] == b["subject"] and a["question"] == b["question"] \
+        and [o["label"] for o in a["options"]] == [o["label"] for o in b["options"]]
+
+
+def approve(args):
+    """Answer the Claude permission prompt an agent's screen shows, from the Desk. It refuses unless
+    a Claude permission prompt is showing and (with --expect) asks about exactly that command or
+    file, so a stale click never answers a different prompt. The choice maps to the prompt's own
+    option, read off the screen. A prompt the agent's PermissionRequest hook is also waiting on is
+    answered through the hook (bound to its request id); otherwise the option's number is pressed.
+    Then the screen is read again: done only once that prompt is gone."""
+    addr = args.address
+    info = terminal(addr)
+    if not info or info.get("state") != "live":
+        refuse("gone", "That agent isn't running any more")
+    labels = info.get("labels") or {}
+    name = role_label(info)
+    cli = approve_cli(addr, info)
+    if cli != "claude":
+        refuse("unsupported", f"{name} runs {cli}: answer its prompt in its terminal", open_terminal=True)
+    dialog = permission_dialog(screen_of(addr), "claude")
+    if not dialog:
+        refuse("no_prompt", f"{name} isn't showing a permission prompt any more", open_terminal=False)
+    if getattr(args, "peek", False):
+        hook = pending_permit(labels.get("task"), addr)
+        print(json.dumps({"address": addr, "cli": cli, **dialog,
+                          **({"hook": {"id": hook["id"], "tool": hook.get("tool"), "detail": hook.get("detail"), "always": hook.get("always")}} if hook else {})}))
+        return
+    choice = args.choice
+    if choice not in ("allow", "always", "deny"):
+        refuse("bad_choice", "choose allow, always or deny")
+    if args.expect and not dialog_matches(dialog, args.expect):
+        refuse("different", f"{name} is asking about something else now", showing=dialog["subject"][:400], open_terminal=True)
+    option = pick_option(dialog, choice)
+    if not option:
+        refuse("no_option", f"This prompt has no “{ {'always': 'always allow', 'allow': 'allow', 'deny': 'deny'}[choice]}” option",
+               options=[o["label"] for o in dialog["options"]], open_terminal=True)
+    slug = labels.get("task")
+    hook = pending_permit(slug, addr)
+    via = "keys"
+    if hook and (choice != "always" or hook.get("always")) and dialog_matches(dialog, hook.get("detail")):
+        # The hook is waiting on this very prompt: answer it by id (it also saves Claude's rule for "always").
+        os.makedirs(PERMITS, exist_ok=True)
+        path = os.path.join(PERMITS, f"{hook['id']}.json")
+        with open(path + ".tmp", "w") as f:
+            json.dump({"decision": choice}, f)
+        os.replace(path + ".tmp", path)
+        via = "hook"
+    else:
+        hook = hook if hook and dialog_matches(dialog, hook.get("detail")) else None
+        r = sh(["hc", "keys", addr, str(option["n"])])
+        if r.returncode != 0:
+            refuse("send_failed", f"Couldn't press {option['n']} in {name}'s terminal: {(r.stderr or r.stdout).strip()[:160]}", open_terminal=True)
+    end, pressed_enter, after = time.time() + APPROVE_S, False, dialog
+    while True:
+        time.sleep(POLL_S)
+        after = permission_dialog(screen_of(addr), "claude")
+        if not _same_prompt(after, dialog):
+            break
+        # A select that only moved its focus onto our option: confirm it, once.
+        focused = next((o for o in after["options"] if o["focused"]), None)
+        if via == "keys" and not pressed_enter and focused and focused["n"] == option["n"]:
+            sh(["hc", "keys", addr, "enter"]); pressed_enter = True
+        if time.time() >= end:
+            refuse("still_open", f"{name}'s prompt is still open after answering; check its terminal", open_terminal=True)
+    if slug and os.path.exists(chat_file(slug)):
+        if not hook:
+            hook = chat_append(slug, {"from": labels.get("role") or name, "address": addr, "kind": "permission", "id": secrets.token_hex(4),
+                                      "tool": dialog["title"] or "a tool", "detail": dialog["subject"][:600], "source": "screen"})
+        if via == "keys":
+            chat_append(slug, {"from": "kabeer", "address": addr, "kind": "permission-done", "re": hook["id"], "decision": choice, "via": "screen"})
+    print(json.dumps({"ok": True, "address": addr, "choice": choice, "option": {"n": option["n"], "label": option["label"]}, "via": via,
+                      "subject": dialog["subject"][:400], "next": after["subject"][:400] if after else None}))
 
 
 def type_raw(addr, text):
@@ -2212,6 +2332,10 @@ def main():
     pm = sub.add_parser("permit")
     pm.add_argument("--task", required=True); pm.add_argument("id"); pm.add_argument("decision", choices=["allow", "always", "deny"])
     pm.add_argument("--message", help="with deny: tell it what to do instead")
+    ap = sub.add_parser("approve")
+    ap.add_argument("--address", required=True); ap.add_argument("--choice", choices=["allow", "always", "deny"])
+    ap.add_argument("--expect", help="the command or file the Desk showed; refuse if the prompt asks about anything else")
+    ap.add_argument("--peek", action="store_true", help="print the prompt on screen, answer nothing")
     pw = sub.add_parser("permit-watch")
     pw.add_argument("--task", required=True); pw.add_argument("--id", required=True); pw.add_argument("--pid", type=int, required=True)
     pw.add_argument("--address", required=True)
@@ -2289,6 +2413,10 @@ def main():
         hook(args)
     elif args.cmd == "permit":
         permit(args)
+    elif args.cmd == "approve":
+        if not args.peek and not args.choice:
+            die("approve needs --choice allow|always|deny (or --peek)")
+        approve(args)
     elif args.cmd == "permit-watch":
         permit_watch(args)
     elif args.cmd == "inbox":

@@ -194,3 +194,24 @@ test('a member route slots command outcomes in by time, and unlogged commands as
   assert.deepEqual(rows.map((r) => [r.type, r.x.text]), [['command', '/context'], ['result', 'grid'], ['command', '/cost'], ['result', '$0'], ['reply', 'later']]);
   assert.equal(rows[1].x.outcome.command, '/context');
 });
+
+test('a member bringing people in keeps who, where and why per member; reports are remembered', () => {
+  const { rows, reports } = buildRows([
+    { at: 1, from: 'kabeer', kind: 'say', text: 'build it', to: ['cto'] },
+    { at: 2, from: 'cto', kind: 'start', role: 'frontend', address: 't2', task_line: 'Guest check-in screen', branch: 'fe' },
+    { at: 3, from: 'cto', kind: 'start', role: 'backend', address: 't3', task_line: 'Check-in API' },
+    { at: 9, from: 'frontend', address: 't2', kind: 'done', text: 'shipped', diff: { added: 3, removed: 1, files: 2, branch: 'fe' } },
+  ]);
+  const team = rows.find((r) => r.m.kind === 'start').m;
+  assert.deepEqual(team.members.map((x) => [x.role, x.address, x.task_line]), [['frontend', 't2', 'Guest check-in screen'], ['backend', 't3', 'Check-in API']]);
+  assert.equal(reports.get('t2'), 'done');
+  assert.equal(reports.has('t3'), false);
+});
+
+test('route replies in a row share one face', () => {
+  const { rows } = buildRouteRows([
+    { who: 'kabeer', text: 'go', at: 1 }, { who: 'agent', text: 'one', at: 2 }, { who: 'agent', text: 'two', at: 3 },
+    { who: 'kabeer', text: 'more', at: 4 }, { who: 'agent', text: 'three', at: 5 },
+  ]);
+  assert.deepEqual(rows.map((r) => [r.type, Boolean(r.grouped)]), [['mine', false], ['reply', false], ['reply', true], ['mine', false], ['reply', false]]);
+});

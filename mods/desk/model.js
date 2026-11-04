@@ -36,13 +36,17 @@ export const rowKey = (m, i) => String(m.id ?? `${m.at}-${m.from ?? ""}-${i}`);
 // row objects whose inputs didn't change, so finished rows are the same objects every time.
 export function buildRows(messages, cache = new Map()) {
   const permitDone = new Map();
+  // What each member last reported (address -> kind), for the team card once it has left.
+  const reports = new Map();
   const merged = [];
+  const joined = (m) => ({ role: m.role, address: m.address ?? null, task_line: m.task_line ?? null, branch: m.branch ?? null });
   for (const m of messages ?? []) {
     if (!m || typeof m !== "object") continue;
     if (m.kind === "permission-done") { permitDone.set(m.re, m.decision); continue; }
+    if (m.address && (m.kind === "done" || m.kind === "blocked" || m.kind === "finish")) reports.set(m.address, m.kind);
     const last = merged.at(-1);
     if (m.kind === "start" && last?.kind === "start" && last.from === m.from && m.at - last.at < 600000) {
-      merged[merged.length - 1] = { ...last, roles: [...(last.roles ?? [last.role]), m.role] };
+      merged[merged.length - 1] = { ...last, roles: [...(last.roles ?? [last.role]), m.role], members: [...(last.members ?? [joined(last)]), joined(m)] };
     } else merged.push(m);
   }
   const started = new Map();
@@ -78,7 +82,7 @@ export function buildRows(messages, cache = new Map()) {
   });
   // Turns still open: someone was asked and hasn't replied yet (role -> when).
   const open = Object.fromEntries(started);
-  return { rows, prompts, permitDone, lastReply, open, said: rows.some((r) => r.type !== "event" && r.type !== "permission") };
+  return { rows, prompts, permitDone, reports, lastReply, open, said: rows.some((r) => r.type !== "event" && r.type !== "permission") };
 }
 
 // Which rows to draw: the newest `limit`, but while the reader is scrolled up the start stays
@@ -275,9 +279,11 @@ export function buildRouteRows(turns, cache = new Map(), { working = false, outc
     const key = n ? `${base}-${n}` : base;
     const type = x.kind === "command" ? "command" : x.kind === "event" ? "event" : x.kind === "command-result" ? "result"
       : x.kind === "command-note" ? "note" : x.who === "kabeer" ? "mine" : x.who === "agent" ? "reply" : "notice";
-    const sig = `${type}|${(x.tools?.summary) ?? ""}|${x.subagents?.map((s) => s.status).join(",") ?? ""}`;
+    // Its replies one after another share one face.
+    const grouped = type === "reply" && rows.at(-1)?.type === "reply";
+    const sig = `${type}|${(x.tools?.summary) ?? ""}|${x.subagents?.map((s) => s.status).join(",") ?? ""}|${grouped}`;
     let row = cache.get(key);
-    if (!row || row.sig !== sig) { row = { key, sig, type, x }; cache.set(key, row); }
+    if (!row || row.sig !== sig) { row = { key, sig, type, x, grouped }; cache.set(key, row); }
     rows.push(row);
     if (type === "mine") prompts.push({ key, text: x.text, at: x.at });
   });

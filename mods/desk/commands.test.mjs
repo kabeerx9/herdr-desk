@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { commandsFor, slashQuery, matchCommands, resolveCommand, menuKey, MODES, mentionQuery, matchMentions } from './commands.js';
+import { commandsFor, slashQuery, matchCommands, resolveCommand, menuKey, MODES, mentionQuery, matchMentions, mentionItems } from './commands.js';
 
 test('the menu follows the target CLI and keeps the Desk actions', () => {
   const claude = commandsFor('claude').map((c) => c.name), codex = commandsFor('codex').map((c) => c.name);
@@ -66,4 +66,16 @@ test('@ mentions: the query at the end, and the options it matches', () => {
   assert.deepEqual(menuKey('tab', 0, 1), { complete: true });
   assert.deepEqual(menuKey('down', 2, 3), { index: 0 });
   assert.deepEqual(menuKey('escape', 0, 3), { close: true });
+});
+
+test('@ menu: Send to the members with their status, then Bring in the rest', () => {
+  const roles = [{ id: 'cto', name: 'CTO' }, { id: 'frontend', name: 'Frontend' }, { id: 'backend', name: 'Backend' }, { id: 'qa', name: 'QA' }];
+  const members = [{ role: 'cto', address: 't1', status: 'idle' }, { role: 'frontend', address: 't2', status: 'working' },
+    { role: 'frontend', address: 't3', status: 'blocked' }];
+  const items = mentionItems(members, roles, '');
+  assert.deepEqual(items.map((x) => [x.section, x.id, x.status]), [['send', 'cto', 'idle'], ['send', 'frontend', 'blocked'], ['send', 'all', null],
+    ['bring', 'backend', null], ['bring', 'qa', null]]);
+  assert.equal(items[1].address, 't3');
+  assert.deepEqual(mentionItems(members, roles, 'b').map((x) => x.id), ['backend']);
+  assert.deepEqual(mentionItems([{ role: 'cto', address: 't1', status: 'idle' }], roles, '').filter((x) => x.section === 'send').map((x) => x.id), ['cto']);
 });

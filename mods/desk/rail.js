@@ -6,6 +6,7 @@ import { fetchUsage, railMeters, openLimits } from "./usage.js";
 import { inboxCount } from "./inbox.js";
 import { showTerminals } from "./desks.js";
 import { RuntimeWatch } from "./workflows.js";
+import { cardOpen, setCardOpen } from "./ui.js";
 
 // The always-visible edge of the Desk: one icon per tab, a badge for counts.
 export class Rail {
@@ -26,6 +27,8 @@ export class Rail {
     if (c.endsWith("-limits")) return openLimits(c[0].toUpperCase() + c.slice(1, -"-limits".length));
     // desk.chat (⌘E in the desk-chat layout): the center between the chat and the terminals.
     if (c === "chat") return showTerminals(!shared("deskchat.terminals"));
+    // desk.card: open or collapse the chat's desk card (the desk's team, changes and PRs).
+    if (c === "card") return setCardOpen(!cardOpen());
     // desk.new-here: a fresh desk for the current space, in the chat (what a space click does there).
     if (c === "new-here") { setShared("desk.here", { at: Date.now() }); setShared("desk.view", "new"); return showTerminals(false); }
     // desk.open-<slug>: that desk's chat (a permission toast's click).

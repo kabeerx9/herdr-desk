@@ -1,19 +1,22 @@
-import { div, svg } from "gpui-kit";
+import { div } from "gpui-kit";
 import { h_flex, v_flex } from "gpui-base";
 import { theme, shared, setShared, terminals, agents, exec, appHome, notify } from "herdr";
-import { icon, button, tileColor, statusMark, iconButton, offMain, mostUrgent, ROW } from "./ui.js";
-// Roles draw as one-colour glyphs here (no tinted tiles): see glyph().
+import { icon, button, statusMark, iconButton, offMain, mostUrgent, ROW, cardCollapsed, setCardCollapsed } from "./ui.js";
+import { agentIcon, agentCli } from "./roles.js";
 import { runtimeData, openDesk, sessionOf, refreshRuntime } from "./workflows.js";
 import { Desks, deskMembers, showTerminals, openTerminal } from "./desks.js";
-import { openLimits } from "./usage.js";
 
-// The floating card at the chat's top right (layouts/desk-chat.json): the desk's controls in five
-// sections, Team, Lineage, Changes, PRs and Usage. Right-click picks which show (only changes from
-// the defaults are stored). The card measures the room it has (shared "desk.center.h", written by
-// the chat it floats over) and picks a density: full, compact (lower-priority sections shrink to
-// a line or two) or essential (they drop). It follows the desk the chat shows (shared "desk.view").
+// The desk card: a floating block at the chat's top right (layouts/desk-chat.json, "desk-card"),
+// T3 Code's top-right block. Open, it shows Team, Lineage, Changes and PRs under a 44px header,
+// content-height up to 65% of the chat (shared "desk.center.h", written by main.js), scrolling
+// inside. Collapsed (ui.js cardCollapsed, persisted), it's the header alone: a pill in the same
+// spot. Right-click picks which sections show. It follows the desk the chat shows (shared
+// "desk.view") and publishes the rectangle it covers as shared "desk.cardInset" ({right, top},
+// px from the chat's top-right corner; 0s when it draws nothing) so the chat keeps out of it.
 
-const WIDTH = 320;
+const WIDTH = 280;
+// Herdr's floating frame: 12px in from the edge, 5px of frame above and below the content.
+const EDGE = 12, FRAME_Y = 5, CLEAR = 12;
 // One line per worktree: branch, base, commits ahead, uncommitted files, and the shortstat of
 // everything since it left the base (committed or not). Reads take no git locks.
 const GIT = `cd "$1" 2>/dev/null || exit 0
@@ -30,12 +33,9 @@ const SECTIONS = [
   { id: "lineage", label: "Lineage" },
   { id: "changes", label: "Changes" },
   { id: "prs", label: "Pull requests" },
-  { id: "usage", label: "Usage" },
 ];
-// Who shrinks first when room runs out, and who may drop (Team and Changes stay).
-const DEGRADE = ["usage", "prs", "lineage", "changes", "team"];
-const DROPPABLE = ["usage", "prs", "lineage"];
-const HEAD = 44, CHIP = 36, FOOT = 44, SECTION = 28, PAD = 8;
+// The header matches the chat's top band (desks.js), so the two hairlines meet in one line.
+const HEAD = 44, FOOT = 44, SECTION = 28;
 const ENGINEERS = new Set(["frontend", "backend"]);
 const REVIEWS = { reviewer: "Reviewer", qa: "QA" };
 
@@ -60,7 +60,6 @@ export class DeskCard {
     this.menu = false;     // the "Show in card" list
     this.shown = store.get("card.sections", {});   // only non-defaults (false) are stored
     this.shelf = { previous: false };
-    this.collapsed = store.get("card.compact", true);
     this.key = "";
     this.lineKey = null; this.lineCache = null;
     cx.timer.every(3000, (cx) => { if (this.watchKey() !== this.key) this.refresh(cx); });
@@ -99,7 +98,7 @@ export class DeskCard {
   refresh(cx, { prs = false } = {}) {
     this.key = this.watchKey();
     const slug = this.slug, trees = this.worktrees();
-    if (!slug || this.collapsed) return cx.notify();
+    if (!slug || cardCollapsed()) return cx.notify();
     cx.spawn(async (cx) => {
       for (const m of trees) {
         const r = await exec("sh", ["-c", GIT, "git", m.cwd]);
@@ -167,12 +166,12 @@ export class DeskCard {
       .when(Boolean(mark), (el) => el.child(h_flex().w(16).flex_none().justify_center().child(mark)));
   }
 
-  // A section's title: name, a quiet count or summary, an optional action at the right.
+  // A section's title: 12 semibold, its count or summary dim at the right, then an optional action.
   head(t, id, title, meta, extra) {
-    return h_flex().id(`card-sec-${id}`).h(SECTION).flex_none().pl(14).pr(8).gap(6).items_center()
-      .child(div().text_size(12).font_semibold().text_color(t.foreground).child(title))
-      .when(Boolean(meta), (el) => el.child(div().text_size(11).text_color(t.dim).child(`· ${meta}`)))
+    return h_flex().id(`card-sec-${id}`).h(SECTION).flex_none().pl(14).pr(extra ? 8 : 14).gap(6).items_center()
+      .child(div().flex_none().text_size(12).font_semibold().text_color(t.foreground).child(title))
       .child(div().flex_1())
+      .when(Boolean(meta), (el) => el.child(div().min_w(0).truncate().text_size(11).text_color(t.dim).child(meta)))
       .when(Boolean(extra), (el) => el.child(extra));
   }
 
@@ -202,21 +201,6 @@ export class DeskCard {
     return h_flex().flex_none().p(1).gap(1).rounded(8).bg(t.raised).border_1().border_color(t.border)
       .child(seg("sw-chat", "chat", "Chat", !terms, () => showTerminals(false)))
       .child(seg("sw-terms", "terminal", "Terminals", terms, () => showTerminals(true)));
-  }
-
-  // A role's glyph in one colour: the text's, a step down.
-  glyph(t, role, size = 14) {
-    return svg(`mods/desk/icons/${role?.icon ?? "terminal"}.svg`).size(size).flex_none().text_color(t.dim);
-  }
-
-  summary(members, trees) {
-    const n = (k) => members.filter((m) => m.status === k).length;
-    const parts = [members.length ? plural(members.length, "agent") : "No agents"];
-    if (n("blocked")) parts.push(`${n("blocked")} need${n("blocked") === 1 ? "s" : ""} you`);
-    if (n("working")) parts.push(`${n("working")} working`);
-    const dirty = trees.filter((m) => this.git[m.cwd]?.dirty).length;
-    if (dirty) parts.push(`${dirty} uncommitted`);
-    return parts.join(" · ");
   }
 
   // ── lineage: the desk's parent, its forks and side questions, its reviewers and QA ──
@@ -272,80 +256,76 @@ export class DeskCard {
     });
   }
 
-  // ── density ───────────────────────────────────────────────────────────────
-
-  // Each enabled section's height at full and compact, then shrink the lowest priority first,
-  // then drop what may drop. Returns { density, level: { id: "full" | "compact" | "off" } }.
-  plan(counts) {
-    const avail = Math.max(240, (shared("desk.center.h") ?? 720) - 34);
-    const h = {
-      team: { full: SECTION + ROW * counts.team + counts.extra, compact: SECTION + ROW * Math.min(counts.team, 4) + counts.extra },
-      lineage: { full: SECTION + ROW * (counts.running + (counts.previous ? 1 : 0)), compact: SECTION + ROW * Math.min(counts.running, 2) },
-      changes: { full: SECTION + ROW * Math.max(1, counts.trees), compact: SECTION + ROW },
-      prs: { full: SECTION + ROW * Math.max(1, counts.prs), compact: SECTION + ROW * Math.min(Math.max(1, counts.prs), 2) },
-      usage: { full: SECTION + 36 * Math.max(1, counts.usage), compact: SECTION + ROW },
-    };
-    const level = {};
-    for (const s of SECTIONS) level[s.id] = this.on(s.id) && !(s.id === "lineage" && !counts.running && !counts.previous) ? "full" : "off";
-    const total = () => HEAD + FOOT + PAD + Object.entries(level).reduce((n, [id, l]) => n + (l === "off" ? 0 : h[id][l]), 0);
-    for (const id of DEGRADE) { if (total() <= avail) break; if (level[id] === "full") level[id] = "compact"; }
-    let dropped = false;
-    for (const id of DROPPABLE) { if (total() <= avail) break; if (level[id] !== "off") { level[id] = "off"; dropped = true; } }
-    const shrunk = Object.values(level).includes("compact");
-    return { density: dropped ? "essential" : shrunk ? "compact" : "full", level, max: avail - HEAD - FOOT };
-  }
-
   // ── sections ──────────────────────────────────────────────────────────────
 
-  teamSection(t, d, members, subs, level) {
+  // A member's face: its role's avatar with the program's mark (roles.js agentIcon).
+  face(t, m, role, size = 18) {
+    return agentIcon(t, { role: role ?? m.role, cli: agentCli({ session: sessionOf(m.address), role }), ring: t.background }, size);
+  }
+
+  // The add-member menu: one chip per role (a second engineer of a role gets "+1").
+  adder(t, d, members) {
+    const present = new Set(members.map((m) => m.role));
+    return h_flex().px(14).pt(2).pb(6).gap(5).flex_wrap()
+      .children((this.roles.list ?? []).map((r) => this.desks.chip(t, `cadd-${r.id}`, false, `${r.name}${present.has(r.id) ? " +1" : ""}`,
+        (_e, cx) => { this.adding = false; this.desks.busy(`add-${r.id}`, () => this.desks.addMember(r, d), cx); },
+        agentIcon(t, { role: r }, 16))));
+  }
+
+  // A desk starts with the CTO alone; this dashed row is the way to bring someone in by hand.
+  bringRow(t) {
+    return h_flex().id("card-bring").h(ROW).flex_none().mx(6).mt(2).px(8).gap(8).items_center().rounded(6)
+      .border_1().border_dashed().border_color(t.border).cursor_pointer().text_size(12).text_color(t.muted)
+      .hover((s) => s.bg(t.hover).text_color(t.foreground))
+      .tooltip("Add a member now. The CTO also brings people in when the work needs them.")
+      .on_mouse_down("left", (_e, cx) => cx.stop_propagation())
+      .on_click((_e, cx) => { cx.stop_propagation(); this.adding = true; cx.notify(); })
+      .child(h_flex().w(18).flex_none().justify_center().child(icon("plus", 13)))
+      .child("Bring someone in");
+  }
+
+  teamSection(t, d, members, subs) {
     const app = new Map(agents().map((a) => [a.address, a]));
     const memberRow = (m) => {
       const role = this.roles.byId(m.role), open = this.open === m.address, s = sessionOf(m.address), id = `ag-${m.address}`;
       const more = iconButton(t, `${id}-more`, open ? "chevron-down" : "chevron", open ? "Hide its actions" : "Its actions: compact, fresh start, review, QA, PR",
         (_e, cx) => { this.open = open ? null : m.address; cx.notify(); }, { color: open ? t.foreground : undefined });
       const rows = [this.row(t, id, {
-        indent: m.depth * 12, lead: role ? this.glyph(t, role) : div().size(16),
-        name: role?.name ?? m.role, meta: s?.title ?? null,
+        indent: m.depth * 12, lead: this.face(t, m, role),
+        name: role?.name ?? m.role,
         mark: statusMark(t, m.status ?? "idle", 12), actions: [more],
         // Its own conversation (a route of this desk); the terminal stays one click away in its actions.
         onClick: () => { showTerminals(false); setShared("desk.view", d.slug); setShared("desk.route", { task: d.slug, address: m.address }); },
-        tip: m.note ?? s?.title ?? "Open its conversation",
+        tip: [m.note ?? s?.title, "Open its conversation"].filter(Boolean).join(" · "),
       })];
       if (open) rows.push(div().mx(8).mb(4).rounded(8).bg(t.raised).child(this.desks.memberDetail(t, m, d, true)));
       return rows;
     };
-    let shown = members;
-    const cap = level === "compact" ? 4 : Infinity;
-    const hidden = Math.max(0, shown.length - cap);
-    shown = shown.slice(0, cap);
     const rows = [
-      ...shown.flatMap((m) => memberRow(m)),
-      ...(level === "full" ? subs.map((s) => {
+      ...members.flatMap((m) => memberRow(m)),
+      ...subs.map((s) => {
         const a = app.get(s.address);
-        return this.row(t, `sub-${s.address}`, { indent: 12, lead: icon("sparkles", 13).text_color(t.dim),
+        return this.row(t, `sub-${s.address}`, { indent: 12, lead: h_flex().w(18).flex_none().justify_center().child(icon("sparkles", 13).text_color(t.dim)),
           name: s.name || a?.app || s.program?.name || s.address, muted: true, mark: statusMark(t, a?.status ?? "idle", 12),
           onClick: () => openTerminal(s.address, { peek: true }), tip: "Sub-agent: peek at its terminal" });
-      }) : []),
-      ...(hidden ? [this.note(t, `${hidden} more`)] : []),
+      }),
     ];
-    const present = new Set(members.map((m) => m.role));
-    const adder = this.adding ? h_flex().px(14).pb(6).gap(5).flex_wrap()
-      .children((this.roles.list ?? []).map((r) => this.desks.chip(t, `cadd-${r.id}`, false, `${r.name}${present.has(r.id) ? " +1" : ""}`,
-        (_e, cx) => { this.adding = false; this.desks.busy(`add-${r.id}`, () => this.desks.addMember(r, d), cx); }, this.glyph(t, r, 13)))) : null;
-    const add = iconButton(t, "card-add", this.adding ? "minus" : "plus", this.adding ? "Cancel" : "Add an agent",
-      (_e, cx) => { this.adding = !this.adding; cx.notify(); }, { color: t.accent });
+    const alone = members.every((m) => m.role === "cto") && members.length <= 1;
+    const add = iconButton(t, "card-add", this.adding ? "minus" : "plus", this.adding ? "Cancel" : "Add a member",
+      (_e, cx) => { this.adding = !this.adding; cx.notify(); });
     const n = (k) => members.filter((m) => m.status === k).length;
     const meta = [n("blocked") && `${n("blocked")} need${n("blocked") === 1 ? "s" : ""} you`, n("working") && `${n("working")} working`].filter(Boolean).join(", ")
       || (members.length ? String(members.length + subs.length) : null);
     return v_flex().child(this.head(t, "team", "Team", meta, add))
-      .when(Boolean(adder), (el) => el.child(adder))
-      .children(rows.length ? rows : [this.note(t, "Nobody running. Add an agent to start.")]);
+      .when(this.adding, (el) => el.child(this.adder(t, d, members)))
+      .children(rows.length ? rows : [this.note(t, "Nobody running.")])
+      .when(alone && !this.adding, (el) => el.child(this.bringRow(t)));
   }
 
-  lineageSection(t, line, level) {
+  lineageSection(t, line) {
     const { running, previous } = line;
-    const rows = [...(level === "compact" ? running.slice(0, 2) : running).map((r) => this.lineRow(t, r))];
-    if (level === "full" && previous.length) {
+    const rows = running.map((r) => this.lineRow(t, r));
+    if (previous.length) {
       rows.push(this.shelfRow(t, "lineage-prev", "Previous", previous.length, this.shelf.previous, () => { this.shelf.previous = !this.shelf.previous; }));
       if (this.shelf.previous) rows.push(...previous.map((r) => this.lineRow(t, r)));
     }
@@ -353,19 +333,10 @@ export class DeskCard {
       .children(rows);
   }
 
-  changesSection(t, trees, level) {
-    if (level === "compact") {
-      const gs = trees.map((m) => this.git[m.cwd]).filter(Boolean);
-      const files = gs.reduce((n, g) => n + g.files, 0), adds = gs.reduce((n, g) => n + g.adds, 0), dels = gs.reduce((n, g) => n + g.dels, 0);
-      const first = trees[0];
-      return v_flex().child(this.head(t, "changes", "Changes", plural(trees.length, "worktree")))
-        .child(trees.length ? this.row(t, "ch-all", { lead: icon("branch", 13).text_color(t.dim), name: files ? plural(files, "file") : "No changes", muted: !files,
-          rest: files ? this.stat(t, adds, dels) : null, onClick: first ? () => this.openChanges(first) : null, tip: "Review the first worktree's changes" })
-          : this.note(t, "No worktrees yet"));
-    }
+  changesSection(t, trees) {
     const rows = trees.map((m) => {
       const g = this.git[m.cwd], role = this.roles.byId(m.role), read = m.cwd in this.git;
-      const lead = role ? this.glyph(t, role) : icon("branch", 13).text_color(t.dim);
+      const lead = this.face(t, m, role, 16);
       if (read && !g) return this.row(t, `ch-${m.address}`, { lead, name: role?.name ?? m.role, meta: "not a git repo", muted: true, onClick: () => openTerminal(m.address), tip: m.cwd });
       const meta = g ? [offMain(g.branch, g.base) ? g.branch : null, g.ahead ? `↑${g.ahead}` : null].filter(Boolean).join(" ") : "…";
       const tip = g ? [`${plural(g.files, "file")} changed since ${g.base || "HEAD"}`, g.branch, g.dirty ? `${g.dirty} uncommitted` : null].filter(Boolean).join(" · ") : "Reading git…";
@@ -383,43 +354,20 @@ export class DeskCard {
       .child(div().text_color(t.ansi2).child(`+${adds}`)).child(div().text_color(t.ansi1).child(`−${dels}`));
   }
 
-  prsSection(t, prs, level) {
-    const list = level === "compact" ? prs.slice(0, 2) : prs;
+  prsSection(t, prs) {
     return v_flex().child(this.head(t, "prs", "Pull requests", prs.length ? String(prs.length) : null))
-      .children(list.length ? list.map((p) => {
+      .children(prs.length ? prs.map((p) => {
         const color = p.state === "MERGED" ? t.ansi5 : p.state === "OPEN" ? t.ansi2 : t.dim;
-        return this.row(t, `pr-${p.number}`, { lead: icon("pr", 13).text_color(color), name: p.title, muted: p.state !== "OPEN",
+        return this.row(t, `pr-${p.number}`, { lead: h_flex().w(16).flex_none().justify_center().child(icon("pr", 13).text_color(color)), name: p.title, muted: p.state !== "OPEN",
           rest: div().text_size(11).text_color(t.dim).child(`#${p.number}`), onClick: () => exec("open", [p.url]),
           tip: `${p.state === "MERGED" ? "Merged" : p.state === "OPEN" ? "Open" : "Closed"} · ${p.url}` });
       }) : [this.note(t, "No pull requests on these branches")]);
   }
 
-  usageSection(t, level) {
-    const providers = (shared("desk.usage")?.providers ?? []).filter((p) => p.windows?.length);
-    const week = (p) => p.windows.find((w) => w.label === "Week") ?? p.windows[p.windows.length - 1];
-    const color = (used) => (used >= 90 ? t.ansi1 : used >= 70 ? t.blocked : t.accent);
-    if (!providers.length) return v_flex().child(this.head(t, "usage", "Usage", null)).child(this.note(t, "No plan limits read yet"));
-    if (level === "compact") return v_flex().child(this.head(t, "usage", "Usage", null))
-      .child(this.row(t, "usage-line", { name: providers.map((p) => `${p.provider} ${week(p).used}%`).join(" · "), muted: true,
-        onClick: () => openLimits(providers[0].provider), tip: "Weekly plan limits" }));
-    return v_flex().child(this.head(t, "usage", "Usage", "this week")).children(providers.map((p) => {
-      const w = week(p), id = `usage-${p.provider}`, hovered = this.hovered === id;
-      return v_flex().id(id).h(36).flex_none().mx(6).px(8).gap(5).justify_center().rounded(6).cursor_pointer()
-        .bg(hovered ? t.hover : "#00000000").on_hover((h, cx) => this.hover(id, h, cx))
-        .on_mouse_down("left", (_e, cx) => cx.stop_propagation())
-        .on_click((_e, cx) => { cx.stop_propagation(); openLimits(p.provider); })
-        .child(h_flex().gap(6).items_center().text_size(12)
-          .child(div().text_color(t.foreground).child(p.provider)).child(div().flex_1())
-          .child(div().text_size(11.5).font_medium().text_color(w.used >= 70 ? color(w.used) : t.muted).child(`${w.used}%`)))
-        .child(div().w_full().h(3).rounded(2).bg(t.raised).overflow_hidden()
-          .child(div().h_full().w(`${Math.min(100, Math.max(w.used, w.used > 0 ? 2 : 0))}%`).rounded(2).bg(color(w.used))));
-    }));
-  }
-
   // Right-click: which sections show.
   menuView(t) {
     return v_flex().pb(6)
-      .child(this.head(t, "menu", "Show in card", null, iconButton(t, "card-menu-done", "check", "Done", (_e, cx) => { this.menu = false; cx.notify(); })))
+      .child(this.head(t, "menu", "Show in panel", null, iconButton(t, "card-menu-done", "check", "Done", (_e, cx) => { this.menu = false; cx.notify(); })))
       .children(SECTIONS.map((s) => {
         const on = this.on(s.id);
         return this.row(t, `card-show-${s.id}`, {
@@ -430,76 +378,81 @@ export class DeskCard {
       }));
   }
 
+  // The space the chat keeps free, written only when it changes.
+  publishInset(right, top) {
+    const now = shared("desk.cardInset");
+    if (now?.right === right && now?.top === top) return;
+    setShared("desk.cardInset", { right, top });
+  }
+  measured(size) {
+    this.size = { width: Math.round(size.width), height: Math.round(size.height) };
+    this.publishInset(this.size.width + EDGE + CLEAR, this.size.height + EDGE + FRAME_Y * 2);
+  }
+
+  // One 44px row: the title (13 semibold) and its dim meta on one line, centred; the Chat |
+  // Terminals switcher; collapse or expand. Collapsed, this row is the whole card.
+  header(t, title, meta, mark, collapsed, border) {
+    return h_flex().id("card-head").h(HEAD).flex_none().pl(14).pr(8).gap(8).items_center()
+      .when(border, (el) => el.border_b(1).border_color(t.border))
+      .on_mouse_down("left", (_e, cx) => cx.stop_propagation())
+      .child(h_flex().min_w(0).flex_1().gap(6).items_center()
+        .child(div().flex_shrink_0().max_w(150).truncate().text_size(13).font_semibold().text_color(t.foreground).child(title))
+        .when(Boolean(mark), (el) => el.child(mark))
+        .when(Boolean(meta), (el) => el.child(div().min_w(0).flex_shrink_1().truncate().text_size(11).text_color(t.dim).child(meta))))
+      .child(this.switcher(t))
+      .child(iconButton(t, "card-collapse", collapsed ? "chevron-down" : "up", collapsed ? "Show the desk's team, changes and pull requests" : "Collapse",
+        (_e, cx) => { setCardCollapsed(!collapsed); if (collapsed) this.refresh(cx, { prs: true }); }, { size: 24 }));
+  }
+
   render(_cx) {
-    if (shared("desk.review")) return div().size(0);
+    if (shared("desk.review")) { this.publishInset(0, 0); return div().size(0); }
     const t = theme(), slug = this.slug, d = slug ? this.desks.desk(slug) : null;
-    if (!d) return h_flex().id("desk-card").p(4).child(this.switcher(t));
-    const folded = this.collapsed;
+    const collapsed = cardCollapsed();
+    const root = v_flex().id("desk-card").w(WIDTH).rounded(12).bg(t.chrome).text_color(t.foreground).overflow_hidden()
+      .on_size_change((size) => this.measured(size));
+    if (!d) return root.child(this.header(t, "Desk", null, null, true, false));
+
     const members = deskMembers(slug), trees = this.worktrees();
     const [name, when] = d.name.includes(" · ") ? d.name.split(" · ") : [d.name, null];
     const lost = (runtimeData().sessions ?? []).filter((s) => s.task === slug && s.state === "disconnected");
-    const urgent = lost.length > 0 || members.some((m) => m.status === "blocked");
+    const blocked = members.some((m) => m.status === "blocked");
     const where = d.project && d.project !== name ? d.project : when;
-    const sub = folded && members.length ? this.summary(members, trees) : where;
-    const toggle = iconButton(t, "card-toggle", folded ? "chevron-down" : "up", folded ? "Show the desk's team, lineage, changes and pull requests" : "Fold",
-      (_e, cx) => { this.collapsed = !folded; store.set("card.compact", this.collapsed); this.refresh(cx, { prs: true }); }, { size: 24 });
-    // Folded: one 36px line (title, each member's status mark, the view switcher, the chevron), so
-    // the chip sits in the chat's top band above the header strip. The summary moves to the tooltip.
-    const shown = members.slice(0, 5);
-    const marks = h_flex().flex_none().gap(3).items_center()
-      .children(shown.map((m) => statusMark(t, m.status ?? "idle", 11)))
-      .when(members.length > shown.length, (el) => el.child(div().text_size(11).text_color(t.dim).child(`+${members.length - shown.length}`)))
-      .when(lost.length > 0 && !members.some((m) => m.status === "blocked"), (el) => el.child(statusMark(t, "disconnected", 11)));
-    const header = folded
-      ? h_flex().id("card-head").h(CHIP).flex_none().pl(12).pr(6).gap(8).items_center()
-        .on_mouse_down("left", (_e, cx) => cx.stop_propagation())
-        .tooltip(members.length ? this.summary(members, trees) : where ?? name)
-        .child(div().min_w(0).flex_1().truncate().text_size(13).font_semibold().text_color(t.foreground).child(name))
-        .when(members.length > 0 || lost.length > 0, (el) => el.child(marks))
-        .child(this.switcher(t))
-        .child(toggle)
-      : h_flex().id("card-head").h(HEAD).flex_none().pl(14).pr(6).gap(8).items_center()
-        .on_mouse_down("left", (_e, cx) => cx.stop_propagation())
-        .child(v_flex().min_w(0).flex_1().gap(1)
-          .child(h_flex().min_w(0).gap(6).items_center()
-            .child(div().truncate().text_size(13).font_semibold().text_color(t.foreground).child(name))
-            .when(urgent, (el) => el.child(statusMark(t, lost.length && !members.some((m) => m.status === "blocked") ? "disconnected" : "blocked", 11))))
-          .when(Boolean(sub), (el) => el.child(div().truncate().text_size(11).text_color(t.dim).child(sub))))
-        .child(this.switcher(t))
-        .child(toggle);
-    const root = v_flex().id("desk-card").w(WIDTH)
-      .on_mouse_down("right", (_e, cx) => { cx.stop_propagation(); if (this.collapsed) { this.collapsed = false; store.set("card.compact", false); this.refresh(cx, { prs: true }); } this.menu = !this.menu; cx.notify(); });
-    if (folded) return root.child(header);
+    const mark = blocked ? statusMark(t, "blocked", 11) : lost.length ? statusMark(t, "disconnected", 11) : null;
+    if (collapsed) {
+      // The pill: each member's mark stands in for the sections.
+      const marks = members.length ? h_flex().flex_none().gap(3).items_center()
+        .children(members.slice(0, 4).map((m) => statusMark(t, m.status ?? "idle", 11)))
+        .when(members.length > 4, (el) => el.child(div().text_size(11).text_color(t.dim).child(`+${members.length - 4}`))) : mark;
+      return root.child(this.header(t, name, null, marks, true, false));
+    }
 
     const subs = this.subagents(members), line = this.lineage(slug, d, members);
     const prs = trees.flatMap((m) => this.prs[m.cwd] ?? []);
-    const providers = (shared("desk.usage")?.providers ?? []).filter((p) => p.windows?.length).length;
-    const extra = (this.open ? 120 : 0) + (this.adding ? 34 : 0) + (lost.length ? 90 : 0);
-    const { level, max } = this.plan({ team: members.length + subs.length, extra, running: line.running.length, previous: line.previous.length,
-      trees: trees.length, prs: prs.length, usage: providers });
-
+    const shown = (id) => this.on(id) && !(id === "lineage" && !line.running.length && !line.previous.length);
     const parts = this.menu ? [this.menuView(t)] : [
-      ...(level.team !== "off" ? [this.teamSection(t, d, members, subs, level.team)] : []),
-      ...(level.lineage !== "off" ? [this.lineageSection(t, line, level.lineage)] : []),
-      ...(level.changes !== "off" ? [this.changesSection(t, trees, level.changes)] : []),
-      ...(level.prs !== "off" ? [this.prsSection(t, prs, level.prs)] : []),
-      ...(level.usage !== "off" ? [this.usageSection(t, level.usage)] : []),
+      ...(shown("team") ? [this.teamSection(t, d, members, subs)] : []),
+      ...(shown("lineage") ? [this.lineageSection(t, line)] : []),
+      ...(shown("changes") ? [this.changesSection(t, trees)] : []),
+      ...(shown("prs") ? [this.prsSection(t, prs)] : []),
     ];
-    const body = v_flex().id(`card-body-${slug}`).max_h(Math.max(160, max)).overflow_y_scrollbar().pb(PAD).border_t(1).border_color(t.border)
-      .when(lost.length > 0 && !this.menu, (el) => el.child(div().mx(10).mt(8).child(v_flex().gap(5).children(this.desks.workflow.disconnected(t, slug)))))
-      .children(parts.flatMap((p, i) => (i ? [div().h(1).mx(14).my(2).bg(t.border), p] : [p])))
+    // At most 65% of the chat's height, header and footer included; the sections scroll inside.
+    const max = Math.max(120, Math.round((shared("desk.center.h") ?? 720) * 0.65) - EDGE - FRAME_Y * 2 - HEAD - FOOT);
+    const body = v_flex().id(`card-body-${slug}`).max_h(max).overflow_y_scrollbar().pt(4).pb(8)
+      .when(lost.length > 0 && !this.menu, (el) => el.child(div().mx(10).mt(4).mb(4).child(v_flex().gap(5).children(this.desks.workflow.disconnected(t, slug)))))
+      .children(parts.flatMap((p, i) => (i ? [div().h(1).flex_none().mx(14).my(4).bg(t.border), p] : [p])))
       .when(!parts.length, (el) => el.child(this.note(t, "Every section is hidden. Right-click to show some.")));
 
     // Wrap up while anyone's running; once they're all closed, Delete (click twice).
     const acting = this.desks.acting, deleting = Date.now() < this.desks.confirmDelete;
     const footer = h_flex().h(FOOT).flex_none().px(12).gap(8).items_center().border_t(1).border_color(t.border)
-      .child(div().flex_1().text_size(11).text_color(t.dim).child(acting && acting !== "wrap" ? "Working…" : "Right-click to choose sections"))
+      .child(div().flex_1().min_w(0).truncate().text_size(11).text_color(t.dim).child(acting && acting !== "wrap" ? "Working…" : ""))
       .when(members.length > 0, (el) => el.child(button(t, "card-wrap", acting === "wrap" ? "Wrapping up…" : "Wrap up", (_e, cx) => this.desks.wrapUp(d, cx),
         { disabled: Boolean(acting), tip: "Each agent flags anything left locally, or cleans up its worktree and closes" })))
       .when(!members.length, (el) => el.child(button(t, "card-del", deleting ? "Click again to delete" : "Delete desk", (_e, cx) => this.desks.deleteDesk(d, cx),
         { iconName: "trash", disabled: Boolean(acting), tip: "Nobody's running. Kept in ~/.herdr/team/.deleted, so it can be put back" })));
 
-    return root.on_mouse_down_out((_e, cx) => { this.collapsed = true; this.menu = false; store.set("card.compact", true); cx.notify(); })
-      .child(header).child(body).child(footer);
+    return root
+      .on_mouse_down("right", (_e, cx) => { cx.stop_propagation(); this.menu = !this.menu; cx.notify(); })
+      .child(this.header(t, name, where, mark, false, true)).child(body).child(footer);
   }
 }

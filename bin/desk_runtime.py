@@ -10,6 +10,7 @@ import os
 import re
 import tempfile
 import time
+import subprocess
 import uuid
 import fcntl
 from contextlib import contextmanager
@@ -1077,3 +1078,160 @@ def cleared_transcript(folder, old, since_ms):
         if not best or stamp > best[0]:
             best = (stamp, name[:-6])
     return best[1] if best else None
+
+
+# ── permission prompts: answering Claude's "Do you want to proceed?" from the Desk ──────────────
+# Claude draws a permission prompt as a titled block ("Bash command", "Edit file", ...) above a
+# rule, the thing asked about, a question ("Do you want to proceed?", "Do you want to make this
+# edit to x.ts?") and numbered options, the focused one marked "❯". Its key hints ("Esc to
+# cancel") make screen_state call it a dialog. Options are read off the screen, never assumed by
+# position: their wording and order vary by tool and version.
+
+PERMISSION_QUESTION = re.compile(r"^\s*Do you want to (?:proceed|make this edit to|create|allow|run|delete|overwrite|insert|fetch|use)\b.*\?\s*$")
+OPTION = re.compile(r"^\s*(?:❯\s*)?(\d{1,2})\.\s+(.+?)\s*$")
+BOX_EDGE = re.compile(r"^\s*[│┃]\s?|\s?[│┃]\s*$")
+FRAME = re.compile(r"^\s*(?:[─━]{20,}|[╭╰][─━]{10,}[╮╯])\s*$")
+
+
+def _unbox(line):
+    return BOX_EDGE.sub("", line.rstrip())
+
+
+def option_kind(label):
+    """allow | always | deny | None for one option's label."""
+    text = re.sub(r"\s*\((?:esc|shift\+tab|tab|[a-z])\)\s*$", "", label.strip(), flags=re.I).lower()
+    if text.startswith("no"):
+        return "deny"
+    if text.startswith("yes"):
+        rest = text[3:].lstrip(" ,")
+        if not rest or rest == "proceed":
+            return "allow"
+        if re.search(r"don't ask again|do not ask again|always allow|allow all|from now on|this session|allow access|allow reading", rest):
+            return "always"
+        return "allow" if rest.startswith(("once", "just this")) else None
+    return None
+
+
+def permission_dialog(screen, cli="claude"):
+    """Claude's permission prompt on this screen: {"title", "subject" (what it asks about: the
+    command, the file), "question", "options": [{"n", "label", "kind", "focused"}]}, or None when
+    the visible screen shows no permission prompt (its prompt box, another dialog, a picker)."""
+    if cli != "claude":
+        return None
+    if screen_state(screen, cli)["state"] != "dialog":
+        return None
+    lines = [_unbox(x) for x in _lines(screen)]
+    while lines and not lines[-1].strip():
+        lines.pop()
+    q = next((i for i in range(len(lines) - 1, -1, -1) if PERMISSION_QUESTION.match(lines[i])), None)
+    if q is None:
+        return None
+    options, j = [], q + 1
+    while j < len(lines) and len(options) < 9:
+        m = OPTION.match(lines[j])
+        if m and int(m.group(1)) == len(options) + 1:
+            label = m.group(2)
+            # A long label wraps onto an indented line without a number.
+            while j + 1 < len(lines) and lines[j + 1].strip() and not OPTION.match(lines[j + 1]) \
+                    and len(lines[j + 1]) - len(lines[j + 1].lstrip()) > len(lines[j]) - len(lines[j].lstrip()) + 2:
+                j += 1
+                label += " " + lines[j].strip()
+            options.append({"n": int(m.group(1)), "label": label, "kind": option_kind(label), "focused": "❯" in lines[j].split(".")[0]})
+        elif options and lines[j].strip():
+            break
+        j += 1
+    if len(options) < 2 or not any(o["kind"] == "allow" for o in options) or not any(o["kind"] == "deny" for o in options):
+        return None
+    # The block above the question: back to the frame (a rule or a box top), its first line the title.
+    top = next((i for i in range(q - 1, -1, -1) if FRAME.match(lines[i]) or TOP_BORDER.match(lines[i])), None)
+    body = [x for x in lines[(top + 1 if top is not None else max(0, q - 14)):q]]
+    while body and not body[0].strip():
+        body.pop(0)
+    title = body.pop(0).strip() if body else ""
+    subject = [x.strip() for x in body if x.strip() and not re.fullmatch(r"[╌┄┈─-]+", x.strip())]
+    return {"title": title, "subject": "\n".join(subject), "question": lines[q].strip(), "options": options}
+
+
+def _squash(text):
+    return re.sub(r"\s+", "", str(text or "")).lower()
+
+
+def dialog_matches(dialog, expect):
+    """Does the prompt on screen ask about `expect` (the command or file the Desk showed)? Whitespace
+    is ignored (the screen wraps long commands); a file matches by its name in the question."""
+    if not expect:
+        return True
+    want, shown = _squash(expect), _squash(dialog["subject"] + "\n" + dialog["question"])
+    if not want:
+        return True
+    if want in shown:
+        return True
+    # A very long command the dialog shortened: its first part must still be there, word for word.
+    if len(want) > 160 and want[:160] in shown:
+        return True
+    name = os.path.basename(str(expect).strip().rstrip("/"))
+    return bool(name) and "/" in str(expect) and _squash(name) in _squash(dialog["question"] + dialog["subject"])
+
+
+def pick_option(dialog, choice):
+    """The option that means `choice` (allow | always | deny) on this dialog, or None."""
+    return next((o for o in dialog["options"] if o["kind"] == choice), None)
+
+
+# ── what the Desk shows about a member's work ────────────────────────────────────────────────────
+
+def task_line(task, brief_text=None, width=120):
+    """What a member was brought in to do, in one line: its brief's title (its first heading, else
+    its first line), else the first sentence of the task it was given. None when there is neither."""
+    for source in (brief_text, task):
+        lines = [x.strip() for x in str(source or "").splitlines() if x.strip()]
+        if not lines:
+            continue
+        heading = next((re.sub(r"^#{1,6}\s+", "", x) for x in lines if re.match(r"^#{1,6}\s+\S", x)), None) if source is brief_text else None
+        text = heading or lines[0]
+        text = re.sub(r"^(?:brief|task)\s*[:—-]\s*", "", re.sub(r"[*_`]+", "", text), flags=re.I).strip()
+        if source is task:
+            text = re.split(r"(?<=[.!?])\s", text, maxsplit=1)[0]
+        if text:
+            return text if len(text) <= width else text[:width - 1].rstrip() + "…"
+    return None
+
+
+BASES = ("main", "master", "trunk")
+
+
+def diff_stat(cwd, run=None):
+    """A branch's change against where it left its base, working tree included:
+    {"added", "removed", "files", "branch", "base"}; None on the base itself, outside git, or with
+    nothing changed."""
+    if not cwd or (run is None and not os.path.isdir(cwd)):
+        return None
+    run = run or (lambda args: subprocess.run(["git", *args], cwd=cwd, capture_output=True, text=True))
+
+    def out(*args):
+        try:
+            r = run(list(args))
+        except OSError:
+            return None
+        return r.stdout.strip() if r.returncode == 0 else None
+
+    branch = out("rev-parse", "--abbrev-ref", "HEAD")
+    if not branch or branch == "HEAD" or branch in BASES:
+        return None
+    head = out("symbolic-ref", "--quiet", "--short", "refs/remotes/origin/HEAD")
+    candidates = ([head] if head else []) + list(BASES) + [f"origin/{b}" for b in BASES]
+    base = next((c for c in candidates if c and c.split("/")[-1] != branch and out("rev-parse", "--verify", "--quiet", c)), None)
+    fork = base and out("merge-base", "HEAD", base)
+    if not fork:
+        return None
+    added = removed = files = 0
+    for line in (out("diff", "--numstat", fork) or "").splitlines():
+        parts = line.split("\t")
+        if len(parts) < 3:
+            continue
+        files += 1
+        added += int(parts[0]) if parts[0].isdigit() else 0
+        removed += int(parts[1]) if parts[1].isdigit() else 0
+    if not files:
+        return None
+    return {"added": added, "removed": removed, "files": files, "branch": branch, "base": base.split("/")[-1]}

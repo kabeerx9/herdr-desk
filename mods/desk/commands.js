@@ -102,3 +102,23 @@ export function matchMentions(options, q) {
   const query = String(q ?? "").toLowerCase();
   return (options ?? []).filter((o) => o.id.startsWith(query) || String(o.name).toLowerCase().startsWith(query));
 }
+
+// The @ menu: "Send to" (the desk's members, with each one's most urgent live status; Everyone
+// when there are two or more) then "Bring in" (roles not on the desk). `members`: [{ role,
+// address, status, phase }]; `roles`: [{ id, name }]. Items: { id, name, section, address, status }.
+const MENTION_RANK = { blocked: 0, working: 1, done: 2, idle: 3 };
+const liveOf = (m) => (m.status === "blocked" ? "blocked" : m.status === "working" ? "working" : m.phase === "done" || m.status === "done" ? "done" : "idle");
+export function mentionItems(members, roles, q) {
+  const byRole = new Map();
+  for (const m of members ?? []) {
+    const best = byRole.get(m.role);
+    if (!best || MENTION_RANK[liveOf(m)] < MENTION_RANK[liveOf(best)]) byRole.set(m.role, m);
+  }
+  const send = [...byRole.entries()].map(([id, m]) => {
+    const role = (roles ?? []).find((r) => r.id === id);
+    return { id, name: role?.name ?? id, section: "send", address: m.address, status: liveOf(m) };
+  });
+  if (send.length > 1) send.push({ id: "all", name: "Everyone", section: "send", address: null, status: null });
+  const bring = (roles ?? []).filter((r) => !byRole.has(r.id)).map((r) => ({ id: r.id, name: r.name, section: "bring", address: null, status: null }));
+  return [...matchMentions(send, q), ...matchMentions(bring, q)];
+}

@@ -1,5 +1,6 @@
 import { div, svg } from "gpui-kit";
 import { h_flex, v_flex } from "gpui-base";
+import { shared, setShared } from "herdr";
 
 export const icon = (name, size = 14) => svg(`mods/desk/icons/${name}.svg`).size(size).flex_none();
 
@@ -121,3 +122,20 @@ export function mostUrgent(statuses) {
   for (const s of statuses) if (s && (best === null || URGENCY.indexOf(s) < URGENCY.indexOf(best))) best = s;
   return best;
 }
+
+// ── The desk card (card.js): the floating block at the chat's top right (desk-chat.json) ──
+// Open shows its sections; collapsed it's the header-only pill in the same spot. Kept in
+// localStorage ("card.collapsed"; the old card's auto-folded "card.compact" is ignored) and mirrored to shared "desk.card.collapsed" so every copy (the
+// card, the rail's desk.card command, the chat) redraws at once. Open by default.
+function storedCollapsed() { try { return JSON.parse(localStorage.getItem("card.collapsed")) === true; } catch { return false; } }
+export function cardCollapsed() {
+  const v = shared("desk.card.collapsed");
+  return v === undefined || v === null ? storedCollapsed() : v === true;
+}
+export function setCardCollapsed(collapsed) {
+  try { localStorage.setItem("card.collapsed", JSON.stringify(collapsed)); } catch {}
+  if (shared("desk.card.collapsed") !== collapsed) setShared("desk.card.collapsed", collapsed);
+}
+// Kept for callers that think in open/closed (desks.js): open = not collapsed.
+export const cardOpen = () => !cardCollapsed();
+export const setCardOpen = (open) => setCardCollapsed(!open);
