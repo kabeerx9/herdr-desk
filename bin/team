@@ -681,7 +681,8 @@ def permit_watch(args):
         time.sleep(0.5)
     else:
         return
-    if not any(r.get("kind") == "permission-done" and r.get("re") == args.id for r in chat_read(args.task)):
+    # A desk deleted meanwhile stays deleted: never recreate its thread for one line.
+    if os.path.exists(chat_file(args.task)) and not any(r.get("kind") == "permission-done" and r.get("re") == args.id for r in chat_read(args.task)):
         chat_append(args.task, {"from": "kabeer", "address": args.address, "kind": "permission-done", "re": args.id, "decision": "terminal"})
     try:
         os.remove(os.path.join(PERMITS, f"{args.id}.json"))
