@@ -3,7 +3,7 @@ import { h_flex, v_flex, TextView } from "gpui-base";
 import { icon, statusMark } from "./ui.js";
 import { roleTile } from "./roles.js";
 import { contextMeter } from "./model.js";
-import { subagents, mineBubble, commandChip } from "./timeline.js";
+import { subagents, mineBubble, commandChip, commandResult, commandNote } from "./timeline.js";
 
 // A member's own conversation (shared "desk.route" = { task, address }): T3's thread-per-route.
 // Rows come from model.js buildRouteRows over `team transcript`, fetched by desks.js on the
@@ -65,6 +65,8 @@ export function routeRow(o, t, key, row, { role, now }) {
   if (row.type === "event") return h_flex().id(id).justify_center().pt(16).pb(2)
     .child(div().text_size(11).text_color(t.dim).child(`${x.text} · ${clock(x.at)}`));
   if (row.type === "command") return commandChip(o, t, id, x.text, clock(x.at));
+  if (row.type === "result") return commandResult(o, t, id, role?.name ?? x.outcome?.from ?? "", x.outcome?.command ?? "", x.text, clock(x.at));
+  if (row.type === "note") return commandNote(o, t, id, x.outcome ?? x, clock(x.at));
   if (row.type === "mine") return mineBubble(o, t, id, x.text, x.via === "chat" ? `From the desk chat · ${clock(x.at)}` : `In its terminal · ${clock(x.at)}`);
   if (row.type === "notice") {
     const from = x.who === "parent" ? (o.nameOfAddress?.(x.from) ?? x.from ?? "Another agent") : "Desk";

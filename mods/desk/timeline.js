@@ -68,7 +68,7 @@ function copyButton(o, t, id, text) {
 }
 
 // Your message: a raised bubble on the right; who it went to and when show on hover.
-export function mineBubble(o, t, id, text, meta, { ok = false, failed = null } = {}) {
+export function mineBubble(o, t, id, text, meta, { ok = false, failed = null, open = null } = {}) {
   const hovered = o.hoverMsg === id, size = o.wide ? 14 : 13;
   return v_flex().id(id).items_end().gap(4).pt(gapTop(o))
     .on_hover((h, cx) => o.hoverOn(id, h, cx))
@@ -78,11 +78,11 @@ export function mineBubble(o, t, id, text, meta, { ok = false, failed = null } =
       .child(copyButton(o, t, id, text))
       .child(meta)
       .when(ok, (el) => el.child(icon("check", 11).text_color(t.dim))))
-    .when(Boolean(failed), (el) => el.child(notDelivered(t, failed)));
+    .when(Boolean(failed), (el) => el.child(notDelivered(t, `${id}-nd`, failed, open)));
 }
 
 // A slash command you sent: a compact chip, not a bubble.
-export function commandChip(o, t, id, text, meta, { failed = null } = {}) {
+export function commandChip(o, t, id, text, meta, { failed = null, open = null } = {}) {
   const hovered = o.hoverMsg === id;
   return v_flex().id(id).items_end().gap(3).pt(o.wide ? 18 : 14)
     .on_hover((h, cx) => o.hoverOn(id, h, cx))
@@ -92,13 +92,56 @@ export function commandChip(o, t, id, text, meta, { failed = null } = {}) {
         .text_size(12).text_color(t.foreground)
         .child(icon("terminal", 12).text_color(t.dim))
         .child(div().min_w(0).truncate().font_family("JetBrains Mono").child(text))))
-    .when(Boolean(failed), (el) => el.child(notDelivered(t, failed)));
+    .when(Boolean(failed), (el) => el.child(notDelivered(t, `${id}-nd`, failed, open)));
 }
 
-function notDelivered(t, failed) {
+// `open`: a recipient had a dialog open in its terminal (nothing was typed into it); the
+// terminal is one click away, to close the dialog before sending again.
+function notDelivered(t, id, failed, open) {
   return h_flex().max_w_4_5().gap(6).items_center()
     .child(statusMark(t, "failed", 11))
-    .child(div().text_size(11.5).line_height(1.4).text_color(t.muted).child(`Not delivered to ${failed}. Send it again once they're free.`));
+    .child(div().text_size(11.5).line_height(1.4).text_color(t.muted)
+      .child(open ? `Not delivered to ${failed}. Close it there, then send again.` : `Not delivered to ${failed}. Send it again once they're free.`))
+    .when(Boolean(open), (el) => el.child(textLink(t, `${id}-open`, "Open terminal", open)));
+}
+
+function textLink(t, id, label, onClick) {
+  return div().id(id).flex_none().text_size(11.5).text_color(t.accent).cursor_pointer().hover((s) => s.text_color(t.foreground))
+    .on_click((_e, cx) => onClick(cx)).child(label);
+}
+
+const RESULT_LINES = 14;
+
+// What a slash command printed (/context, /cost, /status), captured from the agent's screen:
+// a compact monospace card under the command chip; past RESULT_LINES it folds behind "Show all".
+export function commandResult(o, t, id, who, command, text, meta) {
+  const lines = String(text ?? "").split("\n"), open = o.expanded.has(id), long = lines.length > RESULT_LINES;
+  const shown = long && !open ? lines.slice(0, RESULT_LINES) : lines;
+  const hovered = o.hoverMsg === id;
+  return v_flex().id(id).items_end().gap(3).pt(6)
+    .on_hover((h, cx) => o.hoverOn(id, h, cx))
+    .child(v_flex().w_full().max_w(620).px(12).py(8).gap(0).rounded(8).bg(t.raised).border_1().border_color(t.border)
+      .child(h_flex().h(20).mb(4).gap(6).items_center().text_size(11).text_color(t.dim)
+        .child(icon("terminal", 11))
+        .child(div().min_w(0).truncate().child(`${who} · ${command}`))
+        .child(div().flex_1())
+        .child(div().when(!hovered, (el) => el.opacity(0)).child(meta))
+        .child(div().when(!hovered, (el) => el.opacity(0)).child(copyButton(o, t, id, text ?? ""))))
+      .children(shown.map((line, i) => div().id(`${id}-l${i}`).h(16).min_w(0).truncate().font_family("JetBrains Mono")
+        .text_size(11.5).line_height(1.4).text_color(t.foreground).child(line || " ")))
+      .when(long, (el) => el.child(div().id(`${id}-all`).mt(4).text_size(11.5).text_color(t.accent).cursor_pointer()
+        .hover((s) => s.text_color(t.foreground))
+        .on_click((_e, cx) => { open ? o.expanded.delete(id) : o.expanded.add(id); cx.notify(); })
+        .child(open ? "Show less" : `Show all ${lines.length} lines`))));
+}
+
+// A quiet line for what a command did ("CTO started a new conversation"), with "Open terminal"
+// when the terminal is where it continues (a picker, a dialog that wouldn't close).
+export function commandNote(o, t, id, m, meta) {
+  return h_flex().id(id).justify_center().pt(10).pb(2).gap(8).items_center()
+    .when(Boolean(m.failed), (el) => el.child(statusMark(t, "failed", 11)))
+    .child(div().max_w_4_5().truncate().text_size(11).text_color(t.dim).child(`${m.text ?? ""} · ${meta}`))
+    .when(Boolean(m.terminal && m.address), (el) => el.child(textLink(t, `${id}-open`, "Open terminal", () => o.openTerminal(m.address))));
 }
 
 // One message row. Yours is a quiet bubble on the right; theirs is full-width prose under a
@@ -120,10 +163,14 @@ export function messageRow(o, t, slug, row, ctx) {
     return quietLine(id, t, `${m.kind === "desk" ? `${who} started this desk${m.project ? ` in ${m.project}` : ""}` : `${who} added ${list}`} · ${clock(m.at)}`);
   }
   const hovered = o.hoverMsg === id, size = o.wide ? 14 : 13;
+  if (row.type === "result") return commandResult(o, t, id, nameOf(o, m.from), m.command ?? "", m.text ?? "", clock(m.at));
+  if (row.type === "note") return commandNote(o, t, id, m, clock(m.at));
   if (row.type === "mine" || row.type === "command") {
     const to = (m.to ?? []).map((r) => nameOf(o, r)).join(", ");
     const ok = Boolean(m.delivered?.length && !m.failed?.length);
-    const opts = { ok, failed: m.failed?.length ? m.failed.map((f) => `${nameOf(o, f.role)} (${f.why})`).join("; ") : null };
+    const dialog = (m.failed ?? []).find((f) => f.dialog && f.address);
+    const opts = { ok, failed: m.failed?.length ? m.failed.map((f) => `${nameOf(o, f.role)} (${f.why})`).join("; ") : null,
+      open: dialog ? () => o.openTerminal(dialog.address) : null };
     return row.type === "command" ? commandChip(o, t, id, m.text ?? "", `To ${to} · ${clock(m.at)}`, opts)
       : mineBubble(o, t, id, m.text ?? "", `To ${to} · ${clock(m.at)}`, opts);
   }

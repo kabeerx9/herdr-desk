@@ -111,30 +111,8 @@ export function iconButton(t, id, name, tip, onClick, { size = 22, color, disabl
     .child(icon(name, 13));
 }
 
-// A quiet text chip (snooze times, filters): raised on hover, accent text when on.
-export function chip(t, id, label, onClick, { on = false, tip } = {}) {
-  return h_flex().id(id).h(22).px(8).flex_none().items_center().rounded(6).cursor_pointer().text_size(11.5).font_medium()
-    .border_1().border_color(on ? t.accent : t.border).text_color(on ? t.accent : t.muted)
-    .hover((s) => s.bg(t.hover).text_color(t.foreground))
-    .when(Boolean(tip), (el) => el.tooltip(tip))
-    .on_mouse_down("left", (_e, cx) => cx.stop_propagation())
-    .on_click((e, cx) => { cx.stop_propagation(); onClick(e, cx); })
-    .child(label);
-}
-
 // Show a branch only when it's off the main line.
 export const offMain = (branch, base) => Boolean(branch) && branch !== base && !["main", "master", "trunk", "HEAD"].includes(branch);
-
-// When a snooze ends: in an hour, tonight at 19:00 (only while that's over an hour away), tomorrow 09:00.
-export function snoozeOptions(now = Date.now()) {
-  const at = (days, hour) => { const d = new Date(now); d.setDate(d.getDate() + days); d.setHours(hour, 0, 0, 0); return d.getTime(); };
-  const tonight = at(0, 19);
-  return [
-    { id: "1h", label: "1 hour", until: now + 3600000 },
-    ...(tonight - now > 3600000 ? [{ id: "tonight", label: "Tonight", until: tonight }] : []),
-    { id: "tomorrow", label: "Tomorrow", until: at(1, 9) },
-  ];
-}
 
 // Most urgent first: what a group of agents shows as one mark.
 const URGENCY = ["blocked", "failed", "working", "queued", "done", "disconnected", "idle"];

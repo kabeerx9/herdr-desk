@@ -56,25 +56,29 @@ export function openLimits(provider) {
   openOverlay({ mod: "desk", props: { popover: provider }, kind: "popup", width: POP_WIDTH, height, at });
 }
 
-// The rail's foot: each signed-in provider's logo over its weekly %.
+// The rail's foot: each signed-in provider's logo over a slim weekly meter; the % is in the
+// tooltip (and the popover a click opens). The meter turns amber past 70%, red past 90%.
 export function railMeters(t) {
   const providers = (usage()?.providers ?? []).filter((p) => p.windows.length || p.error);
   if (!providers.length) return div();
-  return v_flex().w_full().pt(8).pb(10).gap(6).items_center().border_t(1).border_color(t.border)
+  return v_flex().w_full().pt(8).pb(10).gap(4).items_center().border_t(1).border_color(t.border)
     .children(providers.map((p) => {
       const w = p.windows.length ? week(p) : null;
-      return v_flex().id(`rail-u-${p.provider}`).w(38).py(5).gap(4).items_center().rounded(8).cursor_pointer()
+      const used = w ? Math.min(100, Math.max(0, w.used)) : 0;
+      return v_flex().id(`rail-u-${p.provider}`).w(28).h(34).gap(5).items_center().justify_center().rounded(8).cursor_pointer()
         .hover((s) => s.bg(t.hover))
-        .tooltip(`${p.provider} limits`)
+        .tooltip(w ? `${p.provider} · ${w.label.toLowerCase()} ${w.used}% used` : `${p.provider} · ${p.error ?? "no limits"}`)
         .on_mouse_move((e) => { if (e.bounds) anchors[p.provider] = e.bounds; })
         .on_mouse_down("left", (e, cx) => {
           if (e.bounds) anchors[p.provider] = e.bounds;
           cx.stop_propagation();
           openLimits(p.provider);
         })
-        .child(logo(p.provider, 16))
-        .child(div().text_size(10.5).font_semibold().text_color(!w ? t.ansi1 : w.used >= 70 ? levelColor(t, w.used) : t.muted)
-          .child(w ? `${w.used}%` : "!"));
+        .child(logo(p.provider, 14))
+        .child(div().w(18).h(3).rounded(2).bg(t.border).overflow_hidden()
+          .when(!w, (el) => el.bg(t.ansi1))
+          .when(Boolean(w), (el) => el.child(div().h_full().w(`${Math.max(used, used > 0 ? 8 : 0)}%`).rounded(2)
+            .bg(used >= 70 ? levelColor(t, used) : t.muted))));
     }));
 }
 

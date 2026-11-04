@@ -134,6 +134,13 @@ class RawPostTests(Base):
         p.start(); self.addCleanup(p.stop)
         self.reply = patch.object(team, 'expect_reply', side_effect=AssertionError('a command reserves no reply'))
         self.reply.start(); self.addCleanup(self.reply.stop)
+        for name, value in (('SETTLE_S', 0.05), ('ACCEPT_S', 0.05), ('POLL_S', 0.01)):
+            p = patch.object(team, name, value); p.start(); self.addCleanup(p.stop)
+
+    @property
+    def typed(self):
+        """What went into the terminal: screen reads (hc read) aren't typing."""
+        return [c for c in self.calls if c[:2] != ['hc', 'read']]
 
     def post(self, text, to=('t1:cto',)):
         return self.call(team.post, task='desk', to=list(to), text=[text], raw=True)
@@ -141,16 +148,16 @@ class RawPostTests(Base):
     def test_short_command_is_typed_as_keys_and_logged_as_a_command(self):
         code, rec = self.post('/model opus')
         self.assertEqual(0, code)
-        self.assertEqual(['hc', 'keys', 't1', '/', 'm', 'o', 'd', 'e', 'l', 'space', 'o', 'p', 'u', 's', 'enter'], self.calls[0])
+        self.assertEqual(['hc', 'keys', 't1', '/', 'm', 'o', 'd', 'e', 'l', 'space', 'o', 'p', 'u', 's', 'enter'], self.typed[0])
         self.assertEqual(('command', '/model opus', ['cto'], ['t1']), (rec['kind'], rec['text'], rec['delivered'], rec['delivered_to']))
         self.assertEqual('command', team.chat_read('desk')[-1]['kind'])
         self.assertNotIn('[desk chat]', json.dumps(self.calls))
 
     def test_long_or_plain_text_is_pasted_exactly(self):
         self.post('plain words, no prefix')
-        self.assertEqual(['hc', 'send', 't1', 'plain words, no prefix'], self.calls[0])
+        self.assertEqual(['hc', 'send', 't1', 'plain words, no prefix'], self.typed[0])
         self.post('/x ' + 'y' * 300)
-        self.assertEqual('send', self.calls[1][1])
+        self.assertEqual('send', self.typed[1][1])
 
     def test_refuses_a_prompt_a_shell_and_another_desk_and_still_logs(self):
         self.info['t1']['status'] = {'state': 'blocked', 'app': 'claude'}

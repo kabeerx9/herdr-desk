@@ -168,3 +168,29 @@ test('a command message is a chip row: no turn, no prompt mark', () => {
   assert.deepEqual(prompts, []);
   assert.deepEqual(open, {});
 });
+
+test('slash command outcomes are their own rows and open or end no turn', () => {
+  const m = buildRows([
+    { at: 1, from: 'kabeer', kind: 'say', to: ['cto'], text: 'hi' },
+    { at: 2, from: 'kabeer', kind: 'command', to: ['cto'], text: '/context' },
+    { at: 3, from: 'cto', address: 't1', kind: 'command-result', command: '/context', text: 'Context Usage' },
+    { at: 4, from: 'cto', address: 't1', kind: 'command-note', command: '/clear', text: 'CTO started a new conversation' },
+  ]);
+  assert.deepEqual(m.rows.map((r) => r.type), ['mine', 'command', 'result', 'note']);
+  assert.equal(m.open.cto, 1);  // still waiting for its reply to "hi"
+  assert.equal(m.lastReply, -1);
+});
+
+test('a member route slots command outcomes in by time, and unlogged commands as chips', () => {
+  const turns = [{ who: 'kabeer', kind: 'command', text: '/context', at: 1000 }, { who: 'agent', text: 'later', at: 9000 }];
+  const outcomes = [
+    { at: 1100, kind: 'command', text: '/context', delivered_to: ['t1'] },                 // logged by Claude: no second chip
+    { at: 1200, kind: 'command-result', address: 't1', command: '/context', text: 'grid' },
+    { at: 5000, kind: 'command', text: '/cost', delivered_to: ['t1'] },                    // a dialog: not in the transcript
+    { at: 5100, kind: 'command-result', address: 't1', command: '/cost', text: '$0' },
+    { at: 5200, kind: 'say', address: 't1', text: 'ignored' },
+  ];
+  const { rows } = buildRouteRows(turns, new Map(), { outcomes });
+  assert.deepEqual(rows.map((r) => [r.type, r.x.text]), [['command', '/context'], ['result', 'grid'], ['command', '/cost'], ['result', '$0'], ['reply', 'later']]);
+  assert.equal(rows[1].x.outcome.command, '/context');
+});

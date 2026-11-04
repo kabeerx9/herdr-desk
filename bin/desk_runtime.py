@@ -954,3 +954,126 @@ def transcript_title(path, cache_path=None, max_scan=8 * 1024 * 1024):
         except OSError:
             pass
     return title
+
+
+# ── slash commands: reading an agent's screen ────────────────────────────────
+# What the Desk types into an agent depends on what its terminal shows right now. Claude draws
+# its input box as "❯ text" between two "─" rules; its dialogs (/status, /cost, pickers,
+# permission prompts) replace that box, open with a "▔" border or name their keys ("Esc to
+# cancel"). A dialog takes every key typed into it, so nothing is typed while one is open.
+
+RULE = re.compile(r"^[─━]{20,}\s*$")
+TOP_BORDER = re.compile(r"^\s*[▔]{20,}\s*$")
+DIALOG_KEYS = re.compile(r"\besc to (?:cancel|close|exit|go back)\b|\benter to (?:confirm|select)\b|\bpress enter to\b"
+                         r"|↑/↓ to (?:navigate|select)", re.I)
+PROMPTS = ("❯", "›")
+CHROME = re.compile(r"^\s*(?:[─━▔▁]{6,}|⏵⏵ .*|◐ .*· /effort|\? for shortcuts.*)\s*$|\besc to (?:cancel|close|exit|go back)\b", re.I)
+DIALOG_TABS = re.compile(r"^\s*Settings\s+Status\s+Config\b")
+DIALOG_OPEN = "has a dialog open in its terminal"
+
+
+def _lines(screen):
+    # Claude draws its prompt as "❯" + a no-break space.
+    return str(screen or "").replace("\r", "").replace("\xa0", " ").split("\n")
+
+
+def prompt_box(lines):
+    """Claude's input box: (top rule, first input line, bottom rule) indices, or None. The last
+    "❯" line at column 0 with a rule above it; the box can grow to a few input lines."""
+    for i in range(len(lines) - 1, 0, -1):
+        if not lines[i].startswith("❯") or not RULE.match(lines[i - 1]):
+            continue
+        for j in range(i + 1, min(i + 12, len(lines))):
+            if RULE.match(lines[j]):
+                return i - 1, i, j
+        return None
+    return None
+
+
+def screen_state(screen, cli="claude"):
+    """What an agent's visible screen shows: {"state": "prompt"|"dialog"|"unknown", "input": the
+    text sitting in its input box (prompt only), "why": what gave a dialog away}. "unknown" (still
+    starting, a CLI drawn differently) is neither: callers keep their old behaviour for it."""
+    lines = [x.rstrip() for x in _lines(screen)]
+    while lines and not lines[-1].strip():
+        lines.pop()
+    box = prompt_box(lines) if cli != "codex" else None
+    if box:
+        top, first, bottom = box
+        text = "\n".join(lines[first:bottom])
+        return {"state": "prompt", "input": text[1:].strip() if text.startswith("❯") else text.strip(), "why": None}
+    tail = lines[-24:]
+    for line in lines:
+        if TOP_BORDER.match(line):
+            return {"state": "dialog", "input": None, "why": "a full-screen dialog"}
+    for line in tail:
+        m = DIALOG_KEYS.search(line)
+        if m:
+            return {"state": "dialog", "input": None, "why": m.group(0)}
+    if cli == "codex":
+        for line in reversed(tail[-8:]):
+            if line.startswith("›"):
+                return {"state": "prompt", "input": line[1:].strip(), "why": None}
+    return {"state": "unknown", "input": None, "why": None}
+
+
+def _dedent(lines):
+    pad = min((len(x) - len(x.lstrip()) for x in lines if x.strip()), default=0)
+    return [x[pad:] for x in lines]
+
+
+def command_result(screen, command, max_lines=200):
+    """What a command printed, from the screen (with history) after it settled: below its echoed
+    "❯ /cmd" line (inline output) or the dialog's top border, above Claude's input box; the box,
+    rules, footers and key hints are chrome and go. None when nothing was found."""
+    lines = [x.rstrip() for x in _lines(screen)]
+    box = prompt_box(lines)
+    end = box[0] if box else len(lines)
+    start, name = None, str(command).strip()
+    # The nearest one wins: an older dialog's border can still sit in the history above.
+    for i in range(end - 1, -1, -1):
+        text = lines[i].strip()
+        if TOP_BORDER.match(lines[i]) or any(text == g + " " + name or text.startswith(g + " " + name + " ") for g in PROMPTS):
+            start = i + 1; break
+    if start is None:
+        return None
+    body = [x for x in lines[start:end] if not CHROME.search(x) and not DIALOG_TABS.match(x)]
+    body = [re.sub(r"\s+[↓↑]$", "", x) for x in body]
+    if body and body[0].lstrip().startswith("⎿"):
+        body[0] = body[0].replace("⎿", " ", 1)
+    while body and not body[0].strip():
+        body.pop(0)
+    while body and not body[-1].strip():
+        body.pop()
+    body = _dedent(body)
+    if len(body) > max_lines:
+        body = body[:max_lines] + ["…"]
+    return "\n".join(body) or None
+
+
+def cleared_transcript(folder, old, since_ms):
+    """The conversation a /clear started, for a session whose SessionStart hook didn't record it:
+    the newest transcript in the old one's project folder, written since the clear, that begins
+    with Claude's own "/clear" record. None when there isn't exactly a fresh one yet."""
+    best = None
+    try:
+        names = os.listdir(folder)
+    except OSError:
+        return None
+    for name in names:
+        if not name.endswith(".jsonl") or name[:-6] == old:
+            continue
+        path = os.path.join(folder, name)
+        try:
+            stamp = os.stat(path).st_mtime * 1000
+            if stamp < since_ms - 1000:
+                continue
+            with open(path, "rb") as f:
+                head = f.read(256 * 1024)
+        except OSError:
+            continue
+        if b"<command-name>/clear</command-name>" not in head:
+            continue
+        if not best or stamp > best[0]:
+            best = (stamp, name[:-6])
+    return best[1] if best else None

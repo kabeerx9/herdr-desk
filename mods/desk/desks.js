@@ -9,7 +9,7 @@ import { ThreadViewport } from "./thread.js";
 import { buildRows, windowStart, WINDOW, splitPoll, summarizeSteps, statusLines, rowOffsets, activePrompt, kTokens, parseTranscript, buildRouteRows } from "./model.js";
 import { COLUMN, measured, messageRow, liveRows, statusLineRows, headerStrip } from "./timeline.js";
 import { routeKey, routeHeader, routeRow, routeEmpty, commandMenu } from "./route.js";
-import { commandsFor, slashQuery, matchCommands, resolveCommand, menuKey } from "./commands.js";
+import { commandsFor, slashQuery, matchCommands, resolveCommand, menuKey, mentionQuery, matchMentions } from "./commands.js";
 import { minimap } from "./minimap.js";
 
 // Desks: each one an independent team (its own agents, thread and worktrees) that
@@ -148,11 +148,13 @@ export class Desks {
         if (e.shift) return;
         const menu = this.slashItems();
         if (menu) { if (menu.length) this.pickCommand(menu[Math.min(this.slashIndex, menu.length - 1)], cx, true); else this.send(cx); return; }
-        if (state === this.teamInput && this.mention && this.suggestions().length) return this.pickMention(this.suggestions()[0], cx);
+        const sugg = state === this.teamInput ? this.suggestions() : [];
+        if (sugg.length) return this.pickMention(sugg[Math.min(this.mentionIndex, sugg.length - 1)], cx);
         this.send(cx);
       });
     }
     this.slashQ = null; this.slashIndex = 0; this.slashShut = null;
+    this.mentionIndex = 0; this.mentionShut = null;  // the highlighted @ suggestion; the value Esc closed it on
     // The textarea's own bindings run before key listeners, so the open menu binds its keys in a
     // context the composer declares only while it's open, one level above the input.
     if (!globalThis.deskSlashKeys) try {
@@ -330,7 +332,7 @@ export class Desks {
       this.derive(open?.slug ?? null);
       if (open && (this.onScreen() || this.fixed || this.wide)) this.markRead(open.slug);
       this.publish();
-      if (this.routeShown) this.pollRoute(cx, true);
+      if (this.routeShown) { this.deriveRoute(); this.pollRoute(cx, true); }
     } catch { this.messages = []; this.derive(null); }
     cx.notify();
   }
@@ -384,10 +386,9 @@ export class Desks {
     const project = this.projectList().find((p) => folder === p.folder || folder.startsWith(p.folder + "/"));
     const fromProject = project && this.panel?.spaceFor(project);
     if (fromProject) return fromProject;
-    const local = spaces().filter((s) => !s.machine).map((s) => ({ s, at: folderOf(s) ?? "" })).filter((x) => x.at);
-    return local.find((x) => x.at === folder)?.s
-      ?? local.filter((x) => folder.startsWith(x.at + "/")).sort((a, b) => b.at.length - a.at.length)[0]?.s
-      ?? null;
+    // Only a space at exactly this folder: an ancestor's (~/Desktop for ~/Desktop/work/shotgun)
+    // isn't this desk's, so null lets bin/team open a new space here.
+    return spaces().find((s) => !s.machine && folderOf(s) === folder) ?? null;
   }
 
   async addMember(role, d, task) {
@@ -524,7 +525,9 @@ export class Desks {
   deriveRoute() {
     const a = this.routeShown, data = a ? this.routeData[a]?.data : null;
     const working = a ? agents().find((x) => x.address === a)?.status === "working" : false;
-    this.routeRows = buildRouteRows(data?.turns ?? [], this.routeCache, { working });
+    // Slash commands sent to it and what came of them, from the desk chat.
+    const outcomes = a ? this.messages.filter((m) => m.address === a || (m.kind === "command" && m.delivered_to?.includes(a))) : [];
+    this.routeRows = buildRouteRows(data?.turns ?? [], this.routeCache, { working, outcomes });
   }
   // Woken with the step feed (every hook write, a 4s fallback) and on thread reloads; never from
   // render. While it works: at most once a second. Idle: once after the turn ends, then every 30s.
@@ -588,7 +591,7 @@ export class Desks {
   // ↑/↓ move, Tab completes, Esc closes; Enter arrives as the textarea's submit.
   slashKey(e, cx) {
     const items = this.slashItems();
-    if (!items) return;
+    if (!items) return this.mentionKey(e, cx);
     const key = e.key.toLowerCase() === "arrowup" ? "up" : e.key.toLowerCase() === "arrowdown" ? "down" : e.key.toLowerCase();
     if (key === "enter") return;
     const step = menuKey(key, this.slashIndex, items.length);
@@ -627,37 +630,61 @@ export class Desks {
       return;
     }
     if (!targets.length) return notify({ title: "Nobody's here", body: "Resume or add an agent first.", level: "warning", timeout: 4000 });
+    // A picker is driven in one terminal at a time.
+    if (it?.mode === "interactive" && targets.length !== 1) return need();
     const to = targets.flatMap((m) => ["--to", `${m.address}:${m.role}`]);
+    const mode = it?.mode ? ["--mode", it.mode] : [];
     this.thread.latest(this.route ? routeKey(this.route.address) : d.slug);
+    // The runtime types it, then waits for what came of it (a result, a dialog, a new
+    // conversation) and posts that to the chat; it answers within a few seconds.
     this.busy("send", async (cx) => {
-      const r = await exec(TEAM(), ["post", "--raw", "--task", d.slug, ...to, "--", text]);
+      const r = await exec(TEAM(), ["post", "--raw", "--task", d.slug, ...to, ...mode, "--", text]);
       let rec = null; try { rec = JSON.parse(r.stdout); } catch {}
       if (rec?.failed?.length) notify({ title: `${text.split(" ")[0]} not delivered`, body: rec.failed.map((f) => `${this.roles.byId(f.role)?.name ?? f.role}: ${f.why}`).join("\n"), level: "warning", timeout: 7000 });
       else if (r.code !== 0) throw new Error(r.stderr.trim() || "couldn't send the command");
-      if (this.routeShown) cx.timer.after(1500, (cx) => this.pollRoute(cx, true));
+      for (const a of rec?.peek ?? []) openTerminal(a, { peek: true });
+      // A new conversation: drop what the route showed and read the new one now.
+      for (const a of rec?.cleared ?? []) { delete this.routeData[a]; if (a === this.routeShown) { this.routeCache = new Map(); this.deriveRoute(); } }
+      if (this.routeShown) { this.pollRoute(cx, true); cx.timer.after(1500, (cx) => this.pollRoute(cx, true)); }
     }, cx);
   }
 
   // ── mentions ──────────────────────────────────────────────────────────────
 
   trackMention() {
-    const v = this.input.value();
-    const m = /(^|\s)@([a-z]*)$/i.exec(v);
-    this.mention = m ? { start: v.length - m[2].length - 1, q: m[2].toLowerCase() } : null;
+    const v = this.input.value(), m = mentionQuery(v);
+    if (m?.q !== this.mention?.q || m?.start !== this.mention?.start) this.mentionIndex = 0;
+    this.mention = m;
+    if (this.mentionShut !== null && this.mentionShut !== v) this.mentionShut = null;
   }
 
+  // The open @ menu's options (empty when it's closed or Esc shut it).
   suggestions() {
-    if (!this.mention) return [];
+    if (!this.mention || this.input !== this.teamInput || this.mentionShut === this.input.value()) return [];
     const present = [...new Set(this.members().map((m) => m.role))];
     const options = [...present.map((id) => this.roles.byId(id)).filter(Boolean), ...(present.length > 1 ? [{ id: "all", name: "Everyone" }] : [])];
-    return options.filter((o) => o.id.startsWith(this.mention.q) || o.name.toLowerCase().startsWith(this.mention.q));
+    return matchMentions(options, this.mention.q);
+  }
+  // ↑/↓ move the highlight, Tab completes it, Esc closes; Enter arrives as the textarea's submit.
+  mentionKey(e, cx) {
+    const items = this.suggestions();
+    if (!items.length) return;
+    const key = e.key.toLowerCase() === "arrowup" ? "up" : e.key.toLowerCase() === "arrowdown" ? "down" : e.key.toLowerCase();
+    if (key === "enter") return;
+    const step = menuKey(key, Math.min(this.mentionIndex, items.length - 1), items.length);
+    if (!step) return;
+    cx.stop_propagation();
+    if (step.index !== undefined) this.mentionIndex = step.index;
+    if (step.complete) return this.pickMention(items[Math.min(this.mentionIndex, items.length - 1)], cx);
+    if (step.close) this.mentionShut = this.input.value();
+    cx.notify();
   }
 
   pickMention(option, cx) {
     const v = this.input.value();
     this.input.replace_range_with_token({ start: this.mention.start, end: v.length }, { id: option.id, text: `@${option.id}`, label: option.name });
     this.input.replace(" ");
-    this.mention = null;
+    this.mention = null; this.mentionIndex = 0;
     this.input.focus();
     cx.notify();
   }
@@ -1175,10 +1202,10 @@ export class Desks {
       .children(waiting.map((m) => this.permitCard(t, d, m)))
       .when(Boolean(menu), (el) => el.child(commandMenu(this, t, menu, Math.min(this.slashIndex, Math.max(0, menu.length - 1)))))
       .when(sugg.length > 0 && !menu, (el) => el.child(h_flex().gap(5).flex_wrap()
-        .children(sugg.map((o, i) => this.chip(t, `sg-${o.id}`, i === 0, o.name, (_e, cx) => this.pickMention(o, cx),
+        .children(sugg.map((o, i) => this.chip(t, `sg-${o.id}`, i === Math.min(this.mentionIndex, sugg.length - 1), o.name, (_e, cx) => this.pickMention(o, cx),
           o.id === "all" ? icon("team", 13) : roleTile(div, svg, t, o, 16))))))
       .child(v_flex().id("composer").rounded(16).border_1().border_color(light ? t.input : t.border).bg(light ? t.background : t.popover)
-        .when(Boolean(menu), (el) => el.key_context("DeskSlashOpen"))
+        .when(Boolean(menu) || sugg.length > 0, (el) => el.key_context("DeskSlashOpen"))
         .on_action("desk_slash_up", (_e, cx) => this.slashKey({ key: "up" }, cx))
         .on_action("desk_slash_down", (_e, cx) => this.slashKey({ key: "down" }, cx))
         .on_action("desk_slash_tab", (_e, cx) => this.slashKey({ key: "tab" }, cx))

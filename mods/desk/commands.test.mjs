@@ -1,11 +1,11 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { commandsFor, slashQuery, matchCommands, resolveCommand, menuKey } from './commands.js';
+import { commandsFor, slashQuery, matchCommands, resolveCommand, menuKey, MODES, mentionQuery, matchMentions } from './commands.js';
 
 test('the menu follows the target CLI and keeps the Desk actions', () => {
   const claude = commandsFor('claude').map((c) => c.name), codex = commandsFor('codex').map((c) => c.name);
   for (const n of ['clear', 'compact', 'model', 'context', 'cost', 'review', 'status', 'memory', 'agents']) assert.ok(claude.includes(n), n);
-  assert.deepEqual(codex.slice(0, 5), ['new', 'model', 'status', 'review', 'diff']);
+  assert.deepEqual(codex.slice(0, 6), ['new', 'compact', 'model', 'status', 'review', 'diff']);
   assert.ok(!codex.includes('clear'));
   for (const list of [claude, codex]) assert.deepEqual(list.slice(-5), ['fresh', 'terminal', 'changes', 'wrap', 'queue']);
   assert.equal(commandsFor(null)[0].name, 'clear');
@@ -28,8 +28,8 @@ test('matching ranks prefixes, then substrings, then descriptions', () => {
 
 test('sent lines: Desk actions run, everything else goes raw', () => {
   assert.deepEqual(resolveCommand('/fresh', 'claude'), { kind: 'desk', action: 'fresh', name: 'fresh' });
-  assert.deepEqual(resolveCommand('/model opus', 'claude'), { kind: 'cli', text: '/model opus', name: 'model' });
-  assert.deepEqual(resolveCommand('/whatever x', 'codex'), { kind: 'cli', text: '/whatever x', name: 'whatever' });
+  assert.deepEqual(resolveCommand('/model opus', 'claude'), { kind: 'cli', text: '/model opus', name: 'model', mode: 'action' });
+  assert.deepEqual(resolveCommand('/whatever x', 'codex'), { kind: 'cli', text: '/whatever x', name: 'whatever', mode: null });
   assert.equal(resolveCommand('hello', 'claude'), null);
 });
 
@@ -40,4 +40,30 @@ test('menu keys wrap and map to actions', () => {
   assert.deepEqual(menuKey('enter', 1, 3), { run: true });
   assert.deepEqual(menuKey('escape', 0, 0), { close: true });
   assert.equal(menuKey('a', 0, 3), null);
+});
+
+test('every CLI command has a mode the runtime knows', () => {
+  for (const cli of ['claude', 'codex'])
+    for (const c of commandsFor(cli).filter((x) => x.kind === 'cli')) assert.ok(MODES.includes(c.mode), `${cli} /${c.name}`);
+  const mode = (text, cli = 'claude') => resolveCommand(text, cli).mode;
+  for (const n of ['/clear', '/compact', '/review 12']) assert.equal(mode(n), 'action', n);
+  for (const n of ['/context', '/cost', '/status']) assert.equal(mode(n), 'info', n);
+  for (const n of ['/model', '/memory', '/agents', '/permissions', '/mcp']) assert.equal(mode(n), 'interactive', n);
+  assert.equal(mode('/model  '), 'interactive');
+  assert.deepEqual(['/new', '/compact', '/status', '/diff', '/model'].map((n) => mode(n, 'codex')), ['action', 'action', 'info', 'info', 'interactive']);
+});
+
+test('@ mentions: the query at the end, and the options it matches', () => {
+  assert.deepEqual(mentionQuery('@ba'), { start: 0, q: 'ba' });
+  assert.deepEqual(mentionQuery('hi @Ba'), { start: 3, q: 'ba' });
+  assert.deepEqual(mentionQuery('hi @'), { start: 3, q: '' });
+  for (const v of ['', 'a@ba', '@ba ', 'hi']) assert.equal(mentionQuery(v), null, v);
+  const opts = [{ id: 'cto', name: 'CTO' }, { id: 'backend', name: 'Backend' }, { id: 'all', name: 'Everyone' }];
+  assert.deepEqual(matchMentions(opts, 'ba').map((o) => o.id), ['backend']);
+  assert.deepEqual(matchMentions(opts, 'ev').map((o) => o.id), ['all']);
+  assert.equal(matchMentions(opts, '').length, 3);
+  // Tab completes the highlighted one; arrows wrap; Esc closes (the same keys as the slash menu).
+  assert.deepEqual(menuKey('tab', 0, 1), { complete: true });
+  assert.deepEqual(menuKey('down', 2, 3), { index: 0 });
+  assert.deepEqual(menuKey('escape', 0, 3), { close: true });
 });

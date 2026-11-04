@@ -1,7 +1,7 @@
 import { div } from "gpui-kit";
 import { h_flex, v_flex, TextareaState, Textarea } from "gpui-base";
 import { exec, appHome, shared, setShared, run, notify, window } from "herdr";
-import { button, icon, pill, iconButton, chip, snoozeOptions } from "./ui.js";
+import { button, icon, pill } from "./ui.js";
 
 export const runtimeData = () => shared("desk.runtime") ?? { sessions: [], queue: [], attention: [] };
 export async function runTeam(args) {
@@ -66,53 +66,8 @@ export class RuntimeWatch {
   }
 }
 
-// ── Triage: settle / snooze (bin/team settle|unsettle|snooze; session settled_at, snoozed_until) ──
-
 // The live (not finished) runtime session of a terminal.
 export const sessionOf = (address) => (runtimeData().sessions ?? []).find((s) => s.address === address && s.state !== "finished") ?? null;
-// The controls show only once the runtime reports the fields, and hide after a command the runtime doesn't know.
-export const triageOn = () => !shared("desk.triage.off") && (runtimeData().sessions ?? []).some((s) => "settled_at" in s || "snoozed_until" in s);
-// "settled" | "snoozed" | null. Busy work is never shown as put away, whatever the runtime says.
-export function settledState(session, status) {
-  if (!session || status === "working" || status === "blocked") return null;
-  if ((session.snoozed_until ?? 0) > Date.now()) return "snoozed";
-  return session.settled_at ? "settled" : null;
-}
-export function triage(cx, action, address, until) {
-  const args = action === "snooze" ? ["snooze", "--address", address, "--until-ms", String(until)] : [action, "--address", address];
-  cx.spawn(async (cx) => {
-    try { await runTeam(args); }
-    catch (e) {
-      const why = String(e?.message ?? e);
-      if (/invalid choice|unrecognized|unknown command|usage:/i.test(why)) setShared("desk.triage.off", true);
-      else notify({ title: action === "snooze" ? "Couldn't snooze" : action === "settle" ? "Couldn't settle" : "Couldn't bring it back", body: why.slice(0, 200), level: "error", timeout: 6000 });
-    }
-    refreshRuntime(cx, true);
-    cx.notify();
-  });
-}
-const untilLabel = (ms) => {
-  const d = new Date(ms), pad = (n) => String(n).padStart(2, "0");
-  return `${new Date().toDateString() === d.toDateString() ? "" : "tomorrow "}${pad(d.getHours())}:${pad(d.getMinutes())}`;
-};
-export const settledNote = (session) => (session?.snoozed_until ?? 0) > Date.now() ? `until ${untilLabel(session.snoozed_until)}` : "settled";
-
-// A row's triage: Settle and Snooze as icons; Snooze opens its times as chips (owner.snoozing = id).
-export function triageIcons(t, id, owner, address, put) {
-  if (!triageOn()) return [];
-  if (put) return [iconButton(t, `${id}-unsettle`, "back", "Bring it back", (_e, cx) => triage(cx, "unsettle", address))];
-  return [
-    iconButton(t, `${id}-settle`, "check", "Settle: put it away until it has new work", (_e, cx) => triage(cx, "settle", address)),
-    iconButton(t, `${id}-snooze`, "clock", "Snooze", (_e, cx) => { owner.snoozing = owner.snoozing === id ? null : id; cx.notify(); },
-      { color: owner.snoozing === id ? t.accent : undefined }),
-  ];
-}
-export function snoozeChips(t, id, owner, address, { indent = 36 } = {}) {
-  if (owner.snoozing !== id || !triageOn()) return null;
-  return h_flex().id(`${id}-times`).h(30).pl(indent).pr(8).gap(5).items_center()
-    .child(div().text_size(11).text_color(t.dim).child("Snooze"))
-    .children(snoozeOptions().map((o) => chip(t, `${id}-snz-${o.id}`, o.label, (_e, cx) => { owner.snoozing = null; triage(cx, "snooze", address, o.until); })));
-}
 
 // ── Needs-you alerts: one macOS notification per item, only while Herdr isn't the active app ──
 

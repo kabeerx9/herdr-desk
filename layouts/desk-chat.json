@@ -41,13 +41,13 @@
           "id": "sidebar-footer",
           "type": "block",
           "content": {
-            "mod": "workspace-chrome",
+            "mod": "desk-chrome",
             "props": {
               "footer": true
             }
           },
           "size": {
-            "px": 69
+            "px": 41
           }
         }
       ],
@@ -179,16 +179,6 @@
           "divider": {
             "width": 1,
             "color": "border"
-          }
-        },
-        {
-          "id": "status",
-          "type": "block",
-          "content": {
-            "mod": "workspace-status"
-          },
-          "size": {
-            "px": 28
           }
         }
       ],

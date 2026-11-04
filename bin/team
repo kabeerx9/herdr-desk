@@ -38,6 +38,7 @@ from desk_runtime import find_queue as runtime_find_queue, queue_item as runtime
 from desk_runtime import foreground_agent, recover_interrupted_claims, reorder as runtime_reorder, session_view as runtime_session_view, upsert_session
 from desk_runtime import (classify_launch_failure, find_transcript, gate_verdict, parse_contract, parse_criteria, runner_variants,
                           session_cli, step_text, transcript_timeline, transcript_title, transcript_turns, triage_apply, triage_clear)
+from desk_runtime import DIALOG_OPEN, cleared_transcript, command_result, screen_state
 
 APP = os.environ.get("HERDR_APP_HOME") or os.path.expanduser("~/.config/herdr-app")
 DESK = os.path.join(APP, "mods", "desk")
@@ -420,9 +421,39 @@ def expect_reply(addr, what):
     return sh(["hc", "label", addr, f"awaiting={what}:{int(time.time() * 1000)}"]).returncode == 0
 
 
+def role_label(info):
+    """A terminal's role as the Desk names it ("CTO"), else its role id, else "It"."""
+    role_id = (info.get("labels") or {}).get("role")
+    try:
+        role = next((r for r in roles_file().get("roles", []) if r.get("id", str(r.get("name", "")).lower()) == role_id), None)
+    except (OSError, ValueError):
+        role = None
+    return (role or {}).get("name") or role_id or "It"
+
+
+def screen_of(addr, history=0):
+    r = sh(["hc", "read", "--lines", str(history), addr])
+    return r.stdout if r.returncode == 0 else ""
+
+
+def cli_of(info):
+    return "codex" if agent_identity(info) == "codex" else "claude"
+
+
+def dialog_open(addr, info):
+    """Why typing into this agent now would land in a dialog (Claude's /status, a picker), or None.
+    Keys typed into a dialog answer it; the agent stays stuck until someone presses Esc."""
+    state = screen_state(screen_of(addr), cli_of(info))
+    return f"{role_label(info)} {DIALOG_OPEN}" if state["state"] == "dialog" else None
+
+
 def send_text(addr, text):
-    if not is_agent(terminal(addr)):
+    info = terminal(addr)
+    if not is_agent(info):
         return "Recipient is disconnected or no longer running its configured agent"
+    why = dialog_open(addr, info)
+    if why:
+        return why
     r = sh(["hc", "send", addr, text])
     if r.returncode == 0:
         return None
@@ -1202,6 +1233,11 @@ def type_raw(addr, text):
         return "Recipient is disconnected or no longer running its configured agent"
     if (info.get("status") or {}).get("state") == "blocked":
         return "It's waiting on a prompt in its terminal; answer that first"
+    state = screen_state(screen_of(addr), cli_of(info))
+    if state["state"] == "dialog":
+        return f"{role_label(info)} {DIALOG_OPEN}"
+    if state["state"] == "prompt" and state["input"]:
+        return f"{role_label(info)} has unsent text in its input; clear it in its terminal first"
     if text.startswith("/") and "\n" not in text and len(text) <= RAW_KEYS_MAX:
         keys = ["space" if c == " " else c for c in text] + ["enter"]
         r = sh(["hc", "keys", addr, *keys])
@@ -1217,23 +1253,147 @@ def type_raw(addr, text):
     return why[:160] or "couldn't type into it"
 
 
+SETTLE_S = 3.0      # how long an info command gets to print or open its dialog
+ACCEPT_S = 2.0      # how long a typed command gets to leave the input box
+POLL_S = 0.25
+REPLY_COMMANDS = ("review",)   # prompt commands: the agent answers, and that answer goes to the chat
+
+
+def watch_screen(addr, cli, done, timeout, history=60):
+    """Reads the agent's screen every POLL_S until two reads in a row match and done(state, screen)
+    holds (the screen settled on what we wait for), or the time is up. The state is judged on the
+    visible part only (the last rows of the read). Returns (state, screen, settled)."""
+    end, last = time.time() + timeout, None
+    rows = max(10, int(terminal(addr).get("rows") or 40)) if history else 0
+    while True:
+        screen = screen_of(addr, history)
+        state = screen_state("\n".join(screen.split("\n")[-rows:]) if rows else screen, cli)
+        if screen == last and done(state, screen):
+            return state, screen, True
+        last = screen
+        if time.time() >= end:
+            return state, screen, False
+        time.sleep(POLL_S)
+
+
+def back_to_prompt(addr, cli, tries=2):
+    """Esc out of whatever dialog is open, until Claude's empty input box is back. True when it is."""
+    for _ in range(tries):
+        sh(["hc", "keys", addr, "esc"])
+        state, _, _ = watch_screen(addr, cli, lambda st, _s: st["state"] == "prompt" and not st["input"], 1.5, history=0)
+        if state["state"] == "prompt" and not state["input"]:
+            return True
+    return False
+
+
+def learn_cleared(addr, info, old, since_ms, timeout=3.0):
+    """After /clear, the session the Desk reads (team transcript) is the new one. Claude's
+    SessionStart hook (team hook session) records it for agents launched with it; older launches
+    lack that hook, so the new transcript is found by its "/clear" record. Returns the new id."""
+    labels = info.get("labels") or {}
+    store = runtime_store()
+    end = time.time() + timeout
+    while True:
+        now = (session_by_address(store.load(), addr) or {}).get("conversation")
+        if now and now != old:
+            return now
+        path = find_transcript(old) if old else None
+        fresh = cleared_transcript(os.path.dirname(path), old, since_ms) if path else None
+        if fresh and labels.get("role") and labels.get("task"):
+            runtime_record(addr, labels["role"], labels["task"], info.get("cwd"), "claude", fresh)
+            return fresh
+        if time.time() >= end:
+            return None
+        time.sleep(0.3)
+
+
+def follow_command(task, addr, role, text, mode, since_ms, conversation=None):
+    """What came of a typed command, posted to the desk chat so it doesn't vanish into the
+    terminal. info: the printed result (its dialog captured, then closed). interactive: the
+    terminal opens for Kabeer to use the picker. action: it left the input box; /clear and /new
+    say so (and /clear points the Desk at the new conversation). Returns what the Desk does next."""
+    info = terminal(addr)
+    cli, name, command = cli_of(info), role_label(info), text.split(" ", 1)[0]
+    out = {"peek": False, "cleared": False}
+
+    def note(line, **extra):
+        chat_append(task, {"from": role, "address": addr, "kind": "command-note", "command": command, "text": line, **extra})
+
+    def peek(line):
+        note(line, terminal=True); out["peek"] = True
+
+    if mode == "info":
+        def shown(st, screen):
+            return st["state"] == "dialog" or (st["state"] == "prompt" and not st["input"] and command_result(screen, text) is not None)
+        state, screen, _ = watch_screen(addr, cli, shown, SETTLE_S, history=120)
+        dialog = state["state"] == "dialog"
+        result = command_result(screen, text)
+        restored = True if not dialog else back_to_prompt(addr, cli)
+        chat_append(task, {"from": role, "address": addr, "kind": "command-result", "command": command,
+                           "text": result or f"{name} printed nothing the Desk could read; its terminal has it.", "dialog": dialog})
+        if not restored:
+            peek(f"{name}'s terminal still shows a dialog after {command}; opened it so you can close it")
+        return out
+    if mode == "interactive":
+        state, _, _ = watch_screen(addr, cli, lambda st, _s: st["state"] == "dialog", 1.5, history=0)
+        peek(f"Opened {name}'s terminal for {command}" if state["state"] == "dialog"
+             else f"Opened {name}'s terminal: {command} is there")
+        return out
+    left = lambda st, _s: st["state"] == "dialog" or (st["state"] == "prompt" and st["input"] != text)
+    state, _, _ = watch_screen(addr, cli, left, ACCEPT_S, history=0)
+    if state["state"] == "prompt" and state["input"] == text:
+        sh(["hc", "keys", addr, "enter"])
+        state, _, _ = watch_screen(addr, cli, left, ACCEPT_S, history=0)
+    if state["state"] == "dialog":
+        peek(f"{command} opened a dialog in {name}'s terminal; opened it for you")
+    elif state["state"] == "prompt" and state["input"] == text:
+        note(f"{name} didn't take {command}; it's still in its input", failed=True)
+    elif command in ("/clear", "/new"):
+        if cli == "claude":
+            out["cleared"] = bool(learn_cleared(addr, info, conversation, since_ms))
+        note(f"{name} started a new conversation")
+    return out
+
+
 def post_raw(args, text, targets):
-    """A command from the Desk chat: delivered exactly as typed, no "[desk chat]" tag, and no reply
-    is reserved (a CLI command isn't a chat message). Logged as kind "command"."""
+    """A command from the Desk chat: typed exactly as given, no "[desk chat]" tag. Logged as kind
+    "command"; then each recipient's outcome (follow_command) lands under it. Never types into an
+    open dialog or over unsent text (type_raw refuses both). Prints the record plus "peek" (the
+    terminals to open for Kabeer) and "cleared" (whose conversation is new)."""
+    mode = getattr(args, "mode", None) or "action"
+    name = text[1:].split(" ", 1)[0].lower() if text.startswith("/") else ""
+    reply = name in REPLY_COMMANDS
     delivered, delivered_to, failed = [], [], []
+    since = int(time.time() * 1000)
+    # The conversation before typing: Claude's SessionStart hook can record the new one first.
+    sessions = runtime_store().load()
+    before = {addr: (session_by_address(sessions, addr) or {}).get("conversation") for addr, _ in targets}
     for addr, role in targets:
         labels = terminal(addr).get("labels") or {}
         if labels.get("task") != args.task or labels.get("role") != role:
-            failed.append({"role": role, "why": "Recipient is disconnected or belongs to another desk."})
+            failed.append({"role": role, "address": addr, "why": "Recipient is disconnected or belongs to another desk."})
+            continue
+        if reply and not expect_reply(addr, "chat"):
+            failed.append({"role": role, "address": addr, "why": "Could not reserve the reply; the command was not sent"})
             continue
         why = type_raw(addr, text)
         if why:
-            failed.append({"role": role, "why": why})
+            if reply:
+                sh(["hc", "label", addr, "awaiting="])
+            failed.append({"role": role, "address": addr, "why": why, **({"dialog": True} if DIALOG_OPEN in why else {})})
         else:
             delivered.append(role); delivered_to.append(addr)
-    rec = chat_append(args.task, {"from": "kabeer", "kind": "command", "to": [r for _, r in targets], "text": text,
+    rec = chat_append(args.task, {"from": "kabeer", "kind": "command", "to": [r for _, r in targets], "text": text, "mode": mode,
                                   "delivered": delivered, "delivered_to": delivered_to, "failed": failed})
-    print(json.dumps(rec))
+    peek, cleared = [], []
+    for addr, role in zip(delivered_to, delivered):
+        try:
+            out = follow_command(args.task, addr, role, text, mode, since, before.get(addr))
+        except (OSError, ValueError, DeskRuntimeError):
+            continue
+        if out["peek"]: peek.append(addr)
+        if out["cleared"]: cleared.append(addr)
+    print(json.dumps({**rec, "peek": peek, "cleared": cleared}))
     if failed and not delivered:
         sys.exit(1)
 
@@ -1264,7 +1424,8 @@ def post(args):
             continue
         why = send_text(addr, note)
         if why:
-            failed.append({"role": role, "why": why})
+            sh(["hc", "label", addr, "awaiting="])  # nothing was sent, so no reply is coming
+            failed.append({"role": role, "address": addr, "why": why, **({"dialog": True} if DIALOG_OPEN in why else {})})
         else:
             delivered.append(role); delivered_to.append(addr)
     rec = chat_append(args.task, {"from": "kabeer", "kind": "say", "to": [r for _, r in targets], "text": text,
@@ -1625,6 +1786,8 @@ def runtime_queue_dispatch_locked(store, _args):
                     return dict(item)
                 state = (info.get("status") or {}).get("state")
                 if state not in ("idle", "done") or labels.get("awaiting"): ready = False
+                # A dialog open in its terminal would swallow the message: wait until it's closed.
+                elif dialog_open(target["address"], info): ready = False
             if not ready:
                 reserved.update(addresses); continue
             item["state"] = "dispatching"; item["claimed_at"] = int(time.time() * 1000)
@@ -2062,6 +2225,7 @@ def main():
     q.add_argument("--task", required=True)
     q.add_argument("--to", action="append", default=[])
     q.add_argument("--raw", action="store_true", help="type the text exactly as given (a slash command); logged as a command")
+    q.add_argument("--mode", choices=["action", "info", "interactive"], help="with --raw: what to do after typing it (default action)")
     q.add_argument("text", nargs="+")
     fi = sub.add_parser("finish")
     fi.add_argument("--address"); fi.add_argument("--keep-open", action="store_true")

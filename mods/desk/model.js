@@ -51,13 +51,16 @@ export function buildRows(messages, cache = new Map()) {
   merged.forEach((m, i) => {
     let worked = null, turnStart = null;
     const event = EVENTS.includes(m.kind);
-    if (!event && m.kind !== "context" && m.kind !== "command") {
+    // What came of a slash command is the runtime's, not a reply: it opens or ends no turn.
+    const outcome = m.kind === "command-result" || m.kind === "command-note";
+    if (!event && !outcome && m.kind !== "context" && m.kind !== "command") {
       if (m.from === "kabeer" || m.kind === "ask" || m.kind === "route") {
         for (const r of m.to ?? []) if (!started.has(r)) started.set(r, m.at);
       }
       if (m.from !== "kabeer" && started.has(m.from)) { turnStart = started.get(m.from); worked = m.at - turnStart; started.delete(m.from); }
     }
-    const type = m.kind === "permission" ? "permission" : event ? "event" : m.kind === "command" ? "command" : m.from === "kabeer" ? "mine" : "agent";
+    const type = m.kind === "permission" ? "permission" : event ? "event" : m.kind === "command" ? "command"
+      : m.kind === "command-result" ? "result" : m.kind === "command-note" ? "note" : m.from === "kabeer" ? "mine" : "agent";
     const aside = type === "agent" && ASIDE.includes(m.kind);
     const grouped = type === "agent" && !aside && !KIND[m.kind] && Boolean(prev) && prev.m.from === m.from && prev.type === "agent"
       && !KIND[prev.m.kind] && m.at - prev.m.at < 300000;
@@ -253,15 +256,25 @@ export function parseTranscript(stdout) {
 // A member's conversation as rows, keyed by time + author + content so a row keeps its key
 // (and its measured height) as the tail window slides. `cache` keeps unchanged row objects.
 // A text-less agent entry (work still going) is dropped while `working`: the live row shows it.
-export function buildRouteRows(turns, cache = new Map(), { working = false } = {}) {
+export function buildRouteRows(turns, cache = new Map(), { working = false, outcomes = [] } = {}) {
   const rows = [], prompts = [], seen = new Map();
-  (turns ?? []).forEach((x, i) => {
+  // What came of slash commands sent to this member (desk chat "command-result"/"command-note"
+  // rows for its address) slot in by time: a /cost dialog leaves nothing in the transcript.
+  // The command itself too, when Claude didn't log it (dialogs aren't in the transcript).
+  const logged = (turns ?? []).filter((x) => x.kind === "command");
+  const extra = (outcomes ?? []).filter((m) => m && (m.kind === "command-result" || m.kind === "command-note"
+      || (m.kind === "command" && !logged.some((x) => x.text === m.text && Math.abs((x.at ?? 0) - m.at) < 15000))))
+    .map((m) => ({ who: m.kind === "command" ? "kabeer" : "desk", kind: m.kind, text: String(m.text ?? ""), at: Number(m.at) || null, outcome: m }));
+  const merged = extra.length ? [...(turns ?? []), ...extra].map((x, i) => ({ x, i }))
+    .sort((a, b) => (a.x.at ?? 0) - (b.x.at ?? 0) || a.i - b.i).map((y) => y.x) : turns;
+  (merged ?? []).forEach((x, i, turns) => {
     if (x.who === "agent" && !x.text && (working && i === turns.length - 1)) return;
     if (x.who === "agent" && !x.text && !x.tools && !x.subagents?.length) return;
     const base = `${x.at ?? "n"}-${x.who}-${hash(x.text)}`;
     const n = seen.get(base) ?? 0; seen.set(base, n + 1);
     const key = n ? `${base}-${n}` : base;
-    const type = x.kind === "command" ? "command" : x.kind === "event" ? "event" : x.who === "kabeer" ? "mine" : x.who === "agent" ? "reply" : "notice";
+    const type = x.kind === "command" ? "command" : x.kind === "event" ? "event" : x.kind === "command-result" ? "result"
+      : x.kind === "command-note" ? "note" : x.who === "kabeer" ? "mine" : x.who === "agent" ? "reply" : "notice";
     const sig = `${type}|${(x.tools?.summary) ?? ""}|${x.subagents?.map((s) => s.status).join(",") ?? ""}`;
     let row = cache.get(key);
     if (!row || row.sig !== sig) { row = { key, sig, type, x }; cache.set(key, row); }

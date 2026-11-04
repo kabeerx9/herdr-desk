@@ -39,25 +39,29 @@ export class Rail {
     else if (TABS.some((t) => t.id === c) && !(isOpen() && currentTab() === c)) choose(c);
   }
 
+  // Quiet by default: 28px icon buttons, a hover fill, the open panel's tab selected. A badge
+  // only for what needs Kabeer (the inbox's blocked/permission count, in the blocked colour);
+  // every other count lives in the tooltip.
   render() {
     const t = theme(), open = isOpen(), active = currentTab(), counts = shared("desk.counts") ?? {}, inbox = inboxCount();
-    return v_flex().id("desk-rail").size_full().pt(10).gap(2).items_center().bg(t.chrome)
+    return v_flex().id("desk-rail").size_full().pt(10).gap(4).items_center().bg(t.chrome)
       .children(TABS.map((tab) => {
-        const on = open && tab.id === active, n = tab.id === "inbox" ? inbox.n : counts[tab.id], hovered = this.hovered === tab.id;
-        return div().id(`rail-${tab.id}`).relative().size(32).flex().items_center().justify_center().rounded(6).cursor_pointer()
-          .bg(on ? t.selected : hovered ? t.hover : "#00000000")
+        const on = open && tab.id === active, hovered = this.hovered === tab.id;
+        const n = tab.id === "inbox" ? inbox.n : counts[tab.id] ?? 0;
+        const needs = tab.id === "inbox" ? inbox.needs ?? 0 : 0;
+        const tip = needs ? `${tab.label} · ${needs} need${needs === 1 ? "s" : ""} you` : n ? `${tab.label} · ${n}` : tab.label;
+        return div().id(`rail-${tab.id}`).relative().size(28).flex().items_center().justify_center().rounded(8).cursor_pointer()
+          .when(on, (el) => el.bg(t.selected))
+          .when(!on && hovered, (el) => el.bg(t.hover))
           .text_color(on || hovered ? t.foreground : t.dim)
-          .tooltip(tab.label)
+          .tooltip(tip)
           .on_hover((h, cx) => { this.hovered = h ? tab.id : this.hovered === tab.id ? null : this.hovered; cx.notify(); })
           .on_click(() => choose(tab.id))
-          .child(svg(`mods/desk/icons/${tab.icon}.svg`).size(16))
-          // Counts: the accent; amber only when something waits on you. A chrome ring cuts it from the icon.
-          .when(Boolean(n), (el) => {
-            const warn = tab.id === "git" || (tab.id === "inbox" && inbox.blocked);
-            return el.child(div().absolute().top(1).right(0).min_w(15).h(15).px(3).rounded(8).border_2().border_color(t.chrome)
-              .flex().items_center().justify_center().bg(warn ? t.blocked : t.accent)
-              .text_color(warn ? t.background : t.accent_foreground).text_size(9).font_semibold().child(n > 99 ? "99+" : String(n)));
-          });
+          .child(svg(`mods/desk/icons/${tab.icon}.svg`).size(15))
+          // A chrome ring cuts the badge from the icon.
+          .when(needs > 0, (el) => el.child(div().absolute().top(-3).right(-4).min_w(14).h(14).px(3).rounded(7).border_2().border_color(t.chrome)
+            .flex().items_center().justify_center().bg(t.blocked)
+            .text_color(t.background).text_size(9).font_semibold().child(needs > 9 ? "9+" : String(needs))));
       }))
       .child(div().flex_1())
       .child(railMeters(t));

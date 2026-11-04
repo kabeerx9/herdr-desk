@@ -18,6 +18,9 @@
 !/bin/test_desk_timeline.py
 !/bin/test_team_overhaul.py
 !/bin/test_desk_transcript.py
+!/bin/test_desk_commands.py
+# Real agent screens the command tests classify.
+!/bin/fixtures/
 
 !/layouts/
 /layouts/*
@@ -35,6 +38,8 @@
 !/mods/desk/
 !/mods/desk-pane/
 !/mods/desk-spaces/
+!/mods/desk-chrome/
+!/mods/desk-status/
 
 # Herdr rewrites these into every mod folder on start.
 jsconfig.json

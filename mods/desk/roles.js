@@ -1,4 +1,4 @@
-import { image } from "gpui-kit";
+import { image, div, svg } from "gpui-kit";
 import { agents, terminals, panes, spaces, run, notify, appHome, home, readTextFile, exec, hc } from "herdr";
 
 // Team roles from roles.json, shared by the Team tab, the sidebar and the PR buttons.
@@ -159,6 +159,7 @@ export function sessionsInRepo(role, brief) {
 
 // The role's face (its avatar, round), else its colored tile with its icon or initial.
 export function roleTile(div, svg, t, role, size, dim = false) {
+  if (AVATARS.has(role.id) || role.avatar) return agentIcon(t, { role: role.avatar ? role : role.id }, size).when(dim, (el) => el.opacity(0.55));
   const color = t[role.color] ?? role.color ?? t.accent;
   if (role.avatar && !role.icon) return div().size(size).flex_none().rounded(size / 2).overflow_hidden().bg(color + "26")
     .when(dim, (el) => el.opacity(0.55))
@@ -168,4 +169,44 @@ export function roleTile(div, svg, t, role, size, dim = false) {
     .child(role.icon
       ? svg(`mods/desk/icons/${role.icon}.svg`).size(Math.round(size * 0.58)).flex_none()
       : div().text_size(Math.round(size * 0.42)).font_semibold().child(role.name[0].toUpperCase()));
+}
+
+// ── faces: one look for a role and the program it runs, everywhere ─────────
+// The agent CLIs Herdr ships a full-colour mark for (icons/<cli>.svg).
+const PROGRAMS = new Set(["claude", "codex", "gemini", "copilot", "cursor", "opencode", "amp", "kimi", "grok", "qoder", "kiro", "crush"]);
+const AVATARS = new Set(["cto", "backend", "frontend", "qa", "reviewer"]);
+const programKey = (cli) => {
+  const k = String(cli ?? "").toLowerCase().split("/").pop();
+  return k.startsWith("claude") ? "claude" : k;
+};
+
+// Which CLI an agent runs, from whatever is at hand, most specific first: its runtime session
+// (bin/team state: role_config.cli, cli — the runner that actually launched), its terminal's
+// labels (cli=), the live program (agents()[i].program.key), then its role's configured cli.
+export function agentCli({ session, labels, agent, role } = {}) {
+  const roleCli = typeof role === "object" ? role?.cli : null;
+  return session?.role_config?.cli ?? session?.cli ?? labels?.cli
+    ?? (agent?.program?.agent ? agent.program.key : null) ?? roleCli ?? null;
+}
+
+// The program's own mark (Claude, Codex, ...), full colour; any other agent gets Herdr's agent glyph.
+export function programIcon(cli, size = 16, t) {
+  const key = programKey(cli);
+  if (PROGRAMS.has(key)) return image(`icons/${key}.svg`).size(size).flex_none();
+  return svg("icons/agent.svg").size(size).flex_none().text_color(t?.dim ?? "#8a8a8a");
+}
+
+// An agent's face: its role's avatar as a circle with the program's mark as a small badge at the
+// bottom-right, on a ring of `ring` (the surface it sits on; default t.background). No role (or
+// one without an avatar) → the program's mark alone. `role`: a roles.json role, or its id.
+// `cli`: "claude" | "codex" | ... (see agentCli); null draws the avatar without a badge.
+export function agentIcon(t, { role, cli, ring } = {}, size = 18) {
+  const avatar = typeof role === "string" ? (AVATARS.has(role) ? `avatars/${role}.png` : null) : role?.avatar ?? null;
+  if (!avatar) return cli ? programIcon(cli, size, t) : svg("icons/agent.svg").size(size).flex_none().text_color(t.dim);
+  const face = image(`mods/desk/${avatar}`).size(size).flex_none().rounded_full();
+  if (!cli) return div().size(size).flex_none().child(face);
+  const badge = Math.max(8, Math.round(size * 0.45)), pad = size >= 24 ? 2 : 1, box = badge + pad * 2;
+  return div().relative().size(size).flex_none().child(face)
+    .child(div().absolute().right(-pad - 1).bottom(-pad - 1).size(box).rounded_full().bg(ring ?? t.background)
+      .flex().items_center().justify_center().child(programIcon(cli, badge, t)));
 }

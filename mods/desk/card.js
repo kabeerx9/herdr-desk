@@ -3,7 +3,7 @@ import { h_flex, v_flex } from "gpui-base";
 import { theme, shared, setShared, terminals, agents, exec, appHome, notify } from "herdr";
 import { icon, button, tileColor, statusMark, iconButton, offMain, mostUrgent, ROW } from "./ui.js";
 // Roles draw as one-colour glyphs here (no tinted tiles): see glyph().
-import { runtimeData, openDesk, sessionOf, settledState, settledNote, triageIcons, snoozeChips, refreshRuntime } from "./workflows.js";
+import { runtimeData, openDesk, sessionOf, refreshRuntime } from "./workflows.js";
 import { Desks, deskMembers, showTerminals, openTerminal } from "./desks.js";
 import { openLimits } from "./usage.js";
 
@@ -35,7 +35,7 @@ const SECTIONS = [
 // Who shrinks first when room runs out, and who may drop (Team and Changes stay).
 const DEGRADE = ["usage", "prs", "lineage", "changes", "team"];
 const DROPPABLE = ["usage", "prs", "lineage"];
-const HEAD = 48, FOOT = 44, SECTION = 28, PAD = 8;
+const HEAD = 44, CHIP = 36, FOOT = 44, SECTION = 28, PAD = 8;
 const ENGINEERS = new Set(["frontend", "backend"]);
 const REVIEWS = { reviewer: "Reviewer", qa: "QA" };
 
@@ -56,11 +56,10 @@ export class DeskCard {
     this.git = {};         // cwd → { branch, base, ahead, dirty, files, adds, dels }
     this.prs = {};         // cwd → [{ number, title, state, url }]
     this.hovered = null;
-    this.snoozing = null;  // the row whose snooze times show
     this.stopping = null;  // { id, until }: Stop asks once more
     this.menu = false;     // the "Show in card" list
     this.shown = store.get("card.sections", {});   // only non-defaults (false) are stored
-    this.shelf = { settled: false, previous: false };
+    this.shelf = { previous: false };
     this.collapsed = store.get("card.compact", true);
     this.key = "";
     this.lineKey = null; this.lineCache = null;
@@ -177,7 +176,7 @@ export class DeskCard {
       .when(Boolean(extra), (el) => el.child(extra));
   }
 
-  // A folded group ("Settled · 2", "Previous · 3").
+  // A folded group ("Previous · 3").
   shelfRow(t, id, label, count, open, onToggle) {
     return h_flex().id(id).h(ROW).flex_none().mx(6).pl(8).pr(8).gap(6).items_center().rounded(6).cursor_pointer()
       .text_size(12).text_color(t.dim).hover((s) => s.bg(t.hover).text_color(t.muted))
@@ -193,14 +192,14 @@ export class DeskCard {
   // Chat | Terminals: which one fills the center.
   switcher(t) {
     const terms = Boolean(shared("deskchat.terminals"));
-    const seg = (id, name, text, on, onClick) => h_flex().id(id).h(24).w(28).justify_center().items_center().rounded(6).cursor_pointer()
+    const seg = (id, name, text, on, onClick) => h_flex().id(id).h(22).w(26).justify_center().items_center().rounded(6).cursor_pointer()
       .bg(on ? t.background : "#00000000").text_color(on ? t.foreground : t.dim)
       .when(on, (el) => el.border_1().border_color(t.border))
       .when(!on, (el) => el.hover((s) => s.text_color(t.foreground)))
       .on_mouse_down("left", (_e, cx) => cx.stop_propagation())
       .on_click((_e, cx) => { cx.stop_propagation(); onClick(); })
       .tooltip(text).child(icon(name, 13));
-    return h_flex().flex_none().p(2).gap(2).rounded(8).bg(t.raised).border_1().border_color(t.border)
+    return h_flex().flex_none().p(1).gap(1).rounded(8).bg(t.raised).border_1().border_color(t.border)
       .child(seg("sw-chat", "chat", "Chat", !terms, () => showTerminals(false)))
       .child(seg("sw-terms", "terminal", "Terminals", terms, () => showTerminals(true)));
   }
@@ -280,7 +279,7 @@ export class DeskCard {
   plan(counts) {
     const avail = Math.max(240, (shared("desk.center.h") ?? 720) - 34);
     const h = {
-      team: { full: SECTION + ROW * (counts.team + (counts.settled ? 1 : 0)) + counts.extra, compact: SECTION + ROW * Math.min(counts.team, 4) + counts.extra },
+      team: { full: SECTION + ROW * counts.team + counts.extra, compact: SECTION + ROW * Math.min(counts.team, 4) + counts.extra },
       lineage: { full: SECTION + ROW * (counts.running + (counts.previous ? 1 : 0)), compact: SECTION + ROW * Math.min(counts.running, 2) },
       changes: { full: SECTION + ROW * Math.max(1, counts.trees), compact: SECTION + ROW },
       prs: { full: SECTION + ROW * Math.max(1, counts.prs), compact: SECTION + ROW * Math.min(Math.max(1, counts.prs), 2) },
@@ -300,31 +299,27 @@ export class DeskCard {
 
   teamSection(t, d, members, subs, level) {
     const app = new Map(agents().map((a) => [a.address, a]));
-    const put = [], active = [];
-    for (const m of members) (settledState(sessionOf(m.address), m.status) ? put : active).push(m);
-    const memberRow = (m, quiet) => {
+    const memberRow = (m) => {
       const role = this.roles.byId(m.role), open = this.open === m.address, s = sessionOf(m.address), id = `ag-${m.address}`;
       const more = iconButton(t, `${id}-more`, open ? "chevron-down" : "chevron", open ? "Hide its actions" : "Its actions: compact, fresh start, review, QA, PR",
         (_e, cx) => { this.open = open ? null : m.address; cx.notify(); }, { color: open ? t.foreground : undefined });
       const rows = [this.row(t, id, {
         indent: m.depth * 12, lead: role ? this.glyph(t, role) : div().size(16),
-        name: role?.name ?? m.role, meta: quiet ? settledNote(s) : s?.title ?? null, muted: quiet,
-        mark: statusMark(t, m.status ?? "idle", 12), actions: [...triageIcons(t, id, this, m.address, quiet), more],
+        name: role?.name ?? m.role, meta: s?.title ?? null,
+        mark: statusMark(t, m.status ?? "idle", 12), actions: [more],
         // Its own conversation (a route of this desk); the terminal stays one click away in its actions.
         onClick: () => { showTerminals(false); setShared("desk.view", d.slug); setShared("desk.route", { task: d.slug, address: m.address }); },
         tip: m.note ?? s?.title ?? "Open its conversation",
       })];
-      const chips = snoozeChips(t, id, this, m.address);
-      if (chips) rows.push(chips);
       if (open) rows.push(div().mx(8).mb(4).rounded(8).bg(t.raised).child(this.desks.memberDetail(t, m, d, true)));
       return rows;
     };
-    let shown = active;
+    let shown = members;
     const cap = level === "compact" ? 4 : Infinity;
     const hidden = Math.max(0, shown.length - cap);
     shown = shown.slice(0, cap);
     const rows = [
-      ...shown.flatMap((m) => memberRow(m, false)),
+      ...shown.flatMap((m) => memberRow(m)),
       ...(level === "full" ? subs.map((s) => {
         const a = app.get(s.address);
         return this.row(t, `sub-${s.address}`, { indent: 12, lead: icon("sparkles", 13).text_color(t.dim),
@@ -332,8 +327,6 @@ export class DeskCard {
           onClick: () => openTerminal(s.address, { peek: true }), tip: "Sub-agent: peek at its terminal" });
       }) : []),
       ...(hidden ? [this.note(t, `${hidden} more`)] : []),
-      ...(put.length ? [this.shelfRow(t, "team-settled", "Settled", put.length, this.shelf.settled, () => { this.shelf.settled = !this.shelf.settled; })] : []),
-      ...(put.length && this.shelf.settled ? put.flatMap((m) => memberRow(m, true)) : []),
     ];
     const present = new Set(members.map((m) => m.role));
     const adder = this.adding ? h_flex().px(14).pb(6).gap(5).flex_wrap()
@@ -450,25 +443,39 @@ export class DeskCard {
     const sub = folded && members.length ? this.summary(members, trees) : where;
     const toggle = iconButton(t, "card-toggle", folded ? "chevron-down" : "up", folded ? "Show the desk's team, lineage, changes and pull requests" : "Fold",
       (_e, cx) => { this.collapsed = !folded; store.set("card.compact", this.collapsed); this.refresh(cx, { prs: true }); }, { size: 24 });
-    const header = h_flex().id("card-head").h(HEAD).flex_none().pl(14).pr(8).gap(10).items_center()
-      .on_mouse_down("left", (_e, cx) => cx.stop_propagation())
-      .child(v_flex().min_w(0).flex_1().gap(1)
-        .child(h_flex().min_w(0).gap(6).items_center()
-          .child(div().truncate().text_size(13).font_semibold().text_color(t.foreground).child(name))
-          .when(urgent, (el) => el.child(statusMark(t, lost.length && !members.some((m) => m.status === "blocked") ? "disconnected" : "blocked", 11))))
-        .when(Boolean(sub), (el) => el.child(div().truncate().text_size(11).text_color(t.dim).child(sub))))
-      .child(this.switcher(t))
-      .child(toggle);
+    // Folded: one 36px line (title, each member's status mark, the view switcher, the chevron), so
+    // the chip sits in the chat's top band above the header strip. The summary moves to the tooltip.
+    const shown = members.slice(0, 5);
+    const marks = h_flex().flex_none().gap(3).items_center()
+      .children(shown.map((m) => statusMark(t, m.status ?? "idle", 11)))
+      .when(members.length > shown.length, (el) => el.child(div().text_size(11).text_color(t.dim).child(`+${members.length - shown.length}`)))
+      .when(lost.length > 0 && !members.some((m) => m.status === "blocked"), (el) => el.child(statusMark(t, "disconnected", 11)));
+    const header = folded
+      ? h_flex().id("card-head").h(CHIP).flex_none().pl(12).pr(6).gap(8).items_center()
+        .on_mouse_down("left", (_e, cx) => cx.stop_propagation())
+        .tooltip(members.length ? this.summary(members, trees) : where ?? name)
+        .child(div().min_w(0).flex_1().truncate().text_size(13).font_semibold().text_color(t.foreground).child(name))
+        .when(members.length > 0 || lost.length > 0, (el) => el.child(marks))
+        .child(this.switcher(t))
+        .child(toggle)
+      : h_flex().id("card-head").h(HEAD).flex_none().pl(14).pr(6).gap(8).items_center()
+        .on_mouse_down("left", (_e, cx) => cx.stop_propagation())
+        .child(v_flex().min_w(0).flex_1().gap(1)
+          .child(h_flex().min_w(0).gap(6).items_center()
+            .child(div().truncate().text_size(13).font_semibold().text_color(t.foreground).child(name))
+            .when(urgent, (el) => el.child(statusMark(t, lost.length && !members.some((m) => m.status === "blocked") ? "disconnected" : "blocked", 11))))
+          .when(Boolean(sub), (el) => el.child(div().truncate().text_size(11).text_color(t.dim).child(sub))))
+        .child(this.switcher(t))
+        .child(toggle);
     const root = v_flex().id("desk-card").w(WIDTH)
       .on_mouse_down("right", (_e, cx) => { cx.stop_propagation(); if (this.collapsed) { this.collapsed = false; store.set("card.compact", false); this.refresh(cx, { prs: true }); } this.menu = !this.menu; cx.notify(); });
     if (folded) return root.child(header);
 
     const subs = this.subagents(members), line = this.lineage(slug, d, members);
     const prs = trees.flatMap((m) => this.prs[m.cwd] ?? []);
-    const put = members.filter((m) => settledState(sessionOf(m.address), m.status)).length;
     const providers = (shared("desk.usage")?.providers ?? []).filter((p) => p.windows?.length).length;
-    const extra = (this.open ? 120 : 0) + (this.adding ? 34 : 0) + (this.snoozing ? 30 : 0) + (lost.length ? 90 : 0);
-    const { level, max } = this.plan({ team: members.length - put + subs.length, settled: put, extra, running: line.running.length, previous: line.previous.length,
+    const extra = (this.open ? 120 : 0) + (this.adding ? 34 : 0) + (lost.length ? 90 : 0);
+    const { level, max } = this.plan({ team: members.length + subs.length, extra, running: line.running.length, previous: line.previous.length,
       trees: trees.length, prs: prs.length, usage: providers });
 
     const parts = this.menu ? [this.menuView(t)] : [
@@ -492,7 +499,7 @@ export class DeskCard {
       .when(!members.length, (el) => el.child(button(t, "card-del", deleting ? "Click again to delete" : "Delete desk", (_e, cx) => this.desks.deleteDesk(d, cx),
         { iconName: "trash", disabled: Boolean(acting), tip: "Nobody's running. Kept in ~/.herdr/team/.deleted, so it can be put back" })));
 
-    return root.on_mouse_down_out((_e, cx) => { this.collapsed = true; this.menu = false; this.snoozing = null; store.set("card.compact", true); cx.notify(); })
+    return root.on_mouse_down_out((_e, cx) => { this.collapsed = true; this.menu = false; store.set("card.compact", true); cx.notify(); })
       .child(header).child(body).child(footer);
   }
 }

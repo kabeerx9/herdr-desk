@@ -2,7 +2,8 @@
 // Laid out as T3 Code's sidebar: a space is a project folder header (its repo, else its name; a
 // worktree space nests under its repo by branch). A desk is a thread row: its title, then its
 // state ("Working", "Done") or its age. Members show only under a desk with a team: role, session
-// title, a mark. Agents outside any desk are thread rows; ones put away sit on a Settled shelf.
+// title, a mark. Agents outside any desk are thread rows. Each row leads with its face: the role's
+// avatar with the program's badge (mods/desk/roles.js agentIcon), else the program's mark.
 // One selected row (`selected`; in light a white card with a hairline), `hover` under the pointer.
 // Rows never re-sort under the pointer. Right-click a space for its menu; drag one to reorder.
 //
@@ -10,7 +11,7 @@
 // a member row sets "desk.view" = its desk and "desk.route" = { task, address } (its own
 // conversation). In the terminals view a member row focuses its pane instead.
 
-import { View, div, svg } from "gpui-kit";
+import { View, div, svg, image } from "gpui-kit";
 import { v_flex, h_flex } from "gpui-base";
 import { spaces, machines, panes, run, openOverlay, closeOverlay, props, pickFolder, exec, hc, theme, shared, setShared, watchFolder, window, layout, agents, terminals, setAgentOrder, readTextFile, appHome, home, notify, settings } from "herdr";
 
@@ -69,6 +70,9 @@ function statusMark(t, status, size = 12) {
 // T3's sidebar geometry: a 32px folder header, 36px thread rows whose titles line up past the
 // folder's icon (10 inset + 16 icon + 10 gap), 6px radius, 14px titles, 12px meta.
 const FOLDER_H = 32, THREAD_H = 36, MEMBER_H = 32, INSET = 10, TITLE_X = 36;
+// Faces: 18px on thread rows (in the folder's 16px icon column, centred), 16px on member rows
+// (in the title column, so members hang under their desk's title).
+const FACE = 18, MEMBER_FACE = 16;
 // T3 light: a zinc-50 sidebar whose selected row is a white card with a hairline ring.
 const light = () => !settings().dark;
 const mutedFg = (t) => (light() ? t.dim : t.muted);
@@ -97,33 +101,37 @@ const wc = (name, size = 14) => svg(`mods/workspace-chrome/${name}.svg`).size(si
 const dk = (name, size = 14) => svg(`mods/desk/icons/${name}.svg`).size(size).flex_none();
 
 // The Desk runtime (bin/team state, polled by the Desk's rail into shared "desk.runtime"):
-// session titles and settle / snooze. Controls hide until the runtime reports the fields.
+// session titles and which CLI each one runs.
 const runtime = () => shared("desk.runtime") ?? { sessions: [] };
 const sessionOf = (address) => (runtime().sessions ?? []).find((s) => s.address === address && s.state !== "finished") ?? null;
-const triageOn = () => !shared("desk.triage.off") && (runtime().sessions ?? []).some((s) => "settled_at" in s || "snoozed_until" in s);
-function putAway(session, status) {
-  if (!session || status === "working" || status === "blocked") return false;
-  return (session.snoozed_until ?? 0) > Date.now() || Boolean(session.settled_at);
+
+// Faces. A copy of mods/desk/roles.js agentCli / programIcon / agentIcon (a mod can't import
+// another's files): keep the two the same.
+const PROGRAMS = new Set(["claude", "codex", "gemini", "copilot", "cursor", "opencode", "amp", "kimi", "grok", "qoder", "kiro", "crush"]);
+const AVATARS = new Set(["cto", "backend", "frontend", "qa", "reviewer"]);
+const programKey = (cli) => {
+  const k = String(cli ?? "").toLowerCase().split("/").pop();
+  return k.startsWith("claude") ? "claude" : k;
+};
+function agentCli({ session, labels, agent, role } = {}) {
+  const roleCli = typeof role === "object" ? role?.cli : null;
+  return session?.role_config?.cli ?? session?.cli ?? labels?.cli
+    ?? (agent?.program?.agent ? agent.program.key : null) ?? roleCli ?? null;
 }
-function snoozeOptions(now = Date.now()) {
-  const at = (days, hour) => { const d = new Date(now); d.setDate(d.getDate() + days); d.setHours(hour, 0, 0, 0); return d.getTime(); };
-  const tonight = at(0, 19);
-  return [{ id: "1h", label: "1 hour", until: now + 3600000 },
-    ...(tonight - now > 3600000 ? [{ id: "tonight", label: "Tonight", until: tonight }] : []),
-    { id: "tomorrow", label: "Tomorrow", until: at(1, 9) }];
+function programIcon(cli, size = 16, t) {
+  const key = programKey(cli);
+  if (PROGRAMS.has(key)) return image(`icons/${key}.svg`).size(size).flex_none();
+  return svg("icons/agent.svg").size(size).flex_none().text_color(t?.dim ?? "#8a8a8a");
 }
-function triage(cx, action, address, until) {
-  const args = action === "snooze" ? ["snooze", "--address", address, "--until-ms", String(until)] : [action, "--address", address];
-  cx.spawn(async (cx) => {
-    const r = await exec(`${appHome()}/bin/team`, args).catch((e) => ({ code: 1, stderr: String(e) }));
-    if (r.code !== 0) {
-      let why = (r.stderr || r.stdout || "").trim();
-      try { why = JSON.parse(why).error ?? why; } catch {}
-      if (/invalid choice|unrecognized|unknown command|usage:/i.test(why)) setShared("desk.triage.off", true);
-      else notify({ title: "Couldn't update that agent", body: why.slice(0, 200), level: "error", timeout: 6000 });
-    } else setShared("desk.runtime.dirty", Date.now());
-    cx.notify();
-  });
+function agentIcon(t, { role, cli, ring } = {}, size = 18) {
+  const avatar = typeof role === "string" ? (AVATARS.has(role) ? `avatars/${role}.png` : null) : role?.avatar ?? null;
+  if (!avatar) return cli ? programIcon(cli, size, t) : svg("icons/agent.svg").size(size).flex_none().text_color(t.dim);
+  const face = image(`mods/desk/${avatar}`).size(size).flex_none().rounded_full();
+  if (!cli) return div().size(size).flex_none().child(face);
+  const badge = Math.max(8, Math.round(size * 0.45)), pad = size >= 24 ? 2 : 1, box = badge + pad * 2;
+  return div().relative().size(size).flex_none().child(face)
+    .child(div().absolute().right(-pad - 1).bottom(-pad - 1).size(box).rounded_full().bg(ring ?? t.background)
+      .flex().items_center().justify_center().child(programIcon(cli, badge, t)));
 }
 
 // desk-chat's center is a stack: the chat, or the shown tab's terminals (mods/desk/desks.js
@@ -154,12 +162,6 @@ function spaceAgents(w, all, labels) {
   return all.filter((a) => a.space === w.id).map((a) => ({ a, l: labels.get(a.address) ?? {} }))
     .sort((x, y) => (x.l.role ? 0 : 1) - (y.l.role ? 0 : 1) || (x.l.role === "cto" ? -1 : y.l.role === "cto" ? 1 : 0)
       || (RANK[x.a.status] ?? 9) - (RANK[y.a.status] ?? 9) || x.a.seq - y.a.seq);
-}
-
-// A role's glyph, one colour (the text's): no tinted tiles.
-function roleGlyph(t, role, size = 14, color) {
-  const el = role?.icon ? svg(`mods/desk/icons/${role.icon}.svg`) : svg("mods/desk/icons/terminal.svg");
-  return el.size(size).flex_none().text_color(color ?? t.dim);
 }
 
 // A popup menu's row (space menu, add-to-desk).
@@ -212,7 +214,7 @@ class JoinMenu {
     };
     return v_flex().id("join-menu").w_full().p(4).gap(1).bg(t.popover)
       .child(div().px(8).pt(6).pb(4).text_size(11).text_color(t.dim).truncate().child(`Add ${name} to the desk as`))
-      .children(roles.map((r) => menuItem(t, `jm-${r.id}`, roleGlyph(t, r, 14), r.name, join(r),
+      .children(roles.map((r) => menuItem(t, `jm-${r.id}`, agentIcon(t, { role: r }, 16), r.name, join(r),
         this.busy === r.id ? svg("mods/workspace-chrome/spinner.svg").size(11).flex_none().spin(900) : null)));
   }
 }
@@ -244,8 +246,6 @@ export default class Spaces extends View {
     if (props()?.joinMenu) { this.part = new JoinMenu(); return; }
     if (props()?.top) { this.part = new Top(); return; }
     this.hoverRow = null;
-    this.snoozing = null; // the agent row whose snooze times show
-    this.shelves = new Set(); // spaces whose Settled shelf is open
     this.order = {}; // space -> its agents' order at the last draw
     this.pointerIn = false;
     this.git = {}; // where() -> { name, branch, ahead, behind, repo, linked }, null: not a repo
@@ -504,7 +504,7 @@ export default class Spaces extends View {
 
   joinMenu(a, name, desk) {
     const taken = new Set(desk.roles);
-    const roles = [...this.roles.entries()].map(([id, r]) => ({ id, name: r.name, icon: r.icon }))
+    const roles = [...this.roles.entries()].map(([id, r]) => ({ id, name: r.name, avatar: r.avatar }))
       .filter((r) => !(r.id === "cto" && taken.has("cto")));
     openOverlay({ mod: "desk-spaces", kind: "popup", width: 220, height: 40 + roles.length * 29,
       props: { joinMenu: true, address: a.address, task: desk.slug, name, roles } });
@@ -531,7 +531,7 @@ export default class Spaces extends View {
       });
   }
 
-  // A small square control inside a row (fold, new desk, settle, snooze); stops the row's press.
+  // A small square control inside a row (fold, new desk, add to desk); stops the row's press.
   rowButton(t, id, iconEl, tip, onClick, on = false, size = 24) {
     return h_flex().id(id).size(size).flex_none().items_center().justify_center().rounded(6)
       .text_color(on ? t.foreground : mutedFg(t)).hover((s) => s.text_color(t.foreground)).tooltip(tip)
@@ -552,76 +552,70 @@ export default class Spaces extends View {
     return slot.when(Boolean(at), (el) => el.text_size(12).text_color(t.dim).child(ago(at)));
   }
 
-  // Settle and snooze for an agent's session (nothing while it works or needs you); "back" for
-  // one put away.
-  triageTools(t, a, id, put) {
-    const session = sessionOf(a.address);
-    if (!session || !triageOn() || ["working", "blocked"].includes(a.status)) return [];
-    if (put) return [this.rowButton(t, `${id}-back`, dk("back", 12), "Bring it back", (cx) => triage(cx, "unsettle", a.address))];
-    return [this.rowButton(t, `${id}-snooze`, dk("clock", 12), "Snooze", () => { this.snoozing = this.snoozing === id ? null : id; }, this.snoozing === id),
-      this.rowButton(t, `${id}-settle`, dk("check", 12), "Settle: put it away until it has new work", (cx) => triage(cx, "settle", a.address))];
+  // The ring under a face's program badge: the row's own fill, so the badge reads as cut out.
+  ring(t, selected) {
+    return selected ? (light() ? t.canvas : t.selected) : t.chrome;
   }
 
-  // The snooze times, a row under the one whose clock was pressed.
-  snoozeRow(t, a, id, pl) {
-    return h_flex().id(`${id}-times`).h(32).flex_none().pl(pl).pr(INSET).gap(4).items_center()
-      .children(snoozeOptions().map((o) => div().id(`${id}-snz-${o.id}`).h(24).px(8).flex().items_center().rounded(6).cursor_pointer()
-        .border_1().border_color(t.border).text_size(12).text_color(mutedFg(t)).hover((s) => s.bg(t.hover).text_color(t.foreground))
-        .on_click((_e, cx) => { cx.stop_propagation(); this.snoozing = null; triage(cx, "snooze", a.address, o.until); }).child(o.label)));
-  }
-
-  // A desk: a T3 thread row. Its title (medium; regular and muted once it has nothing new), then
-  // its state or age. A desk of one is that agent's thread, so its hover carries settle / snooze.
+  // A desk: a T3 thread row. Its lead's face (the CTO, else its first member) in the folder's icon
+  // column, its title (medium; regular and muted once it has nothing new), then its state or age.
   deskRow(t, w, desk, x) {
     const id = `desk-${desk.slug}`, hovered = this.hoverRow === id;
     const route = shared("desk.route");
     const selected = chatView() && shared("desk.view") === desk.slug && !(route?.address && route.task === desk.slug && desk.members.length > 1);
     const info = this.deskInfo.get(desk.slug);
-    const solo = desk.members.length === 1 ? desk.members[0].a : null;
-    const tools = hovered && solo ? this.triageTools(t, solo, id, false) : [];
+    const lead = desk.members.find((k) => k.l.role === "cto") ?? desk.members[0];
     const recede = !selected && desk.status === "idle";
-    const row = this.rowBase(t, id, { selected, pl: TITLE_X + x, tip: desk.full })
+    return [this.rowBase(t, id, { selected, pl: INSET - 1 + x, tip: desk.full }).gap(9)
       .on_click(() => this.openDesk(w, desk.slug))
+      .child(this.face(t, lead, FACE, selected))
       .child(div().min_w(0).flex_1().truncate().text_size(14).when(!recede, (el) => el.font_medium())
         .text_color(recede ? (hovered ? t.foreground : mutedFg(t)) : t.foreground).child(desk.title))
-      .child(this.trailing(t, { status: desk.status, at: info?.at, tools }));
-    return this.snoozing === id && solo ? [row, this.snoozeRow(t, solo, id, TITLE_X + x)] : [row];
+      .child(this.trailing(t, { status: desk.status, at: info?.at }))];
   }
 
-  // One agent row: a member of a desk with a team (a quieter 32px row under its desk: role, then
-  // its session title, its state as a mark), or an agent outside any desk (a thread row of its own).
-  agentRow(t, { a, l }, g, ps, desk, { put = false, deskTitle = null, x = 0 } = {}) {
+  // An agent's face: its role's avatar with its program's badge, else the program's mark.
+  face(t, k, size, selected) {
+    if (!k) return div().size(size).flex_none();
+    const role = k.l.role ? this.roles.get(k.l.role) : null;
+    const cli = agentCli({ session: sessionOf(k.a.address), labels: k.l, agent: k.a, role });
+    return agentIcon(t, { role, cli, ring: this.ring(t, selected) }, size);
+  }
+
+  // One agent row: a member of a desk with a team (a quieter row under its desk: its face, role,
+  // session title, its state as a mark), or an agent outside any desk (a thread row of its own).
+  agentRow(t, k, g, ps, desk, { deskTitle = null, x = 0 } = {}) {
+    const { a, l } = k;
     const role = l.role ? this.roles.get(l.role) : null;
-    const member = Boolean(role && l.task) && !put;
+    const member = Boolean(role && l.task);
     const session = sessionOf(a.address);
     const fallback = role?.name ?? ((/^\d+$/.test(a.tab_name) ? a.title || a.program?.name : a.tab_name) || "Agent");
     const title = session?.title && session.title !== deskTitle ? session.title : null;
     const id = `agent-${a.address}`, hovered = this.hoverRow === id;
     const route = shared("desk.route");
-    const selected = role && l.task && chatView() ? route?.address === a.address : Boolean(a.focused) && !chatView();
+    const selected = member && chatView() ? route?.address === a.address : Boolean(a.focused) && !chatView();
     const pane = ps.find((p) => p.pane === a.pane);
     const branch = pane?.branch && g?.branch && pane.branch !== g.branch && offMain(pane.branch) ? pane.branch : null;
-    const canJoin = !(role && l.task) && desk && !a.space.includes("/");
-    const tools = hovered ? [
-      ...(canJoin ? [this.rowButton(t, `${id}-join`, dk("plus", 12), "Add to the desk", () => this.joinMenu(a, session?.title || fallback, desk))] : []),
-      ...this.triageTools(t, a, id, put)] : [];
-    const name = role && l.task ? role.name : session?.title || fallback;
+    const canJoin = !member && desk && !a.space.includes("/");
+    const tools = hovered && canJoin ? [this.rowButton(t, `${id}-join`, dk("plus", 12), "Add to the desk", () => this.joinMenu(a, session?.title || fallback, desk))] : [];
+    const name = member ? role.name : session?.title || fallback;
     const tip = [session?.title ? `${fallback} · ${session.title}` : fallback, branch].filter(Boolean).join(" · ");
-    const recede = !selected && (a.status === "idle" || put);
-    const pl = (member ? TITLE_X + 16 : TITLE_X) + x;
-    const row = this.rowBase(t, id, { selected, pl, h: member ? MEMBER_H : THREAD_H, tip })
+    const recede = !selected && a.status === "idle";
+    const row = this.rowBase(t, id, { selected, pl: (member ? TITLE_X : INSET - 1) + x, h: member ? MEMBER_H : THREAD_H, tip })
       .on_click(() => this.openMember(a, l))
       .when(canJoin, (el) => el.on_mouse_down("right", () => this.joinMenu(a, name, desk)));
-    const body = member
-      ? row.child(h_flex().min_w(0).flex_1().gap(8).items_center()
-          .child(div().flex_none().max_w(120).truncate().text_size(13).text_color(selected || hovered ? t.foreground : mutedFg(t)).child(name))
-          .when(Boolean(title), (el) => el.child(div().min_w(0).flex_shrink_1().truncate().text_size(13).text_color(t.dim).child(title))))
-        .child(tools.length ? this.trailing(t, { tools }) : h_flex().w(16).flex_none().justify_end()
-          .when(Boolean(STATE[a.status]), (el) => el.child(statusMark(t, a.status, 12))))
-      : row.child(div().min_w(0).flex_1().truncate().text_size(14).when(!recede, (el) => el.font_medium())
-          .text_color(recede ? (hovered ? t.foreground : mutedFg(t)) : t.foreground).child(name))
-        .child(this.trailing(t, { status: put ? null : a.status, tools }));
-    return this.snoozing === id && !put ? [body, this.snoozeRow(t, a, id, pl)] : [body];
+    if (member) return [row.gap(8)
+      .child(this.face(t, k, MEMBER_FACE, selected))
+      .child(h_flex().min_w(0).flex_1().gap(8).items_center()
+        .child(div().flex_none().max_w(120).truncate().text_size(13).text_color(selected || hovered ? t.foreground : mutedFg(t)).child(name))
+        .when(Boolean(title), (el) => el.child(div().min_w(0).flex_shrink_1().truncate().text_size(13).text_color(t.dim).child(title))))
+      .child(h_flex().w(16).flex_none().justify_end()
+        .when(Boolean(STATE[a.status]), (el) => el.child(statusMark(t, a.status, 12))))];
+    return [row.gap(9)
+      .child(this.face(t, k, FACE, selected))
+      .child(div().min_w(0).flex_1().truncate().text_size(14).when(!recede, (el) => el.font_medium())
+        .text_color(recede ? (hovered ? t.foreground : mutedFg(t)) : t.foreground).child(name))
+      .child(this.trailing(t, { status: a.status, tools }))];
   }
 
   // While the pointer is over the list, a space's agents keep the order they had; new ones go last.
@@ -673,9 +667,7 @@ export default class Spaces extends View {
     const draw = (r) => {
       const kids = this.held(r.w.id, spaceAgents(r.w, all, labels));
       if (collapsed) { order.push(...kids.map((k) => k.a.address)); return [this.compact(r, t, kids)]; }
-      const shelf = kids.filter((k) => putAway(sessionOf(k.a.address), k.a.status));
-      const live = kids.filter((k) => !shelf.includes(k));
-      const members = live.filter((k) => k.l.role && k.l.task), outside = live.filter((k) => !(k.l.role && k.l.task));
+      const members = kids.filter((k) => k.l.role && k.l.task), outside = kids.filter((k) => !(k.l.role && k.l.task));
       // Desks in the order their first member comes; each with its members.
       const desks = [];
       for (const k of members) {
@@ -694,14 +686,6 @@ export default class Spaces extends View {
       const head = this.header(r, t, { desks, shut, count: desks.length + outside.length, status: mostUrgent(kids.map((k) => k.a.status)) });
       if (shut) { order.push(...kids.map((k) => k.a.address)); return [head]; }
       const x = r.tree ? 16 : 0; // a worktree's rows sit under its own (indented) header
-      const open = this.shelves.has(r.w.id);
-      const shelfId = `shelf-${r.w.id}`;
-      // T3's shelf header: a quiet 12px label, its count, a chevron that turns.
-      const shelfRow = this.rowBase(t, shelfId, { pl: TITLE_X + x, h: FOLDER_H })
-        .on_click((_e, cx) => { open ? this.shelves.delete(r.w.id) : this.shelves.add(r.w.id); cx.notify(); })
-        .child(div().flex_1().text_size(12).font_medium().text_color(t.dim).child("Settled"))
-        .child(div().flex_none().text_size(12).text_color(t.dim).child(String(shelf.length)))
-        .child(wc(`chevron-${open ? "down" : "right"}`, 12).text_color(t.dim));
       const out = [head];
       for (const d of desks) {
         out.push(...this.deskRow(t, r.w, d, x));
@@ -713,8 +697,6 @@ export default class Spaces extends View {
         }
       }
       for (const k of outside) { order.push(k.a.address); out.push(...this.agentRow(t, k, r.g, ps, joinTo, { x })); }
-      if (shelf.length) out.push(shelfRow);
-      for (const k of shelf) { order.push(k.a.address); if (open) out.push(...this.agentRow(t, k, r.g, ps, joinTo, { put: true, x })); }
       return out;
     };
     // A space and its worktree spaces are one group, with room above the next.
@@ -833,7 +815,7 @@ export default class Spaces extends View {
       .when(collapsed, (el) => el.child(h_flex().flex_none().h(34).justify_center()
         .child(this.rowButton(t, "unfold", wc("sidebar", 14), "Show the sidebar", () => toggleSidebar()))))
       .child(v_flex().id("spaces-list").flex_1().min_h(0).px(8).pt(8).pb(16).overflow_y_scrollbar()
-        .on_hover((inside, cx) => { this.pointerIn = inside; if (!inside) { this.snoozing = null; this.hoverRow = null; cx.notify(); } })
+        .on_hover((inside, cx) => { this.pointerIn = inside; if (!inside) { this.hoverRow = null; cx.notify(); } })
         .on_mouse_up("left", (_e, cx) => { this.pressed = null; cx.notify(); })
         .children(this.grouped(t, collapsed)));
   }
