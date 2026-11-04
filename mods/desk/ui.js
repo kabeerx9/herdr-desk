@@ -18,6 +18,20 @@ export const ago = (iso) => {
   return `${Math.round(s / 86400)}d`;
 };
 
+// The one status mark every Desk surface draws (chat, card, spaces, pane headers). Shape
+// carries the meaning, colour confirms it, so it reads in either theme and for colour-blind
+// eyes: working spins a ring, blocked is a pulsing square with "!", done a filled check,
+// idle a hollow dot, queued a dashed ring, failed a cross, disconnected a broken ring.
+export const MARKS = ["working", "blocked", "done", "idle", "queued", "failed", "disconnected"];
+const MARK_COLOR = { working: "working", blocked: "blocked", done: "done", idle: "dim", queued: "muted", failed: "blocked", disconnected: "dim" };
+export function statusMark(t, status, size = 12) {
+  const kind = MARKS.includes(status) ? status : "idle";
+  const el = svg(`mods/desk/icons/marks/${kind}.svg`).size(size).flex_none().text_color(t[MARK_COLOR[kind]] ?? t.dim);
+  if (kind === "working") return el.spin(900);
+  if (kind === "blocked") return el.loop("opacity", { from: 0.45, to: 1, period: 1400 });
+  return el;
+}
+
 // A status at a glance, in its color: working spins; needs you pulses; done has a check;
 // idle is quiet text. The Desk's agent rows and the spaces list draw the same badge.
 export const STATUS_LABEL = { working: "Working", blocked: "Needs you", done: "Done", idle: "Idle" };
