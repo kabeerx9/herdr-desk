@@ -24,7 +24,11 @@ One launcher for everyone (the CTO, the Desk's buttons, you): it reads roles.jso
 gives every editing role its own git worktree, and starts the role with hc in its own Herdr tab, labeled role=<id> task=<slug>.
 Children always outlive their parent, so closing the CTO doesn't end its workers.
 """
-import json, os, re, secrets, shutil, subprocess, sys, time
+import contextlib, io, json, os, re, secrets, shutil, subprocess, sys, time, shlex, uuid
+from desk_runtime import Store as RuntimeStore, RuntimeError as DeskRuntimeError, adapter as runtime_adapter
+from desk_runtime import attention as runtime_attention
+from desk_runtime import find_queue as runtime_find_queue, queue_item as runtime_queue_item
+from desk_runtime import foreground_agent, recover_interrupted_claims, reorder as runtime_reorder, session_view as runtime_session_view, upsert_session
 
 APP = os.environ.get("HERDR_APP_HOME") or os.path.expanduser("~/.config/herdr-app")
 DESK = os.path.join(APP, "mods", "desk")
@@ -89,10 +93,44 @@ def load_roles():
     return roles
 
 
+def adapter_config(role):
+    config = {}
+    if role.get("cli", "claude") == "claude" and not role.get("argv"):
+        config = {"resume_args": ["--resume", "{session_id}"],
+                  "fork_args": ["--resume", "{session_id}", "--fork-session"],
+                  "session_args": ["--session-id", "{session_id}"]}
+    config.update(role.get("adapter") or {})
+    return config
+
+
+def adapter_args(role, action, identity):
+    values = adapter_config(role).get(action + "_args")
+    if not isinstance(values, list) or not all(isinstance(x, str) for x in values):
+        raise DeskRuntimeError("This CLI has no configured %s arguments" % action)
+    return [x.replace("{session_id}", identity) for x in values]
+
+
+def role_for_session(rec):
+    return rec.get("role_config") or next((r for r in load_roles() if r["id"] == rec.get("role")), None)
+
+
+def agent_identity(info):
+    role_id = (info.get("labels") or {}).get("role")
+    role = next((r for r in load_roles() if r["id"] == role_id), {})
+    configured = (role.get("adapter") or {}).get("executable")
+    return configured or (os.path.basename(role["argv"][0]) if role.get("argv") else role.get("cli"))
+
+
+def is_agent(info):
+    return bool(info and info.get("state") == "live" and foreground_agent(info, agent_identity(info)))
+
+
 def argv_for(role, task):
     if isinstance(role.get("argv"), list):
         return role["argv"] + ([task] if task else [])
     prompt, extra, effort = role["promptText"], role.get("args", []), role.get("effort")
+    if role.get("cli") not in (None, "claude", "codex"):
+        die("Role %s uses %s; give it an argv list until that adapter is configured." % (role.get("name", role.get("id", "role")), role.get("cli")))
     if role.get("cli") == "codex":
         # --no-daemon: otherwise Codex runs its commands outside hc. -c parses TOML;
         # a JSON string is a valid TOML basic string, and a JSON list a TOML array.
@@ -115,7 +153,7 @@ def argv_for(role, task):
         base += ["--settings", json.dumps({"hooks": {
             "Stop": [{"hooks": [{"type": "command", "command": f"{SELF} hook claude", "timeout": 20}]}],
             "PreToolUse": [{"matcher": "*", "hooks": [{"type": "command", "command": f"{SELF} hook claude-tool", "timeout": 5}]}],
-            "SessionStart": [{"matcher": "compact", "hooks": [{"type": "command", "command": f"{SELF} hook claude-compact", "timeout": 20}]}],
+            "SessionStart": [{"matcher": "startup|resume|clear", "hooks": [{"type": "command", "command": f"{SELF} hook session", "timeout": 10}]}, {"matcher": "compact", "hooks": [{"type": "command", "command": f"{SELF} hook claude-compact", "timeout": 20}]}],
             "PermissionRequest": [{"matcher": "*", "hooks": [{"type": "command", "command": f"{SELF} hook claude-permission", "timeout": PERMIT_TIMEOUT}]}]}})]
         base += ["--append-system-prompt", prompt] if prompt else []
     return base + extra + ([task] if task else [])
@@ -141,6 +179,34 @@ PERMITS = os.path.join(CHAT, ".permits")
 # What each agent is doing right now, one line per tool call (team hook claude-tool), read by
 # the Desk's chat while the agent works and cleared when its turn ends.
 ACTIVITY = os.path.join(CHAT, ".activity")
+
+
+def runtime_store():
+    return RuntimeStore(CHAT)
+
+
+def runtime_terminals():
+    """Address keyed terminal facts; tolerated when the core is temporarily unavailable."""
+    data = hc_json("ls") or {}
+    items = data.get("terminals", []) if isinstance(data, dict) else data
+    result = {}
+    for item in items:
+        if not isinstance(item, dict) or not item.get("address"):
+            continue
+        detail = terminal(item["address"])
+        result[item["address"]] = detail or item
+    return result
+
+
+def runtime_record(address, role, task, cwd, cli, conversation=None, parent_task=None, capabilities=None, role_config=None, space=None, tab=None):
+    """Record a launched/adopted role. Runtime state is private and never part of a repo."""
+    if not address:
+        return None
+    store = runtime_store()
+    git_repo = repo_of(cwd) if role_config and cwd else None
+    return store.mutate(lambda data: dict(upsert_session(data, {"address": address, "role": role, "task": task, "cwd": cwd,
+        "cli": cli or "claude", "conversation": conversation, "parent_task": parent_task, "capabilities": capabilities, "recovering": False,
+        "role_config": role_config, "git_root": git_repo["top"] if git_repo else None, "space": space, "tab": tab, "at": int(time.time() * 1000)})))
 
 
 def activity_file(addr):
@@ -292,10 +358,12 @@ def desk_members(slug):
 
 def expect_reply(addr, what):
     """Marks a terminal as owing a reply; its end-of-turn hook posts that reply (team hook)."""
-    sh(["hc", "label", addr, f"awaiting={what}:{int(time.time() * 1000)}"])
+    return sh(["hc", "label", addr, f"awaiting={what}:{int(time.time() * 1000)}"]).returncode == 0
 
 
 def send_text(addr, text):
+    if not is_agent(terminal(addr)):
+        return "Recipient is disconnected or no longer running its configured agent"
     r = sh(["hc", "send", addr, text])
     if r.returncode == 0:
         return None
@@ -424,6 +492,8 @@ def start(args):
     cmd = ["hc", "run", "--bg", "--outlive-parent", "--name", name, "--cwd", folder,
            "--label", f"role={role['id']}", "--label", f"task={slug}", "--label", f"by={args.by or ME or 'shell'}",
            "--label", f"herdr.space={space}", "--label", f"herdr.tab={tab}"]
+    initial_chat = getattr(args, "display_task", None)
+    if initial_chat: cmd += ["--label", "awaiting=chat:" + str(int(time.time() * 1000))]
     cmd += ["--no-parent"] if args.no_parent else (["--parent", args.parent] if args.parent else [])
     # Through the user's own login + interactive shell: hc's environment lacks what ~/.zshrc sets
     # up (nvm's node and npm, Android tools). exec swaps the shell for the agent itself.
@@ -435,7 +505,9 @@ def start(args):
                       + ("keep it current, rewritten not appended, under 100 lines." if role["id"] == "cto"
                          else "read it before you start, if it exists."))
     role = {**role, "promptText": role["promptText"] + desk_note}
-    cmd += ["--", shell, "-lic", 'exec "$@"', "team-role"] + argv_for(role, task)
+    identity = str(uuid.uuid4()) if adapter_config(role).get("session_args") else None
+    command = argv_for(role, "") + (adapter_args(role, "session", identity) if identity else []) + ([task] if task else [])
+    cmd += ["--", shell, "-lic", 'exec "$@"', "team-role"] + command
     r = sh(cmd)
     if r.returncode != 0:
         die(f"hc run failed: {(r.stderr or r.stdout).strip()}")
@@ -443,6 +515,12 @@ def start(args):
         launched = json.loads(r.stdout)
     except ValueError:
         launched = {"raw": r.stdout.strip()}
+    runtime_record(launched.get("address"), role["id"], slug, folder, role.get("cli"), identity,
+                   capabilities={"resume": bool(adapter_config(role).get("resume_args")), "fork": bool(adapter_config(role).get("fork_args"))},
+                   role_config=role, space=space, tab=tab)
+    if initial_chat:
+        chat_append(slug, {"from": "kabeer", "kind": "say", "text": initial_chat,
+                          "to": [role["id"]], "delivered": [role["id"]], "delivered_to": [launched.get("address")]})
 
     # The CTO that fans a task out is part of it too, so the Desk groups them.
     if ME and caller_labels.get("role") == "cto" and caller_labels.get("task") != slug:
@@ -587,6 +665,17 @@ def hook(args):
     When the turn wrote a handoff (team fresh), a new session takes over. After a compaction
     (claude-compact, Claude's SessionStart hook), its new size. Quick; never blocks."""
     msg = ""
+    wake_queue()
+    if args.cli == "session":
+        try:
+            payload = json.load(sys.stdin)
+            info = terminal(ME) if ME else {}; labels = info.get("labels") or {}
+            identity = payload.get("session_id")
+            if identity and labels.get("role") and labels.get("task"):
+                runtime_record(ME, labels["role"], labels["task"], info.get("cwd"), labels.get("cli") or "claude", identity)
+        except (ValueError, OSError, DeskRuntimeError):
+            pass
+        return
     if args.cli == "claude-compact":
         return compacted()
     if args.cli == "claude-permission":
@@ -603,6 +692,13 @@ def hook(args):
         else:
             payload = json.load(sys.stdin)
             msg = payload.get("last_assistant_message") or last_text(payload.get("transcript_path"))
+            # Claude's transcript basename is its durable conversation identity. Keep it
+            # only for the labeled Desk role that owns this hook; no unrelated scan.
+            if ME and payload.get("transcript_path"):
+                conversation = os.path.splitext(os.path.basename(payload["transcript_path"]))[0]
+                labels_now = (terminal(ME).get("labels") or {})
+                if labels_now.get("role") and labels_now.get("task"):
+                    runtime_record(ME, labels_now["role"], labels_now["task"], terminal(ME).get("cwd"), "claude", conversation)
             # Claude writes the turn's usage just after this hook, so it's measured a moment later, apart.
             if ME and payload.get("transcript_path"):
                 env = {k: v for k, v in os.environ.items() if k != "HC_TERMINAL_ID"}
@@ -949,16 +1045,23 @@ def post(args):
     names = ", ".join(r for _, r in targets)
     delivered, delivered_to, failed = [], [], []
     for addr, role in targets:
+        info = terminal(addr)
+        labels = info.get("labels") or {}
+        if not is_agent(info) or labels.get("task") != args.task or labels.get("role") != role:
+            failed.append({"role": role, "why": "Recipient is disconnected or at a shell; use Resume or Queue next."})
+            continue
         # Just a tag: how to answer is in every agent's system prompt (roles/protocol.md).
         note = f"[desk chat] Kabeer{f' (to {names})' if len(targets) > 1 else ''}: {text}"
         if role == "cto":
             note += digest_for(args.task, addr)
+        if not expect_reply(addr, "chat"):
+            failed.append({"role": role, "why": "Could not reserve the reply; message was not sent"})
+            continue
         why = send_text(addr, note)
         if why:
             failed.append({"role": role, "why": why})
         else:
             delivered.append(role); delivered_to.append(addr)
-            expect_reply(addr, "chat")
     rec = chat_append(args.task, {"from": "kabeer", "kind": "say", "to": [r for _, r in targets], "text": text,
                                   "delivered": delivered, "delivered_to": delivered_to, "failed": failed})
     print(json.dumps(rec))
@@ -971,6 +1074,355 @@ def tell_cto(slug, text, skip=None):
     if cto:
         send_text(cto["address"], f"[desk chat] {text} No reply needed.")
     return cto
+
+
+def runtime_chats():
+    records = []
+    try:
+        names = [x for x in os.listdir(CHAT) if x.endswith(".jsonl")]
+    except OSError:
+        return records
+    for name in names:
+        slug = name[:-6]
+        thread = chat_read(slug)
+        name = thread[0].get("name", slug) if thread else slug
+        records.extend([{**row, "task": slug, "desk_name": name} for row in thread[-100:]])
+    return records
+
+
+def runtime_state(args):
+    store = runtime_store(); data = store.load(); terminal_map = runtime_terminals()
+    if any(x.get("state") == "dispatching" for x in data["queue"]):
+        with store.dispatch_lock():
+            store.mutate(recover_interrupted_claims)
+        data = store.load()
+    if any(x.get("state") == "pending" for x in data["queue"]): wake_queue()
+    sessions = [runtime_session_view(x, terminal_map) for x in data["sessions"]]
+    if args.task: sessions = [x for x in sessions if x.get("task") == args.task]
+    queue = [x for x in data["queue"] if not args.task or x.get("task") == args.task]
+    print(json.dumps({"sessions": sessions, "queue": queue,
+                      "attention": runtime_attention(data, terminal_map, runtime_chats())}))
+
+
+def runtime_adopt(_args):
+    terminal_map = runtime_terminals(); roles = {r["id"]: r for r in load_roles()}
+    def adopt(data):
+        adopted = []
+        for address, info in terminal_map.items():
+            labels = info.get("labels") or {}
+            if not labels.get("role") or not labels.get("task"): continue
+            role = roles.get(labels["role"], {})
+            argv = (info.get("foreground") or {}).get("argv") or []
+            cli = role.get("cli") or labels.get("cli") or "claude"
+            identity = None
+            for flag in ("--resume", "--session-id"):
+                if flag in argv and argv.index(flag) + 1 < len(argv): identity = argv[argv.index(flag) + 1]
+            existing = next((r for r in data["sessions"] if r.get("address") == address), {})
+            config = adapter_config(role)
+            record = upsert_session(data, {"address": address, "role": labels["role"], "task": labels["task"],
+                "cwd": info.get("cwd"), "cli": cli, "conversation": existing.get("conversation") or identity,
+                "role_config": existing.get("role_config") or role,
+                "capabilities": {"resume": bool(config.get("resume_args")), "fork": bool(config.get("fork_args"))},
+                "git_root": (repo_of(info.get("cwd")) or {}).get("top"),
+                "space": labels.get("herdr.space"), "tab": labels.get("herdr.tab"), "at": existing.get("at") or int(time.time() * 1000)})
+            adopted.append(runtime_session_view(record, terminal_map))
+        return adopted
+    print(json.dumps({"sessions": runtime_store().mutate(adopt)}))
+
+
+def runtime_recover(args):
+    store = runtime_store()
+    def claim(data):
+        rec = next((x for x in data["sessions"] if x["id"] == args.session), None)
+        if not rec: raise DeskRuntimeError("That saved session no longer exists")
+        if rec.get("recovering"): raise DeskRuntimeError("Recovery is already starting; check its terminal before retrying")
+        view = runtime_session_view(rec, runtime_terminals())
+        if view["state"] == "active": raise DeskRuntimeError("That session is already running")
+        if not view["can_resume"]: raise DeskRuntimeError(view.get("reason") or "This session cannot be resumed")
+        rec.update(recovering=True, recovery_at=int(time.time() * 1000))
+        return dict(rec)
+    rec = store.mutate(claim)
+    def release():
+        store.mutate(lambda data: next(x for x in data["sessions"] if x["id"] == args.session).update(recovering=False))
+    role = role_for_session(rec)
+    if not role:
+        release(); die("This role has no saved launch configuration")
+    try:
+        command = argv_for(role, "") + adapter_args(role, "resume", rec["conversation"])
+    except (DeskRuntimeError, SystemExit):
+        release(); raise
+    info = terminal(rec.get("address"))
+    shell_names = {"zsh", "bash", "sh", "fish", "nu", "dash", "ksh"}
+    foreground = (info or {}).get("foreground") or {}
+    argv = foreground.get("argv") or []
+    executable = os.path.basename(argv[0]) if argv else foreground.get("name")
+    if info and info.get("state") == "live":
+        if executable not in shell_names:
+            release(); die("This terminal is occupied; recovery never replaces a running program")
+        result = sh(["hc", "send", rec["address"], "exec " + shlex.join(command)])
+        if result.returncode:
+            # A transport error may follow a successful send: never inject a retry.
+            die("Recovery delivery is uncertain. Check the terminal before retrying.")
+        address = rec["address"]
+    else:
+        space = rec.get("space") or "spteam" + secrets.token_hex(8)
+        tab = rec.get("tab") or "tb" + secrets.token_hex(16)
+        shell = os.environ.get("SHELL") or "/bin/zsh"
+        launch = ["hc", "run", "--bg", "--outlive-parent", "--cwd", rec["cwd"], "--no-parent",
+            "--label", "role=" + rec["role"], "--label", "task=" + rec["task"],
+            "--label", "herdr.space=" + space, "--label", "herdr.tab=" + tab,
+            "--", shell, "-lic", 'exec "$@"', "team-role"] + command
+        result = sh(launch)
+        if result.returncode: die("Recovery launch is uncertain. Check live terminals before retrying.")
+        try: address = json.loads(result.stdout)["address"]
+        except (ValueError, KeyError): die("Recovery launch returned no terminal identity; check live terminals before retrying.")
+        def remap(data):
+            record = next(x for x in data["sessions"] if x["id"] == rec["id"])
+            old = record["address"]; record.update(address=address, space=space, tab=tab)
+            for item in data["queue"]:
+                if item["state"] == "pending":
+                    for target in item["targets"]:
+                        if target["address"] == old: target["address"] = address
+        store.mutate(remap)
+    print(json.dumps({"address": address, "task": rec["task"], "session": rec["id"]}))
+
+
+def wake_queue():
+    store = runtime_store()
+    if not any(x.get("state") == "pending" for x in store.load()["queue"]): return
+    with store.watch_lock() as available:
+        if not available: return
+    # Release the probe lock before the child tries to acquire the singleton lock.
+    env = {k: v for k, v in os.environ.items() if k != "HC_TERMINAL_ID"}
+    subprocess.Popen([SELF, "queue-watch"], env=env, stdin=subprocess.DEVNULL,
+                     stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, start_new_session=True)
+
+
+def runtime_queue(args):
+    targets = []
+    for value in args.to:
+        address, role = value.split(":", 1) if ":" in value else (value, value)
+        info = terminal(address); labels = info.get("labels") or {}
+        if labels.get("task") != args.task or labels.get("role") != role:
+            die("Queue recipient does not belong to this desk and role")
+        target = {"address": address, "role": role, "cli": agent_identity(info)}
+        if target not in targets: targets.append(target)
+    item = runtime_store().mutate(lambda data: dict(runtime_queue_item(data, args.task, " ".join(args.text), targets)))
+    wake_queue()
+    print(json.dumps(item))
+
+
+def runtime_queue_edit(args):
+    text = (args.text if isinstance(args.text, str) else " ".join(args.text or [])).strip()
+    if not text: die("Queued text cannot be empty")
+    def edit(data):
+        item = runtime_find_queue(data, args.id)
+        if item["state"] != "pending": raise DeskRuntimeError("Only a pending message can be edited")
+        item["text"] = text; return dict(item)
+    print(json.dumps(runtime_store().mutate(edit)))
+
+
+def runtime_queue_move(args):
+    def move(data):
+        item = runtime_find_queue(data, args.id)
+        if item["state"] != "pending": raise DeskRuntimeError("Only a pending message can be reordered")
+        items = sorted([x for x in data["queue"] if x["state"] == "pending" and x["task"] == item["task"]], key=lambda x: x["position"])
+        place = items.index(item) + (-1 if args.direction == "up" else 1)
+        if 0 <= place < len(items):
+            here = items.index(item); items[here], items[place] = items[place], items[here]
+        for n, value in enumerate(items): value["position"] = n
+        return dict(item)
+    print(json.dumps(runtime_store().mutate(move)))
+
+
+def runtime_queue_cancel(args):
+    def cancel(data):
+        item = runtime_find_queue(data, args.id)
+        if item["state"] not in ("pending", "failed", "uncertain"):
+            raise DeskRuntimeError("Only a pending or failed message can be dismissed")
+        item["state"] = "cancelled"; runtime_reorder(data); return dict(item)
+    print(json.dumps(runtime_store().mutate(cancel)))
+
+
+def runtime_queue_dispatch_locked(store, _args):
+    # The caller owns Store.dispatch_lock for this entire snapshot/claim/send
+    # transition. Do not move terminal_map outside that critical section.
+    terminal_map = runtime_terminals()
+    def claim(data):
+        recover_interrupted_claims(data)
+        # Keep FIFO per recipient while allowing other projects to make progress.
+        reserved = set()
+        for item in sorted(data["queue"], key=lambda q: q.get("position", 0)):
+            if item.get("state") != "pending": continue
+            addresses = {t["address"] for t in item["targets"]}
+            if addresses & reserved: continue
+            ready = True
+            for target in item["targets"]:
+                info = terminal_map.get(target["address"])
+                labels = (info or {}).get("labels") or {}
+                if not is_agent(info) or labels.get("task") != item["task"] or labels.get("role") != target["role"]:
+                    item.update(state="failed", error="Recipient is disconnected or belongs to a different desk; message was not sent")
+                    return dict(item)
+                state = (info.get("status") or {}).get("state")
+                if state not in ("idle", "done") or labels.get("awaiting"): ready = False
+            if not ready:
+                reserved.update(addresses); continue
+            item["state"] = "dispatching"; item["claimed_at"] = int(time.time() * 1000)
+            return dict(item)
+        return None
+
+    claimed = store.mutate(claim)
+    if not claimed: print(json.dumps({"state": "waiting"})); return
+    if claimed.get("state") != "dispatching": print(json.dumps(claimed)); return
+    failures = []
+    for target in claimed["targets"]:
+        if not expect_reply(target["address"], "chat"):
+            why = "Could not reserve its reply; this recipient was not sent the message"
+            outcome = "not_sent"
+        else:
+            why = send_text(target["address"], "[desk chat] Kabeer: " + claimed["text"])
+            outcome = "uncertain" if why else "sent"
+        if why: failures.append({"role": target["role"], "why": why})
+        def record_delivery(data):
+            item = runtime_find_queue(data, claimed["id"])
+            item.setdefault("deliveries", {})[target["address"]] = {"state": outcome, "error": why}
+        store.mutate(record_delivery)
+    def finish(data):
+        item = runtime_find_queue(data, claimed["id"])
+        if failures: item.update(state="uncertain", error="; ".join(x["why"] for x in failures))
+        else:
+            item["state"] = "delivered"
+            chat_append(item["task"], {"from": "kabeer", "kind": "say", "to": [x["role"] for x in item["targets"]],
+                                        "text": item["text"], "delivered": [x["role"] for x in item["targets"]],
+                                        "delivered_to": [x["address"] for x in item["targets"]], "queued": True, "failed": []})
+        return dict(item)
+    print(json.dumps(store.mutate(finish)))
+
+
+def runtime_queue_dispatch(args):
+    store = runtime_store()
+    with store.dispatch_lock():
+        runtime_queue_dispatch_locked(store, args)
+
+
+def runtime_queue_watch(_args):
+    """One bounded dispatcher; later agent hooks or GUI reads rearm it."""
+    store = runtime_store()
+    with store.watch_lock() as available:
+        if not available: return
+        deadline = time.monotonic() + 20 * 60
+        while time.monotonic() < deadline:
+            if not any(x.get("state") == "pending" for x in store.load()["queue"]): return
+            runtime_queue_dispatch(_args)
+            time.sleep(3)
+
+
+def runtime_attention_dismiss(args):
+    def dismiss(data):
+        if args.id not in data["dismissed"]: data["dismissed"].append(args.id)
+        return {"dismissed": args.id}
+    print(json.dumps(runtime_store().mutate(dismiss)))
+
+
+def runtime_side(args):
+    """Create an independent read-only discussion desk. It never interrupts the source agent."""
+    store = runtime_store(); data = store.load(); terminal_map = runtime_terminals()
+    rec = next((x for x in data["sessions"] if x["id"] == args.session), None)
+    if not rec: die("That saved session no longer exists")
+    view = runtime_session_view(rec, terminal_map)
+    if args.kind == "fork":
+        return runtime_fork(args, rec, view)
+    if not args.text or not args.text.strip(): die("A side conversation needs a question")
+    base = "side-" + re.sub(r"[^a-z0-9]+", "-", rec.get("task", "desk"))[:28]
+    slug, number = base, 2
+    os.makedirs(CHAT, exist_ok=True)
+    while os.path.exists(os.path.join(CHAT, slug + ".jsonl")):
+        slug = base[:36] + "-" + str(number); number += 1
+    chat_append(slug, {"from": "kabeer", "kind": "desk", "name": "Side · " + rec.get("task", "Desk"),
+                       "folder": rec.get("cwd"), "project": os.path.basename(rec.get("cwd") or ""),
+                       "parent_task": rec.get("task"), "parent_session": rec["id"]})
+    role = role_for_session(rec)
+    if not role: die("This role has no saved launch configuration")
+    # A side discussion is explicitly read-only. It starts independently, so the
+    # original role keeps its terminal, context and task untouched.
+    prompt = "Side conversation only. Do not edit files, run mutations, start agents, push, or open a PR. Answer this question: " + args.text.strip()
+    launch = type("Args", (), {"role": role["id"], "repo": rec.get("cwd") or os.getcwd(), "brief": None, "task": prompt,
+                                 "slug": slug, "parent": None, "no_parent": True, "space": None, "requested": True,
+                                 "by": "desk", "share": True, "tab": None, "fresh_of": None, "note": None, "display_task": args.text.strip()})()
+    output = io.StringIO()
+    with contextlib.redirect_stdout(output): start(launch)
+    started = json.loads(output.getvalue())
+    print(json.dumps({"task": slug, "address": started.get("address"), "parent_task": rec.get("task")}))
+
+
+def runtime_fork(args, rec, view):
+    """Fork Claude's saved context into an owned git worktree.
+
+    The original terminal stays untouched. If creating the owned worktree or
+    launching its terminal fails, clean only that newly-created worktree/branch.
+    """
+    if not view.get("can_fork"):
+        die(view.get("fork_reason") or "This session cannot create an isolated fork")
+    repo = repo_of(rec.get("cwd") or "")
+    if not repo: die("Fork needs a git repository so it can isolate file changes in a worktree")
+    role = role_for_session(rec)
+    if not role: die("This role has no saved launch configuration")
+    slug_base = "fork-" + re.sub(r"[^a-z0-9]+", "-", rec.get("task", "desk"))[:28]
+    slug, number = slug_base, 2
+    while os.path.exists(os.path.join(CHAT, slug + ".jsonl")):
+        slug = slug_base[:36] + "-" + str(number); number += 1
+    stamp = time.strftime("%m%d-%H%M%S")
+    branch = "team/fork-%s-%s-%s" % (role["id"], stamp, secrets.token_hex(3))
+    path = os.path.join(WORKTREES, repo["name"], branch.replace("/", "-"))
+    made = False; launched = False
+    try:
+        os.makedirs(os.path.dirname(path), exist_ok=True)
+        added = sh(["git", "worktree", "add", "-b", branch, path, "HEAD"], cwd=repo["top"])
+        if added.returncode: die("Couldn't create isolated fork worktree: " + (added.stderr or added.stdout).strip())
+        made = True
+        space, tab = "spteam" + secrets.token_hex(8), "tb" + secrets.token_hex(16)
+        name = unique_name("%s-%s" % (role["id"], slug))
+        fork_role = {**role, "promptText": role.get("promptText", "") + "\n\nThis is an isolated conversation fork. Your current desk is " + slug + ". Work only in " + path + "; do not replay the previous task. The original desk remains unchanged."}
+        command = argv_for(fork_role, "") + adapter_args(fork_role, "fork", rec["conversation"]) + ([args.text] if args.text else [])
+        shell = os.environ.get("SHELL") or "/bin/zsh"
+        launch = ["hc", "run", "--bg", "--outlive-parent", "--name", name, "--cwd", path,
+                  "--label", "role=" + role["id"], "--label", "task=" + slug, "--label", "by=desk",
+                  "--label", "herdr.space=" + space, "--label", "herdr.tab=" + tab,
+                  "--no-parent", "--", shell, "-lic", 'exec "$@"', "team-role", *command]
+        result = sh(launch)
+        if result.returncode: die("Couldn't launch context fork: " + (result.stderr or result.stdout).strip())
+        launched = True
+        try: started = json.loads(result.stdout)
+        except ValueError: started = {}
+        chat_append(slug, {"from": "kabeer", "kind": "desk", "name": "Fork · " + rec.get("task", "Desk"),
+                           "folder": path, "project": repo["name"], "parent_task": rec.get("task"), "parent_session": rec["id"]})
+        chat_append(slug, {"from": "kabeer", "kind": "start", "role": role["id"], "address": started.get("address"),
+                           "text": "Started isolated context fork on " + branch})
+        if not started.get("address"): die("Fork may be running, but its address was not returned. Its worktree was preserved: " + path)
+        # Copy display context without copying actionable permission prompts.
+        for message in chat_read(rec["task"])[-50:]:
+            if message.get("kind") in ("say", "done", "blocked", "update", "ask", "answer"):
+                copied = {k: v for k, v in message.items() if k not in ("address", "failed", "delivered_to")}
+                chat_append(slug, {**copied, "copied_from": rec["task"]})
+        if args.text:
+            chat_append(slug, {"from": "kabeer", "kind": "say", "text": args.text, "to": [role["id"]], "delivered": [role["id"]], "delivered_to": [started["address"]]})
+            expect_reply(started["address"], "chat")
+        session = runtime_record(started.get("address"), role["id"], slug, path, rec.get("cli"), None, rec.get("task"),
+            capabilities={"resume": bool(adapter_config(fork_role).get("resume_args")), "fork": bool(adapter_config(fork_role).get("fork_args"))},
+            role_config=fork_role, space=space, tab=tab)
+        rename_tab(tab, role["name"] + " fork")
+        print(json.dumps({"task": slug, "address": started.get("address"), "session": session.get("id") if session else None,
+                          "parent_task": rec.get("task"), "branch": branch, "cwd": path}))
+    except SystemExit:
+        if made and not launched:
+            sh(["git", "worktree", "remove", path], cwd=repo["top"])
+            sh(["git", "branch", "-D", branch], cwd=repo["top"])
+        raise
+    except Exception:
+        if made and not launched:
+            sh(["git", "worktree", "remove", path], cwd=repo["top"])
+            sh(["git", "branch", "-D", branch], cwd=repo["top"])
+        raise
 
 
 def join(args):
@@ -1108,6 +1560,16 @@ def finish(args):
     sys.stdout.flush()
     if not args.keep_open:
         sh(["hc", "kill", target])
+        # An intentional wrap-up is terminal, unlike a crash/restart which remains
+        # recoverable. Mark only this known runtime record as finished.
+        try:
+            store = runtime_store()
+            def mark(data):
+                record = next((x for x in data["sessions"] if x.get("address") == target), None)
+                if record: record["finished"] = True
+            store.mutate(mark)
+        except (DeskRuntimeError, OSError):
+            pass
         for _ in range(20):  # so a wrap-up of the next agent sees this one gone
             if terminal(target).get("state") != "live":
                 break
@@ -1218,7 +1680,7 @@ def main():
     ro = sub.add_parser("route")
     ro.add_argument("role"); ro.add_argument("text", nargs="+")
     hk = sub.add_parser("hook")
-    hk.add_argument("cli", choices=["claude", "claude-compact", "claude-permission", "claude-tool", "codex"]); hk.add_argument("payload", nargs="*")
+    hk.add_argument("cli", choices=["claude", "claude-compact", "claude-permission", "claude-tool", "codex", "session"]); hk.add_argument("payload", nargs="*")
     pm = sub.add_parser("permit")
     pm.add_argument("--task", required=True); pm.add_argument("id"); pm.add_argument("decision", choices=["allow", "always", "deny"])
     pm.add_argument("--message", help="with deny: tell it what to do instead")
@@ -1248,6 +1710,25 @@ def main():
     fr = sub.add_parser("fresh")
     fr.add_argument("--address", required=True); fr.add_argument("--force", action="store_true")
     fr.add_argument("--take-over", action="store_true", help=argparse.SUPPRESS)
+    st = sub.add_parser("state")
+    st.add_argument("--task")
+    sub.add_parser("adopt")
+    rc = sub.add_parser("recover")
+    rc.add_argument("--session", required=True)
+    qu = sub.add_parser("queue")
+    qu.add_argument("--task", required=True); qu.add_argument("--to", action="append", default=[]); qu.add_argument("text", nargs="+")
+    qe = sub.add_parser("queue-edit")
+    qe.add_argument("--id", required=True); qe.add_argument("--text", required=True)
+    qm = sub.add_parser("queue-move")
+    qm.add_argument("--id", required=True); qm.add_argument("--direction", choices=["up", "down"], required=True)
+    qc = sub.add_parser("queue-cancel")
+    qc.add_argument("--id", required=True)
+    sub.add_parser("queue-dispatch")
+    sub.add_parser("queue-watch", help=argparse.SUPPRESS)
+    ad = sub.add_parser("attention-dismiss")
+    ad.add_argument("--id", required=True)
+    sd = sub.add_parser("side")
+    sd.add_argument("--session", required=True); sd.add_argument("--kind", choices=["side", "fork"], required=True); sd.add_argument("--text")
     sub.add_parser("roles")
     args = p.parse_args()
     if args.cmd == "start":
@@ -1284,9 +1765,34 @@ def main():
         new_desk(args)
     elif args.cmd == "join":
         join(args)
+    elif args.cmd == "state":
+        runtime_state(args)
+    elif args.cmd == "adopt":
+        runtime_adopt(args)
+    elif args.cmd == "recover":
+        runtime_recover(args)
+    elif args.cmd == "queue":
+        runtime_queue(args)
+    elif args.cmd == "queue-edit":
+        runtime_queue_edit(args)
+    elif args.cmd == "queue-move":
+        runtime_queue_move(args)
+    elif args.cmd == "queue-cancel":
+        runtime_queue_cancel(args)
+    elif args.cmd == "queue-dispatch":
+        runtime_queue_dispatch(args)
+    elif args.cmd == "queue-watch":
+        runtime_queue_watch(args)
+    elif args.cmd == "attention-dismiss":
+        runtime_attention_dismiss(args)
+    elif args.cmd == "side":
+        runtime_side(args)
     else:
         print(json.dumps([{k: r.get(k) for k in ("id", "name", "cli", "model", "worktree", "on_request")} for r in load_roles()]))
 
 
 if __name__ == "__main__":
-    main()
+    try:
+        main()
+    except DeskRuntimeError as exc:
+        die(str(exc))

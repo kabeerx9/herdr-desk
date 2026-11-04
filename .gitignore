@@ -10,6 +10,11 @@
 !/bin/
 /bin/*
 !/bin/team
+!/bin/desk_runtime.py
+!/bin/test_desk_runtime.py
+!/bin/test_team_workflows.py
+!/bin/desk_review.py
+!/bin/test_desk_review.py
 
 !/layouts/
 /layouts/*
@@ -31,3 +36,8 @@
 jsconfig.json
 gpui-kit.d.ts
 __pycache__/
+
+# Our workflow design and verification notes.
+!/docs/
+/docs/*
+!/docs/plans/
