@@ -3,6 +3,7 @@ import { h_flex, v_flex } from "gpui-base";
 import { theme, shared, setShared, terminals, agents, exec, run } from "herdr";
 import { icon, statusBadge, button, pill, tileColor } from "./ui.js";
 import { roleTile } from "./roles.js";
+import { runtimeData } from "./workflows.js";
 import { Desks, deskMembers, showTerminals, openTerminal } from "./desks.js";
 
 // The floating card at the chat's top right (layouts/desk-chat.json), after Codex's, and the one
@@ -94,9 +95,8 @@ export class DeskCard {
 
   // A worktree's diff: its terminal shown and focused, so Herdr's Changes panel follows it.
   openChanges(m) {
-    openTerminal(m.address);
-    run("layout.show", { id: "panel" });
-    run("layout.select", { stack: "panel-body", child: "changes" });
+    setShared("desk.review", { repo: m.cwd, address: m.address, role: m.role, task: this.slug, at: Date.now() });
+    showTerminals(false);
   }
 
   row(t, id, onClick, children, tip) {
@@ -173,6 +173,7 @@ export class DeskCard {
   }
 
   render(_cx) {
+    if (shared("desk.review")) return div().size(0);
     const t = theme(), slug = this.slug, d = slug ? this.desks.desk(slug) : null;
     if (!d) return h_flex().id("desk-card").p(4).child(this.switcher(t));
     // Over the terminals, or a narrow chat: just the name and the switch, folded.
@@ -180,7 +181,8 @@ export class DeskCard {
     const members = deskMembers(slug), subs = this.subagents(members), trees = this.worktrees();
     // An unnamed desk is "<folder> · <when>": the folder is its name, the time its subline.
     const [name, when] = d.name.includes(" · ") ? d.name.split(" · ") : [d.name, null];
-    const urgent = members.some((m) => m.status === "blocked");
+    const lost = (runtimeData().sessions ?? []).filter((s) => s.task === slug && s.state === "disconnected");
+    const urgent = lost.length > 0 || members.some((m) => m.status === "blocked");
     const where = d.project && d.project !== name ? d.project : when;
     const sub = folded ? (members.length ? this.summary(members, trees) : where) : where;
     const toggle = h_flex().id("card-toggle").size(24).flex_none().items_center().justify_center().rounded(6).cursor_pointer()
@@ -290,6 +292,7 @@ export class DeskCard {
     return v_flex().id("desk-card").w(WIDTH + 40)
       .child(header)
       .child(divider())
+      .when(lost.length > 0, (el) => el.child(div().mx(10).my(5).child(v_flex().gap(5).children(this.desks.workflow.disconnected(t, slug)))))
       .child(this.label(t, "Changes", trees.length))
       .children(changes.length ? changes : [this.note(t, "No worktrees yet")])
       .when(prs.length > 0, (el) => el.child(this.label(t, "Pull requests", prs.length)).children(prs))

@@ -1,8 +1,9 @@
 import { div, svg, image } from "gpui-kit";
 import { h_flex, v_flex } from "gpui-base";
-import { agents, panes, spaces, run } from "herdr";
+import { agents, panes, spaces, run, shared, notify } from "herdr";
 import { icon, pill, button, section, empty, card } from "./ui.js";
 import { openTerminal } from "./desks.js";
+import { runtimeData, runTeam, refreshRuntime, openDesk } from "./workflows.js";
 
 // The Inbox tab: every agent, grouped by what it needs from me, with enough
 // context (space › tab, what it's doing, branch, how long) to tell them apart.
@@ -15,8 +16,37 @@ const GROUPS = [
 
 // What the rail badge counts: agents waiting on me.
 export function inboxCount() {
-  const list = agents();
-  return { n: list.filter((a) => a.status === "blocked" || a.status === "done").length, blocked: list.some((a) => a.status === "blocked") };
+  const items = runtimeData().attention ?? [], covered = new Set(items.map((i) => i.address).filter(Boolean));
+  const rest = agents().filter((a) => !covered.has(a.address) && ["blocked", "done"].includes(a.status));
+  return { n: items.length + rest.length, blocked: items.some((i) => i.kind !== "done") || rest.some((a) => a.status === "blocked") };
+}
+
+function attentionCard(panel, t, item) {
+  const id = `attention-${item.id}`, expanded = Boolean(panel.collapsed[id]);
+  const open = () => item.task ? openDesk(item.task) : item.address ? openTerminal(item.address) : null;
+  const session = (runtimeData().sessions ?? []).find((s) => s.address === item.address && s.state === "disconnected");
+  const recoverable = item.kind === "disconnected" && session?.can_resume;
+  const act = (args, cx) => {
+    cx.spawn(async (cx) => {
+      try { await runTeam(args); refreshRuntime(cx, true); }
+      catch (e) { notify({ title: "Couldn't update the inbox", body: String(e?.message ?? e), level: "error", timeout: 6000 }); }
+      cx.notify();
+    });
+  };
+  return v_flex().id(id).mx(10).mb(7).px(10).py(9).gap(6).rounded(9).border_1().border_color(t.border).bg(t.raised)
+    .child(h_flex().gap(6).items_center()
+      .child(icon(item.kind === "disconnected" ? "terminal" : item.kind === "done" ? "check" : "bell", 13).text_color(item.kind === "done" ? t.done : t.blocked))
+      .child(div().min_w(0).flex_1().truncate().text_size(12).font_semibold().text_color(t.foreground).child(item.title || item.kind))
+      .child(div().text_size(10.5).text_color(t.dim).child(since(item.at) ?? "")))
+    .child(div().h(16).flex_none().text_size(10.5).text_color(t.dim).truncate().child(item.desk_name ?? item.task ?? item.address ?? "Desk"))
+    .when(Boolean(item.text), (el) => el.child(div().id(`${id}-text`).max_h(expanded ? 200 : 48).overflow_y_scrollbar().text_size(11.5).line_height(1.4).text_color(t.muted)
+      .child(item.text)))
+    .child(h_flex().gap(5).items_center().flex_wrap()
+      .child(button(t, `${id}-open`, "Open", open, { primary: true, disabled: !item.task && !item.address }))
+      .when(Boolean(recoverable), (el) => el.child(button(t, `${id}-resume`, "Resume", (_e, cx) => act(["recover", "--session", session.id], cx))))
+      .when(Boolean(item.text?.length > 150), (el) => el.child(button(t, `${id}-more`, expanded ? "Less" : "Details", (_e, cx) => panel.toggle(id, cx))))
+      .child(div().flex_1())
+      .when(!["permission", "disconnected"].includes(item.kind), (el) => el.child(button(t, `${id}-dismiss`, "Acknowledge", (_e, cx) => act(["attention-dismiss", "--id", item.id], cx), { tip: "Mark this item seen; no message is sent" }))));
 }
 
 const since = (ms) => {
@@ -61,10 +91,15 @@ function agentCard(panel, t, a, group, pane, tab) {
 
 export function inboxView(panel, t) {
   const list = agents();
-  if (!list.length) return v_flex().py(8).child(empty(t, "No agents running."));
+  const attention = runtimeData().attention ?? [];
+  const notices = v_flex().gap(2)
+    .child(section(t, "attention-heading", "Needs you", attention.length, true, () => {}))
+    .when(Boolean(shared("desk.runtime.error")), (el) => el.child(empty(t, "Session inbox unavailable: " + shared("desk.runtime.error"))))
+    .children(attention.map((item) => attentionCard(panel, t, item)));
+  if (!list.length) return v_flex().py(8).child(notices).when(!attention.length, (el) => el.child(empty(t, "Nothing waiting on you.")));
   const paneById = new Map(panes().map((p) => [p.pane, p]));
   const tabById = new Map(spaces().flatMap((s) => s.tabs).map((tab) => [tab.id, tab]));
-  return v_flex().py(8).children(GROUPS.map((group) => {
+  return v_flex().py(8).child(notices).children(GROUPS.map((group) => {
     const members = list.filter((a) => a.status === group.status).sort((x, y) => y.seq - x.seq);
     if (!members.length) return null;
     const key = `inbox-${group.status}`;

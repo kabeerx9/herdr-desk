@@ -3,6 +3,8 @@ import { h_flex, v_flex, TextareaState, Textarea, InputState, Input, TextView } 
 import { terminals, agents, panes, spaces, exec, home, appHome, readTextFile, watchFolder, notify, run, shared, setShared, hc, playSound, pickFolder } from "herdr";
 import { pill, button, empty, icon, statusBadge } from "./ui.js";
 import { Roles, roleTile, team, folderOf, findBriefs, startBrief, fileBrief } from "./roles.js";
+import { WorkflowControls, runtimeData, runTeam, refreshRuntime, openDesk } from "./workflows.js";
+import { ReviewView } from "./review.js";
 
 // Desks: each one an independent team (its own agents, thread and worktrees) that
 // bin/team keeps in ~/.herdr/team/<desk>.jsonl and on its agents' task=<desk> labels.
@@ -46,12 +48,17 @@ const span = (ms) => {
 // A desk's live agents, parents before their children.
 export function deskMembers(slug) {
   const status = new Map(agents().map((a) => [a.address, a.status]));
-  const live = terminals().filter((t) => t.state === "live" && t.labels?.task === slug && t.labels?.role)
+  const disconnected = new Set((runtimeData().sessions ?? []).filter((s) => ["disconnected", "finished", "recovering"].includes(s.state)).map((s) => s.address));
+  const live = terminals().filter((t) => t.state === "live" && t.labels?.task === slug && t.labels?.role && !disconnected.has(t.address))
     .map((t) => ({ address: t.address, role: t.labels.role, parent: t.parent, status: status.get(t.address) ?? t.status?.state ?? t.status ?? null,
       phase: t.labels.phase, note: t.labels.note, awaiting: t.labels.awaiting ?? null, space: t.labels["herdr.space"], cwd: t.cwd, created: t.created_ms ?? 0,
       ctx: Number(t.labels.ctx) || null, handingOff: (t.labels.awaiting ?? "").startsWith("fresh") }));
   const addrs = new Set(live.map((m) => m.address));
-  const depth = (m) => (m.parent && addrs.has(m.parent) ? 1 + depth(live.find((x) => x.address === m.parent)) : 0);
+  const depth = (m) => {
+    const seen = new Set([m.address]); let n = 0;
+    while (m.parent && addrs.has(m.parent) && !seen.has(m.parent)) { seen.add(m.parent); m = live.find((x) => x.address === m.parent); n++; }
+    return n;
+  };
   return live.map((m) => ({ ...m, depth: depth(m) }))
     .sort((a, b) => (a.role === "cto" ? -1 : b.role === "cto" ? 1 : a.depth - b.depth || a.created - b.created));
 }
@@ -115,6 +122,12 @@ export class Desks {
     this.copied = null;        // the message just copied (its check shows for 2s)
     this.expanded = new Set(); // long messages opened with "Show more"
     this.watch = new PhaseWatch();
+    this.workflow = new WorkflowControls(this);
+    this.review = new ReviewView();
+    this.review.init(cx);
+    this.sendMode = "now";
+    this.composeAt = 0; this.reviewAt = 0; this.reviewOpen = false;
+    this.drafts = {}; this.draftDesk = null;
 
     this.input = TextareaState.new({ placeholder: "Message the desk…  type @ to mention someone", rows: 2 });
     this.input.set_auto_grow(2, 8);
@@ -147,6 +160,26 @@ export class Desks {
     // Another mod can open a desk (shared "desk.view": the sidebar, the spaces list); load it.
     // "desk.here" (a space picked in the spaces list) points a new desk at that space.
     cx.timer.every(400, (cx) => {
+      const primary = this.wide || (!chatLayout() && this.toasts);
+      const compose = primary && shared("desk.compose");
+      if (compose?.at && compose.at !== this.composeAt) {
+        this.composeAt = compose.at;
+        this.syncDraft(compose.task ?? this.view);
+        setShared("desk.compose", null);
+        this.directTarget = compose.address ?? null; this.directTask = compose.task ?? null;
+        if (compose.task) openDesk(compose.task);
+        const note = `${compose.role ? `@${compose.role} ` : ""}${compose.text ?? ""}`;
+        this.input.set_value([this.input.value().trim(), note].filter(Boolean).join("\n\n"));
+        this.sendMode = "now";
+        this.input.focus();
+      }
+      const side = primary && shared("desk.side");
+      if (side?.at && side.at !== this.sideAt) { this.sideAt = side.at; this.workflow.question.set_value(""); cx.notify(); }
+      const review = primary && shared("desk.review");
+      if (review?.at && review.at !== this.reviewAt) {
+        this.reviewAt = review.at; this.reviewOpen = true;
+        this.review.open({ ...review, messages: this.messages }, cx);
+      }
       const here = shared("desk.here")?.at ?? 0;
       if (here !== this.hereAt) { this.hereAt = here; if (this.loaded !== undefined) { this.newTarget = null; cx.notify(); } }
       if (this.loaded !== undefined && this.view !== this.loaded) this.reload(cx);
@@ -175,9 +208,20 @@ export class Desks {
   go(view, cx) {
     setShared("desk.view", view);
     this.addOpen = false; this.detailsOpen = false; this.confirmDelete = 0; this.mention = null;
+    this.syncDraft(view);
     if (view !== "list" && view !== "new") this.markRead(view);
     this.reload(cx);
   }
+  syncDraft(task) {
+    if (this.draftDesk === task) return;
+    if (this.draftDesk) this.drafts[this.draftDesk] = { text: this.input.value(), address: this.directTarget, task: this.directTask };
+    const draft = task && this.drafts[task];
+    this.draftDesk = task;
+    this.directTarget = draft?.address ?? null; this.directTask = draft?.task ?? null;
+    this.input.set_value(draft?.text ?? "");
+    this.mention = null;
+  }
+
   desk(slug = this.view) { return this.desks.find((d) => d.slug === slug) ?? null; }
   // The open desk is in front of you: the panel's Desks tab, or the chat as the main view.
   onScreen() { return shared("desk.tab") === "desks" || (chatLayout() && !shared("deskchat.terminals")); }
@@ -203,7 +247,7 @@ export class Desks {
         try { tail = JSON.parse(last); } catch {}
         const meta = head?.kind === "desk" ? head : {};
         return { slug, name: meta.name ?? slug, folder: meta.folder ?? null, project: meta.project ?? null,
-          at: Number(mtime) * 1000, n: Number(n), last: tail };
+          parent_task: meta.parent_task ?? null, at: Number(mtime) * 1000, n: Number(n), last: tail };
       });
       // Toast what agents say in desks you aren't looking at.
       if (this.toasts && this.counts) for (const d of desks) {
@@ -301,7 +345,7 @@ export class Desks {
     this.acting = id;
     cx.notify();
     cx.spawn(async (cx) => {
-      try { await fn(); } catch (e) { notify({ title: "Something went wrong", body: String(e?.message ?? e).slice(0, 200), level: "error", timeout: 6000 }); }
+      try { await fn(cx); } catch (e) { notify({ title: "Something went wrong", body: String(e?.message ?? e).slice(0, 200), level: "error", timeout: 6000 }); }
       this.acting = null;
       await this.reload(cx);
     });
@@ -422,16 +466,26 @@ export class Desks {
     const d = this.desk(), members = this.members(), text = this.input.content().text.trim();
     if (!d || !text || this.acting) return;
     const { roles } = this.recipients(members);
-    if (!roles.length) return notify({ title: "Nobody's here", body: "Add someone to this desk first.", level: "warning", timeout: 4000 });
-    const to = members.filter((m) => roles.includes(m.role)).flatMap((m) => ["--to", `${m.address}:${m.role}`]);
-    this.input.set_value("");
-    this.mention = null;
-    this.busy("send", async () => {
-      const r = await exec(TEAM(), ["post", "--task", d.slug, ...to, text]);
-      if (r.code !== 0) { this.input.set_value(text); throw new Error(r.stderr.trim() || r.stdout.trim()); }
-      const rec = JSON.parse(r.stdout);
-      if (rec.failed?.length) notify({ title: "Not delivered to everyone", body: rec.failed.map((f) => `${this.roles.byId(f.role)?.name ?? f.role}: ${f.why}`).join("\n"), level: "warning", timeout: 7000 });
+    if (!roles.length) return notify({ title: "Nobody's here", body: "Resume or add an agent first.", level: "warning", timeout: 4000 });
+    const direct = this.directTask === d.slug && members.find((m) => m.address === this.directTarget && roles.includes(m.role));
+    const targets = direct ? [direct] : members.filter((m) => roles.includes(m.role));
+    const to = targets.flatMap((m) => ["--to", `${m.address}:${m.role}`]);
+    const queued = this.sendMode === "queue";
+    this.input.set_value(""); this.mention = null;
+    this.busy("send", async (cx) => {
+      try {
+        const rec = await runTeam([queued ? "queue" : "post", "--task", d.slug, ...to, "--", text]);
+        if (rec.failed?.length) notify({ title: "Not delivered to everyone", body: rec.failed.map((f) => `${this.roles.byId(f.role)?.name ?? f.role}: ${f.why}`).join("\n"), level: "warning", timeout: 7000 });
+        refreshRuntime(cx, true);
+      } catch (e) { this.input.set_value(text); throw e; }
     }, cx);
+  }
+
+  openReview(m, d, cx) {
+    const request = { repo: m.cwd || d.folder, address: m.address, role: m.role, task: d.slug, at: Date.now() };
+    setShared("desk.review", request);
+    showTerminals(false);
+    if (!this.wide && !chatLayout()) { this.reviewOpen = true; this.review.open({ ...request, messages: this.messages }, cx); }
   }
 
   // ── pieces ────────────────────────────────────────────────────────────────
@@ -819,7 +873,8 @@ export class Desks {
         .child(`${kTokens(m.ctx)} tokens of context${this.overLimit(m) ? `, past the ${kTokens(this.roles.freshAt(m.role))} limit: compact it when it's free` : ""}`)))
       .child(h_flex().pl(30).gap(6).flex_wrap()
         .child(button(t, `${id}-go`, "Go", () => openTerminal(m.address)))
-        .when(role?.cli !== "codex", (el) => el
+        .child(button(t, `${id}-changes`, "Changes", (_e, cx) => this.openReview(m, d, cx), { iconName: "branch", tip: "Review this agent's worktree" }))
+        .when(role?.cli === "claude" || !role?.cli, (el) => el
           .child(button(t, `${id}-compact`, "Compact", (_e, cx) => this.compact(m, cx),
             { primary: this.overLimit(m), disabled: Boolean(this.acting) || m.handingOff || m.status === "working" || m.status === "blocked",
               tip: "Claude's /compact: same session, the history becomes a summary" }))
@@ -834,10 +889,12 @@ export class Desks {
           .child(button(t, `${id}-pr`, "Open PR", (_e, cx) => this.busy(`${id}-pr`, async () => {
             const r = await hc(["send", m.address, "Kabeer approved opening a PR for this work. Commit anything left on your branch, push it, and open a PR with gh pr create (what changed, how you verified it, and a link to the related PR from this desk if there is one). Then report the PR URL with team report done."]);
             if (r.code !== 0) throw new Error(r.stderr.trim() || "couldn't send; is it waiting on you?");
-          }, cx), { iconName: "pr", disabled: Boolean(this.acting), tip: "Ask it to push its branch and open a PR" }))));
+          }, cx), { iconName: "pr", disabled: Boolean(this.acting), tip: "Ask it to push its branch and open a PR" }))))
+      .child(div().pl(30).child(this.workflow.actions(t, m)));
   }
 
   deskView(t, d) {
+    this.syncDraft(d.slug);
     const members = this.members(d.slug), present = new Set(members.map((m) => m.role));
     const { roles: to, implicit } = this.recipients(members);
     const deleting = Date.now() < this.confirmDelete;
@@ -930,6 +987,10 @@ export class Desks {
     const text = this.input.value().trim();
     const canSend = Boolean(text) && to.length > 0 && !this.acting;
     const composer = v_flex().px(12).pt(8).pb(this.wide ? 18 : 12).gap(6).when(this.wide, (el) => el.w_full().max_w(COLUMN + 24))
+      .when(Boolean(shared("desk.runtime.error")), (el) => el.child(div().text_size(11).text_color(t.blocked).child("Session controls unavailable: " + shared("desk.runtime.error"))))
+      .children(this.workflow.disconnected(t, d.slug))
+      .when(Boolean(this.workflow.side), (el) => el.child(this.workflow.sideForm(t, d.slug)))
+      .child(this.workflow.queue(t, d.slug))
       .children(waiting.map((m) => this.permitCard(t, d, m)))
       .when(sugg.length > 0, (el) => el.child(h_flex().gap(5).flex_wrap()
         .children(sugg.map((o, i) => this.chip(t, `sg-${o.id}`, i === 0, o.name, (_e, cx) => this.pickMention(o, cx),
@@ -950,12 +1011,17 @@ export class Desks {
                 return h_flex().flex_none().h(22).pl(2).pr(7).gap(5).items_center().rounded(11).bg(t.raised).text_color(t.foreground)
                   .when(Boolean(role), (el) => el.child(roleTile(div, svg, t, role, 18))).child(role?.name ?? r);
               }))
-              .when(implicit, (el) => el.child(div().min_w(0).truncate().child("· @ to choose"))))
+              .when(implicit, (el) => el.child(div().min_w(0).truncate().child(this.directTarget && this.directTask === d.slug ? `· ${this.directTarget}` : "· @ to choose"))))
             .when(!to.length, (el) => el.child(div().truncate().child("Nobody here yet: add someone above"))))
+          .child(h_flex().gap(3).flex_none()
+            .child(button(t, "send-now-mode", "Send now", (_e, cx) => { this.sendMode = "now"; cx.notify(); },
+              { primary: this.sendMode === "now", tip: "Send to the agent now using its normal terminal input behavior" }))
+            .child(button(t, "send-queue-mode", "Queue next", (_e, cx) => { this.sendMode = "queue"; cx.notify(); },
+              { primary: this.sendMode === "queue", tip: "Keep this message until its recipients are idle" })))
           .child(h_flex().id("desk-send").size(30).flex_none().items_center().justify_center().rounded(15)
             .bg(canSend ? t.solid : t.raised).text_color(canSend ? t.solid_foreground : t.dim)
             .when(canSend, (el) => el.cursor_pointer().hover((s) => s.opacity(0.85)))
-            .tooltip(canSend ? "Send (Enter) · new line: Shift+Enter" : to.length ? "Type a message" : "Add someone first")
+            .tooltip(canSend ? `${this.sendMode === "queue" ? "Queue" : "Send"} (Enter) · new line: Shift+Enter` : to.length ? "Type a message" : "Add someone first")
             .on_click((_e, cx) => { if (canSend) this.send(cx); })
             .child(this.acting === "send" ? svg("mods/workspace-chrome/spinner.svg").size(14).spin(900) : icon("arrow-up", 14)))));
 
@@ -967,12 +1033,18 @@ export class Desks {
       .when(!this.wide, (el) => el.child(header))
       .when(Boolean(details) && !this.wide, (el) => el.child(details))
       .when(this.wide, (el) => el.child(div().h(14).flex_none()))
+      .when(Boolean(d.parent_task), (el) => el.child(band(h_flex().px(12).py(6).gap(8).items_center()
+        .child(button(t, "side-return", "Back to original desk", () => openDesk(d.parent_task), { iconName: "back" }))
+        .child(div().text_size(11).text_color(t.dim).child("Separate conversation")))))
       .when(Boolean(briefs), (el) => el.child(band(briefs)))
       .child(thread)
       .child(band(composer));
   }
 
   render(t) {
+    const request = shared("desk.review");
+    if (this.reviewOpen && request?.task === this.view) return this.review.render(t);
+    if (request && request.at === this.reviewAt && request.task !== this.view) setShared("desk.review", null);
     if (this.starting) return v_flex().size_full().items_center().justify_center()
       .child(empty(t, `Starting a desk in ${this.starting.split("/").pop() || this.starting}…`));
     const view = this.view;

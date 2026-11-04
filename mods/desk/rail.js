@@ -5,11 +5,14 @@ import { TABS, currentTab, isOpen, setOpen, choose } from "./tabs.js";
 import { fetchUsage, railMeters, openLimits } from "./usage.js";
 import { inboxCount } from "./inbox.js";
 import { showTerminals } from "./desks.js";
+import { RuntimeWatch } from "./workflows.js";
 
 // The always-visible edge of the Desk: one icon per tab, a badge for counts.
 export class Rail {
   init(_props, cx) {
     this.hovered = null;
+    this.runtime = new RuntimeWatch();
+    this.runtime.init(cx);
     // Bring the panel back the way it was left.
     setOpen(isOpen());
     // The rail is always shown, so it keeps usage fresh for both copies.
