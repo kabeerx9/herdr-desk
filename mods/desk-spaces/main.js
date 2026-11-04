@@ -1,9 +1,9 @@
 // The Desk sidebar, as a thread list: Space (a project) → its Desks → each desk's Members.
-// A space is a quiet header (its repo, else its name; a worktree space nests under its repo by
-// branch). A desk is a thread: its title, one aggregate status mark, its age only on hover.
-// A member is a route into that desk: role glyph, role, session title, status. Agents outside
-// any desk are plain rows; finished ones the triage put away sit on a quiet Settled shelf.
-// One selected row (a full-width `selected` fill), `hover` under the pointer, nothing else.
+// Laid out as T3 Code's sidebar: a space is a project folder header (its repo, else its name; a
+// worktree space nests under its repo by branch). A desk is a thread row: its title, then its
+// state ("Working", "Done") or its age. Members show only under a desk with a team: role, session
+// title, a mark. Agents outside any desk are thread rows; ones put away sit on a Settled shelf.
+// One selected row (`selected`; in light a white card with a hairline), `hover` under the pointer.
 // Rows never re-sort under the pointer. Right-click a space for its menu; drag one to reorder.
 //
 // Shared state: a desk row sets "desk.view" = slug and "desk.route" = null (the team chat);
@@ -12,7 +12,7 @@
 
 import { View, div, svg } from "gpui-kit";
 import { v_flex, h_flex } from "gpui-base";
-import { spaces, machines, panes, run, openOverlay, closeOverlay, props, pickFolder, exec, hc, theme, shared, setShared, watchFolder, window, layout, agents, terminals, setAgentOrder, readTextFile, appHome, home, notify } from "herdr";
+import { spaces, machines, panes, run, openOverlay, closeOverlay, props, pickFolder, exec, hc, theme, shared, setShared, watchFolder, window, layout, agents, terminals, setAgentOrder, readTextFile, appHome, home, notify, settings } from "herdr";
 
 function find(node, id) {
   if (node?.id === id) return node;
@@ -41,7 +41,6 @@ function place(s, ps) {
   const tabs = new Set((s.tabs ?? []).map((c) => c.id));
   return ps.find((p) => tabs.has(p.tab) && p.cwd)?.cwd || s.folder;
 }
-const ROW = 28;
 const where = (s, ps) => JSON.stringify([s.machine ?? null, place(s, ps)]);
 const base = (path) => path.replace(/\/+$/, "").split("/").pop();
 // Changes made outside Herdr (an editor's save, a commit in another app): looked
@@ -65,10 +64,20 @@ const MARK_COLOR = { working: "working", blocked: "blocked", done: "done", idle:
 function statusMark(t, status, size = 12) {
   const kind = MARKS.includes(status) ? status : "idle";
   const el = svg(`mods/desk/icons/marks/${kind}.svg`).size(size).flex_none().text_color(t[MARK_COLOR[kind]] ?? t.dim);
-  if (kind === "working") return el.spin(900);
-  if (kind === "blocked") return el.loop("opacity", { from: 0.45, to: 1, period: 1400 });
-  return el;
+  return kind === "working" ? el.spin(900) : el;
 }
+// T3's sidebar geometry: a 32px folder header, 36px thread rows whose titles line up past the
+// folder's icon (10 inset + 16 icon + 10 gap), 6px radius, 14px titles, 12px meta.
+const FOLDER_H = 32, THREAD_H = 36, MEMBER_H = 32, INSET = 10, TITLE_X = 36;
+// T3 light: a zinc-50 sidebar whose selected row is a white card with a hairline ring.
+const light = () => !settings().dark;
+const mutedFg = (t) => (light() ? t.dim : t.muted);
+// A thread's state in its time slot, as T3 shows it: an icon and a word, in the state's colour.
+const STATE = {
+  working: ["Working", "working"], blocked: ["Needs you", "blocked"], failed: ["Failed", "blocked"],
+  done: ["Done", "done"], queued: ["Queued", "muted"], disconnected: ["Offline", "dim"],
+};
+const DOT = { working: "working", blocked: "blocked", failed: "blocked", done: "done" };
 const URGENCY = ["blocked", "failed", "working", "queued", "done", "disconnected", "idle"];
 function mostUrgent(statuses) {
   let best = null;
@@ -208,20 +217,24 @@ class JoinMenu {
   }
 }
 
+// A 28px header control (T3's sidebar header icon button): a 16px icon, the muted label colour,
+// the hover fill under it.
+function iconButton(t, id, name, tip, onClick) {
+  return h_flex().id(id).size(28).flex_none().items_center().justify_center().rounded(6)
+    .text_color(mutedFg(t)).cursor_pointer().hover((s) => s.bg(t.hover).text_color(t.foreground)).tooltip(tip)
+    .on_mouse_down("left", (_e, cx) => cx.stop_propagation()).on_click(onClick).child(wc(name, 16));
+}
+
 // The sidebar's top (the layout's "brand" block, which drags the window): room for the macOS
-// window buttons, then search and fold.
+// window buttons, then the fold. Search and "new" sit in the list's own header row below.
 class Top {
   render() {
     const t = theme(), collapsed = narrow();
-    const btn = (id, name, tip, onClick) => h_flex().id(id).size(26).flex_none().items_center().justify_center().rounded(6)
-      .text_color(t.dim).cursor_pointer().hover((s) => s.bg(t.hover).text_color(t.foreground)).tooltip(tip)
-      .on_mouse_down("left", (_e, cx) => cx.stop_propagation()).on_click(onClick).child(wc(name, 15));
     if (collapsed && mac() && !window()?.fullscreen) return div().size_full().bg(t.chrome);
-    return h_flex().size_full().bg(t.chrome).pr(8).gap(2).items_center()
+    return h_flex().size_full().bg(t.chrome).pr(8).items_center()
       .pl(mac() && !window()?.fullscreen && !collapsed ? 80 : 8)
       .child(div().flex_1())
-      .when(!collapsed, (el) => el.child(btn("top-search", "search", "Search", () => run("mod.open", { name: "picker" }))))
-      .child(btn("top-fold", "sidebar", collapsed ? "Show the sidebar" : "Hide the sidebar", () => toggleSidebar()));
+      .child(iconButton(t, "top-fold", "sidebar", collapsed ? "Show the sidebar" : "Hide the sidebar", () => toggleSidebar()));
   }
 }
 
@@ -504,10 +517,12 @@ export default class Spaces extends View {
 
   // ── rows ───────────────────────────────────────────────────────────────────
 
-  // Every row: 28px, full width, one radius. Selected is the one fill; hover the quieter one.
-  rowBase(t, id, { selected = false, pl = 8, tip } = {}) {
-    return h_flex().id(id).relative().h(ROW).flex_none().pl(pl).pr(6).gap(8).items_center().rounded(6).cursor_pointer()
-      .bg(selected ? t.selected : CLEAR)
+  // Every row: full width, a 6px radius. Selected is the one fill (in light, T3's white card with
+  // a hairline ring on the zinc sidebar); hover the quieter one.
+  rowBase(t, id, { selected = false, pl = INSET, h = THREAD_H, tip } = {}) {
+    return h_flex().id(id).relative().h(h).flex_none().pl(pl).pr(INSET).gap(10).items_center().rounded(6).cursor_pointer()
+      .bg(selected ? (light() ? t.canvas : t.selected) : CLEAR)
+      .when(selected && light(), (el) => el.border_1().border_color(t.border))
       .when(!selected, (el) => el.hover((s) => s.bg(t.hover)))
       .when(Boolean(tip), (el) => el.tooltip(tip))
       .on_hover((h, cx) => {
@@ -517,73 +532,96 @@ export default class Spaces extends View {
   }
 
   // A small square control inside a row (fold, new desk, settle, snooze); stops the row's press.
-  rowButton(t, id, iconEl, tip, onClick, on = false) {
-    return h_flex().id(id).size(20).flex_none().items_center().justify_center().rounded(5)
-      .text_color(on ? t.foreground : t.dim).hover((s) => s.bg(t.selected).text_color(t.foreground)).tooltip(tip)
+  rowButton(t, id, iconEl, tip, onClick, on = false, size = 24) {
+    return h_flex().id(id).size(size).flex_none().items_center().justify_center().rounded(6)
+      .text_color(on ? t.foreground : mutedFg(t)).hover((s) => s.text_color(t.foreground)).tooltip(tip)
       .on_mouse_down("left", (_e, cx) => cx.stop_propagation())
       .on_mouse_up("left", (_e, cx) => cx.stop_propagation())
       .on_click((_e, cx) => { cx.stop_propagation(); onClick(cx); cx.notify(); })
       .child(iconEl);
   }
 
-  markSlot(t, status) {
-    return h_flex().w(16).flex_none().justify_center().when(Boolean(status) && status !== "idle", (el) => el.child(statusMark(t, status, 12)));
+  // T3's time slot: a state (icon + word, its colour) while there is one, else the age; on hover
+  // the row's actions take the slot.
+  trailing(t, { status, at, tools = [] }) {
+    const slot = h_flex().h(24).min_w(32).flex_none().justify_end().items_center();
+    if (tools.length) return slot.gap(0).children(tools);
+    const state = STATE[status];
+    if (state) return slot.gap(4).text_size(12).font_medium().text_color(t[state[1]] ?? t.dim)
+      .child(statusMark(t, status, 12)).child(div().child(state[0]));
+    return slot.when(Boolean(at), (el) => el.text_size(12).text_color(t.dim).child(ago(at)));
   }
 
-  // A desk: its title, its age on hover, one mark for its members.
-  deskRow(t, w, desk) {
+  // Settle and snooze for an agent's session (nothing while it works or needs you); "back" for
+  // one put away.
+  triageTools(t, a, id, put) {
+    const session = sessionOf(a.address);
+    if (!session || !triageOn() || ["working", "blocked"].includes(a.status)) return [];
+    if (put) return [this.rowButton(t, `${id}-back`, dk("back", 12), "Bring it back", (cx) => triage(cx, "unsettle", a.address))];
+    return [this.rowButton(t, `${id}-snooze`, dk("clock", 12), "Snooze", () => { this.snoozing = this.snoozing === id ? null : id; }, this.snoozing === id),
+      this.rowButton(t, `${id}-settle`, dk("check", 12), "Settle: put it away until it has new work", (cx) => triage(cx, "settle", a.address))];
+  }
+
+  // The snooze times, a row under the one whose clock was pressed.
+  snoozeRow(t, a, id, pl) {
+    return h_flex().id(`${id}-times`).h(32).flex_none().pl(pl).pr(INSET).gap(4).items_center()
+      .children(snoozeOptions().map((o) => div().id(`${id}-snz-${o.id}`).h(24).px(8).flex().items_center().rounded(6).cursor_pointer()
+        .border_1().border_color(t.border).text_size(12).text_color(mutedFg(t)).hover((s) => s.bg(t.hover).text_color(t.foreground))
+        .on_click((_e, cx) => { cx.stop_propagation(); this.snoozing = null; triage(cx, "snooze", a.address, o.until); }).child(o.label)));
+  }
+
+  // A desk: a T3 thread row. Its title (medium; regular and muted once it has nothing new), then
+  // its state or age. A desk of one is that agent's thread, so its hover carries settle / snooze.
+  deskRow(t, w, desk, x) {
     const id = `desk-${desk.slug}`, hovered = this.hoverRow === id;
     const route = shared("desk.route");
-    const selected = chatView() && shared("desk.view") === desk.slug && !(route?.address && route.task === desk.slug);
+    const selected = chatView() && shared("desk.view") === desk.slug && !(route?.address && route.task === desk.slug && desk.members.length > 1);
     const info = this.deskInfo.get(desk.slug);
-    return this.rowBase(t, id, { selected, pl: 30, tip: desk.full })
+    const solo = desk.members.length === 1 ? desk.members[0].a : null;
+    const tools = hovered && solo ? this.triageTools(t, solo, id, false) : [];
+    const recede = !selected && desk.status === "idle";
+    const row = this.rowBase(t, id, { selected, pl: TITLE_X + x, tip: desk.full })
       .on_click(() => this.openDesk(w, desk.slug))
-      .child(div().min_w(0).flex_1().truncate().text_size(13).text_color(selected || desk.status !== "idle" ? t.foreground : t.muted).child(desk.title))
-      .when(hovered && Boolean(info?.at), (el) => el.child(div().flex_none().text_size(11).text_color(t.dim).child(ago(info.at))))
-      .child(this.markSlot(t, desk.status));
+      .child(div().min_w(0).flex_1().truncate().text_size(14).when(!recede, (el) => el.font_medium())
+        .text_color(recede ? (hovered ? t.foreground : mutedFg(t)) : t.foreground).child(desk.title))
+      .child(this.trailing(t, { status: desk.status, at: info?.at, tools }));
+    return this.snoozing === id && solo ? [row, this.snoozeRow(t, solo, id, TITLE_X + x)] : [row];
   }
 
-  // One agent row: a desk member (indented under its desk on a guide line, role glyph, role and
-  // its session title), or an agent outside any desk (plain: its name, its mark).
-  agentRow(t, { a, l }, g, ps, desk, { put = false, deskTitle = null, solo = false } = {}) {
+  // One agent row: a member of a desk with a team (a quieter 32px row under its desk: role, then
+  // its session title, its state as a mark), or an agent outside any desk (a thread row of its own).
+  agentRow(t, { a, l }, g, ps, desk, { put = false, deskTitle = null, x = 0 } = {}) {
     const role = l.role ? this.roles.get(l.role) : null;
-    const member = Boolean(role && l.task);
+    const member = Boolean(role && l.task) && !put;
     const session = sessionOf(a.address);
     const fallback = role?.name ?? ((/^\d+$/.test(a.tab_name) ? a.title || a.program?.name : a.tab_name) || "Agent");
     const title = session?.title && session.title !== deskTitle ? session.title : null;
     const id = `agent-${a.address}`, hovered = this.hoverRow === id;
     const route = shared("desk.route");
-    const selected = member && chatView() ? route?.address === a.address : Boolean(a.focused) && !chatView();
-    const quiet = a.status === "idle" || put;
+    const selected = role && l.task && chatView() ? route?.address === a.address : Boolean(a.focused) && !chatView();
     const pane = ps.find((p) => p.pane === a.pane);
     const branch = pane?.branch && g?.branch && pane.branch !== g.branch && offMain(pane.branch) ? pane.branch : null;
-    const canJoin = !member && desk && !a.space.includes("/");
-    const triageable = Boolean(session) && triageOn() && !["working", "blocked"].includes(a.status);
-    const tools = hovered && triageable ? (put
-      ? [this.rowButton(t, `${id}-back`, dk("back", 12), "Bring it back", (cx) => triage(cx, "unsettle", a.address))]
-      : [this.rowButton(t, `${id}-settle`, dk("check", 12), "Settle: put it away until it has new work", (cx) => triage(cx, "settle", a.address)),
-         this.rowButton(t, `${id}-snooze`, dk("clock", 12), "Snooze", () => { this.snoozing = this.snoozing === id ? null : id; }, this.snoozing === id)]) : [];
-    const join = canJoin && hovered ? [this.rowButton(t, `${id}-join`, dk("plus", 12), "Add to the desk", () => this.joinMenu(a, session?.title || fallback, desk))] : [];
-    const name = member ? role.name : session?.title || fallback;
-    const row = this.rowBase(t, id, { selected, pl: member ? 46 : 30, tip: session?.title ? `${fallback} · ${session.title}` : fallback })
+    const canJoin = !(role && l.task) && desk && !a.space.includes("/");
+    const tools = hovered ? [
+      ...(canJoin ? [this.rowButton(t, `${id}-join`, dk("plus", 12), "Add to the desk", () => this.joinMenu(a, session?.title || fallback, desk))] : []),
+      ...this.triageTools(t, a, id, put)] : [];
+    const name = role && l.task ? role.name : session?.title || fallback;
+    const tip = [session?.title ? `${fallback} · ${session.title}` : fallback, branch].filter(Boolean).join(" · ");
+    const recede = !selected && (a.status === "idle" || put);
+    const pl = (member ? TITLE_X + 16 : TITLE_X) + x;
+    const row = this.rowBase(t, id, { selected, pl, h: member ? MEMBER_H : THREAD_H, tip })
       .on_click(() => this.openMember(a, l))
-      .when(canJoin, (el) => el.on_mouse_down("right", () => this.joinMenu(a, name, desk)))
-      // The guide: one hairline down the desk's members, under its title.
-      .when(member, (el) => el.child(div().absolute().left(36).top(0).bottom(0).w(1).bg(t.border)))
-      .when(member, (el) => el.child(roleGlyph(t, role, 14, selected ? t.muted : t.dim)))
-      .child(div().flex_none().max_w(member ? 110 : 200).truncate().text_size(12.5)
-        .text_color(selected ? t.foreground : quiet ? t.dim : member ? t.foreground : t.muted).child(name))
-      .when(member && Boolean(title), (el) => el.child(div().min_w(0).flex_shrink_1().truncate().text_size(12).text_color(t.dim).child(title)))
-      .when(Boolean(branch), (el) => el.child(h_flex().min_w(0).flex_shrink_1().gap(3).items_center().text_size(11).text_color(t.dim)
-        .child(wc("branch", 10)).child(div().min_w(0).truncate().child(branch))))
-      .child(div().flex_1())
-      .when(tools.length + join.length > 0, (el) => el.child(h_flex().flex_none().gap(1).children([...join, ...tools])))
-      .when(!(tools.length + join.length), (el) => el.child(this.markSlot(t, put || solo ? null : a.status)));
-    if (this.snoozing !== id || !triageable || put) return [row];
-    return [row, h_flex().id(`${id}-times`).h(ROW).flex_none().pl(member ? 68 : 30).pr(6).gap(4).items_center()
-      .children(snoozeOptions().map((o) => div().id(`${id}-snz-${o.id}`).h(22).px(7).flex().items_center().rounded(6).cursor_pointer()
-        .border_1().border_color(t.border).text_size(11).text_color(t.muted).hover((s) => s.bg(t.hover).text_color(t.foreground))
-        .on_click((_e, cx) => { cx.stop_propagation(); this.snoozing = null; triage(cx, "snooze", a.address, o.until); }).child(o.label)))];
+      .when(canJoin, (el) => el.on_mouse_down("right", () => this.joinMenu(a, name, desk)));
+    const body = member
+      ? row.child(h_flex().min_w(0).flex_1().gap(8).items_center()
+          .child(div().flex_none().max_w(120).truncate().text_size(13).text_color(selected || hovered ? t.foreground : mutedFg(t)).child(name))
+          .when(Boolean(title), (el) => el.child(div().min_w(0).flex_shrink_1().truncate().text_size(13).text_color(t.dim).child(title))))
+        .child(tools.length ? this.trailing(t, { tools }) : h_flex().w(16).flex_none().justify_end()
+          .when(Boolean(STATE[a.status]), (el) => el.child(statusMark(t, a.status, 12))))
+      : row.child(div().min_w(0).flex_1().truncate().text_size(14).when(!recede, (el) => el.font_medium())
+          .text_color(recede ? (hovered ? t.foreground : mutedFg(t)) : t.foreground).child(name))
+        .child(this.trailing(t, { status: put ? null : a.status, tools }));
+    return this.snoozing === id && !put ? [body, this.snoozeRow(t, a, id, pl)] : [body];
   }
 
   // While the pointer is over the list, a space's agents keep the order they had; new ones go last.
@@ -653,28 +691,30 @@ export default class Spaces extends View {
       }
       const joinTo = desks[0] ?? null;
       const shut = this.closed.has(r.w.id);
-      const head = this.header(r, t, { desks, shut, status: mostUrgent(kids.map((k) => k.a.status)) });
+      const head = this.header(r, t, { desks, shut, count: desks.length + outside.length, status: mostUrgent(kids.map((k) => k.a.status)) });
       if (shut) { order.push(...kids.map((k) => k.a.address)); return [head]; }
+      const x = r.tree ? 16 : 0; // a worktree's rows sit under its own (indented) header
       const open = this.shelves.has(r.w.id);
       const shelfId = `shelf-${r.w.id}`;
-      const shelfRow = this.rowBase(t, shelfId, { pl: 30 })
+      // T3's shelf header: a quiet 12px label, its count, a chevron that turns.
+      const shelfRow = this.rowBase(t, shelfId, { pl: TITLE_X + x, h: FOLDER_H })
         .on_click((_e, cx) => { open ? this.shelves.delete(r.w.id) : this.shelves.add(r.w.id); cx.notify(); })
-        .child(div().text_size(12).text_color(t.dim).child(`Settled · ${shelf.length}`))
-        .child(wc(`chevron-${open ? "down" : "right"}`, 11).text_color(t.dim));
+        .child(div().flex_1().text_size(12).font_medium().text_color(t.dim).child("Settled"))
+        .child(div().flex_none().text_size(12).text_color(t.dim).child(String(shelf.length)))
+        .child(wc(`chevron-${open ? "down" : "right"}`, 12).text_color(t.dim));
       const out = [head];
       for (const d of desks) {
-        out.push(this.deskRow(t, r.w, d));
-        // Members show for a desk with a team, and for the open one (a desk of one is its CTO's
-        // thread; its row's mark already says how that agent is).
-        const solo = d.members.length === 1, open = shared("desk.view") === d.slug;
+        out.push(...this.deskRow(t, r.w, d, x));
+        // Members show only for a desk with a team: a desk of one is that agent's thread, and its
+        // row already says how it is.
         for (const k of d.members) {
           order.push(k.a.address);
-          if (!solo || open) out.push(...this.agentRow(t, k, r.g, ps, d, { deskTitle: d.title, solo }));
+          if (d.members.length > 1) out.push(...this.agentRow(t, k, r.g, ps, d, { deskTitle: d.title, x }));
         }
       }
-      for (const k of outside) { order.push(k.a.address); out.push(...this.agentRow(t, k, r.g, ps, joinTo)); }
+      for (const k of outside) { order.push(k.a.address); out.push(...this.agentRow(t, k, r.g, ps, joinTo, { x })); }
       if (shelf.length) out.push(shelfRow);
-      for (const k of shelf) { order.push(k.a.address); if (open) out.push(...this.agentRow(t, k, r.g, ps, joinTo, { put: true })); }
+      for (const k of shelf) { order.push(k.a.address); if (open) out.push(...this.agentRow(t, k, r.g, ps, joinTo, { put: true, x })); }
       return out;
     };
     // A space and its worktree spaces are one group, with room above the next.
@@ -682,7 +722,7 @@ export default class Spaces extends View {
       if (collapsed) return list.flatMap(draw);
       const chunks = [];
       for (const r of list) (r.tree && chunks.length ? chunks[chunks.length - 1] : chunks[chunks.push([]) - 1]).push(r);
-      return chunks.map((c) => v_flex().id(`group-${c[0].w.id}`).flex_none().children(c.flatMap(draw)));
+      return chunks.map((c, ci) => v_flex().id(`group-${c[0].w.id}`).flex_none().when(ci > 0, (el) => el.mt(8)).children(c.flatMap(draw)));
     };
     // Keyboard order follows the list (Herdr's next/previous agent).
     const finish = (list) => { setAgentOrder(order); return list; };
@@ -692,7 +732,7 @@ export default class Spaces extends View {
       return layout === "loading" || (!layout && this.machines.some(k => k.name === m && k.state === "connected"))
         || spaces().some(s => (s.machine ?? null) === m && !this.shown.has(s.id));
     };
-    const loadingRow = m => div().id(`machine-loading-${m ?? "local"}`).h(ROW).flex_none().px(8).flex().items_center().text_size(12).text_color(t.dim).child(collapsed ? "…" : "Loading…");
+    const loadingRow = m => div().id(`machine-loading-${m ?? "local"}`).h(FOLDER_H).flex_none().px(INSET).flex().items_center().text_size(12).text_color(t.dim).child(collapsed ? "…" : "Loading…");
     if (!remote.length) return finish(loading(null) && !rows.length ? [loadingRow(null)] : groups(rows));
     const machineNames = [null, ...remote];
     return finish(machineNames.flatMap((m) => {
@@ -700,7 +740,7 @@ export default class Spaces extends View {
       const machine = this.machines.find(k => k.name === m);
       const connected = !m || machine?.state === "connected";
       const folded = this.folded.has(m);
-      const head = h_flex().id(`machine-${m ?? "local"}`).h(24).mt(6).flex_none().px(8).gap(6).items_center().rounded(6).text_size(11).font_medium().text_color(t.dim)
+      const head = h_flex().id(`machine-${m ?? "local"}`).h(FOLDER_H).mt(8).flex_none().px(8).gap(8).items_center().rounded(6).text_size(12).font_medium().text_color(t.dim)
         .cursor_pointer().hover(s => s.text_color(t.muted))
         .on_click((_e, cx) => {
           folded ? this.folded.delete(m) : this.folded.add(m);
@@ -712,41 +752,28 @@ export default class Spaces extends View {
           .when(!connected, el => el.child(div().flex_none().child((machine?.state ?? "asleep").replace(/_/g, " "))))
           .when(connected, el => el.child(this.rowButton(t, `machine-add-${m ?? "local"}`, wc("plus", 12), "New space there", (cx) => this.newSession(m, cx))))
           .child(div().size(6).rounded(3).flex_none().bg(connected ? t.working : t.dim))
-          .child(wc(`chevron-${folded ? "right" : "down"}`, 11)));
+          .child(wc(`chevron-${folded ? "right" : "down"}`, 12)));
       const empty = this.rowBase(t, `machine-new-${m ?? "local"}`).on_click((_e, cx) => this.newSession(m, cx))
         .child(wc("plus", 12).text_color(t.dim)).when(!collapsed, el => el.child(div().text_size(12).text_color(t.dim).child("New space there")));
       return [head, ...(folded ? [] : mine.length ? groups(mine) : [loading(m) ? loadingRow(m) : empty])];
     }));
   }
 
-  // Beside a space's name: its branch when it's off main (else, with no repo, the folder), ahead/behind.
-  subline(g, w, t, ps) {
-    if (!g) {
-      const folder = base(place(w, ps) ?? "") || "~";
-      return div().min_w(0).flex_shrink_1().truncate().text_size(11).text_color(t.dim).child(folder);
-    }
-    return h_flex().min_w(0).flex_shrink_1().gap(4).items_center().text_size(11).text_color(t.dim)
-      .when(offMain(g.branch ?? "detached"), (el) => el.child(wc("branch", 10)).child(div().min_w(0).truncate().child(g.branch ?? "detached")))
-      .when(g.ahead > 0, (el) => el.child(div().flex_none().child(`↑${g.ahead}`)))
-      .when(g.behind > 0, (el) => el.child(div().flex_none().child(`↓${g.behind}`)));
-  }
-
-  // A space: a quiet header. The glyph folds it (a chevron while hovered); "+" starts a desk there.
-  header({ w, i, g, tree }, t, { desks, shut, status }) {
+  // A space: T3's project folder header. Its icon and name (14 medium); a chevron at the end folds
+  // it; folded, a dot for what needs you and the count of what's inside (the count gives way to
+  // "new desk" under the pointer). A click opens it; drag one to reorder; right-click for its menu.
+  header({ w, i, g, tree }, t, { desks, shut, status, count }) {
     const id = `space-${w.id}`, hovered = this.hoverRow === id;
     const ps = panes();
     const title = tree ? (g?.branch ?? w.name) : g?.name ?? (w.name === "~" ? "Home" : w.name);
     const extra = !tree && w.named && g && w.name.toLowerCase() !== g.name.toLowerCase() ? w.name : null;
-    const showSub = !tree && (Boolean(g) || (base(place(w, ps) ?? "") || "~") !== title);
-    const lead = hovered ? wc(`chevron-${shut ? "right" : "down"}`, 12) : wc(tree ? "branch" : "folder", 13);
-    const fold = h_flex().id(`${id}-fold`).size(16).flex_none().items_center().justify_center().rounded(4).text_color(t.dim)
-      .hover((s) => s.text_color(t.foreground)).tooltip(shut ? "Show its desks" : "Fold")
-      .on_mouse_down("left", (_e, cx) => cx.stop_propagation())
-      .on_mouse_up("left", (_e, cx) => cx.stop_propagation())
-      .on_click((_e, cx) => { cx.stop_propagation(); this.toggleSpace(w.id); cx.notify(); })
-      .child(lead);
-    return this.rowBase(t, id, { pl: tree ? 22 : 6, tip: place(w, ps) ?? undefined })
-      .mt(tree ? 0 : 6)
+    const behind = [g?.ahead ? `↑${g.ahead}` : "", g?.behind ? `↓${g.behind}` : ""].join(" ").trim();
+    const tip = [extra, place(w, ps), !tree && offMain(g?.branch) ? g.branch : null, behind].filter(Boolean).join(" · ");
+    const fold = this.rowButton(t, `${id}-fold`, wc(`chevron-${shut ? "right" : "down"}`, 12), shut ? "Show its desks" : "Fold",
+      () => this.toggleSpace(w.id), false, 20);
+    const dot = shut ? DOT[status] : null;
+    return this.rowBase(t, id, { pl: INSET + (tree ? 16 : 0), h: FOLDER_H, tip: tip || undefined })
+      .pr(4)
       .when(this.pressed === i && this.over !== i, (el) => el.opacity(0.5))
       .when(this.pressed !== null && this.over === i && this.pressed !== i, (el) => el.child(
         div().absolute().left(6).right(6).h(2).rounded(1).bg(t.accent)
@@ -767,18 +794,13 @@ export default class Spaces extends View {
         cx.notify();
       })
       .on_mouse_down("right", () => this.menu(w))
-      .child(fold)
-      .child(div().min_w(0).flex_shrink_1().truncate().text_size(tree ? 12.5 : 13).font_medium()
-        .text_color(w.active ? t.foreground : t.muted).child(title))
-      .when(Boolean(extra), (el) => el.child(div().min_w(0).flex_shrink_1().truncate().text_size(11).text_color(t.dim).child(extra)))
-      .when(showSub && !hovered, (el) => el.child(this.subline(g, w, t, ps)))
-      .when(tree && !hovered && ((g?.ahead ?? 0) > 0 || (g?.behind ?? 0) > 0), (el) => el.child(div().flex_none().text_size(11).text_color(t.dim)
-        .child([g.ahead ? `↑${g.ahead}` : "", g.behind ? `↓${g.behind}` : ""].join(" ").trim())))
-      .child(div().flex_1())
-      .when(hovered, (el) => el.child(this.rowButton(t, `${id}-new`, wc(chatLayout() ? "square-pen" : "plus", 12), chatLayout() ? "New desk here" : "New terminal",
+      .child(wc(tree ? "branch" : "folder", 16).text_color(t.dim))
+      .child(div().min_w(0).flex_1().truncate().text_size(14).font_medium().text_color(t.foreground).child(title))
+      .when(Boolean(dot), (el) => el.child(div().size(6).rounded(3).flex_none().bg(t[dot])))
+      .when(shut && count > 0 && !hovered, (el) => el.child(div().flex_none().text_size(12).text_color(mutedFg(t)).child(String(count))))
+      .when(hovered, (el) => el.child(this.rowButton(t, `${id}-new`, wc(chatLayout() ? "square-pen" : "plus", 14), chatLayout() ? "New desk here" : "New terminal",
         () => this.newDeskHere(w.id))))
-      // Folded (or nothing listed under it): the space's own mark.
-      .when(!hovered && (shut || !desks.length) && Boolean(status) && status !== "idle", (el) => el.child(this.markSlot(t, status)));
+      .child(fold);
   }
 
   // The narrow rail: each space as its number and mark.
@@ -797,18 +819,20 @@ export default class Spaces extends View {
     const t = theme();
     const collapsed = narrow();
     const chat = chatLayout();
-    const newDesk = this.rowBase(t, "new-desk", { pl: 8 })
-      .on_click(() => this.newDeskHere(null))
-      .child(h_flex().w(16).flex_none().justify_center().text_color(t.muted).child(wc(chat ? "square-pen" : "plus", 14)))
-      .child(div().flex_1().text_size(13).text_color(t.foreground).child(chat ? "New desk" : "New terminal"));
-    const label = h_flex().h(24).mt(10).flex_none().pl(8).pr(6).items_center().text_size(11).font_medium().text_color(t.dim)
-      .child(div().flex_1().child("Spaces"))
-      .child(this.rowButton(t, "space-new", wc("plus", 13), chat ? "New desk in another folder" : "New space", (cx) => this.newSession(null, cx)));
-    return v_flex().size_full().min_h(0).bg(t.chrome).text_size(13)
-      .when(!collapsed, (el) => el.child(v_flex().flex_none().px(8).pt(2).child(newDesk).child(label)))
+    // T3's header row: a search field (here, the picker) and the two "new" buttons.
+    const search = h_flex().id("search").h(32).flex_1().min_w(0).px(8).gap(8).items_center().rounded(6).cursor_pointer()
+      .text_color(mutedFg(t)).hover((s) => s.bg(t.hover).text_color(t.foreground))
+      .on_click(() => run("mod.open", { name: "picker" }))
+      .child(wc("search", 16)).child(div().flex_1().truncate().text_size(14).font_medium().child("Search"));
+    const head = h_flex().flex_none().px(8).gap(4).items_center()
+      .child(search)
+      .child(iconButton(t, "space-new", "folder-plus", chat ? "New desk in another folder" : "New space", (_e, cx) => this.newSession(null, cx)))
+      .child(iconButton(t, "new-desk", chat ? "square-pen" : "plus", chat ? "New desk" : "New terminal", () => this.newDeskHere(null)));
+    return v_flex().size_full().min_h(0).bg(t.chrome).text_size(14)
+      .when(!collapsed, (el) => el.child(head))
       .when(collapsed, (el) => el.child(h_flex().flex_none().h(34).justify_center()
         .child(this.rowButton(t, "unfold", wc("sidebar", 14), "Show the sidebar", () => toggleSidebar()))))
-      .child(v_flex().id("spaces-list").flex_1().min_h(0).px(8).pb(14).overflow_y_scrollbar()
+      .child(v_flex().id("spaces-list").flex_1().min_h(0).px(8).pt(8).pb(16).overflow_y_scrollbar()
         .on_hover((inside, cx) => { this.pointerIn = inside; if (!inside) { this.snoozing = null; this.hoverRow = null; cx.notify(); } })
         .on_mouse_up("left", (_e, cx) => { this.pressed = null; cx.notify(); })
         .children(this.grouped(t, collapsed)));
