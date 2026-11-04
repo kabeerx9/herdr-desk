@@ -1,11 +1,14 @@
 import { div, svg } from "gpui-kit";
 import { h_flex, v_flex, TextareaState, Textarea, InputState, Input, TextView } from "gpui-base";
-import { terminals, agents, panes, spaces, exec, home, appHome, readTextFile, watchFolder, notify, run, shared, setShared, hc, playSound, pickFolder } from "herdr";
-import { pill, button, empty, icon, statusBadge } from "./ui.js";
+import { terminals, agents, panes, spaces, exec, home, appHome, readTextFile, watchFolder, notify, run, shared, setShared, hc, playSound, pickFolder, settings, window as appWindow } from "herdr";
+import { button, empty, icon, statusMark } from "./ui.js";
 import { Roles, roleTile, team, folderOf, findBriefs, startBrief, fileBrief } from "./roles.js";
 import { WorkflowControls, runtimeData, runTeam, refreshRuntime, openDesk } from "./workflows.js";
 import { ReviewView } from "./review.js";
 import { ThreadViewport } from "./thread.js";
+import { buildRows, windowStart, WINDOW, splitPoll, summarizeSteps, statusLines, rowOffsets, activePrompt, kTokens } from "./model.js";
+import { COLUMN, measured, messageRow, liveRows, statusLineRows, headerStrip } from "./timeline.js";
+import { minimap } from "./minimap.js";
 
 // Desks: each one an independent team (its own agents, thread and worktrees) that
 // bin/team keeps in ~/.herdr/team/<desk>.jsonl and on its agents' task=<desk> labels.
@@ -16,15 +19,11 @@ import { ThreadViewport } from "./thread.js";
 const DIR = () => `${home()}/.herdr/team`;
 const TEAM = () => `${appHome()}/bin/team`;
 const STATUS = { blocked: "needs you", done: "done", working: "working", idle: "idle" };
-const KIND = { done: ["done", "done"], blocked: ["blocked", "blocked"], update: ["update", "accent"], flag: ["left locally", "blocked"],
-  finish: ["wrapped up", "dim"], ask: ["asks", "accent"], answer: ["answers", "done"], route: ["passes on", "accent"], context: ["long context", "blocked"] };
-const EVENTS = ["desk", "start", "fresh", "compact", "permission", "permission-done"];
 // How long bin/team waits on a permission request before Claude asks in its terminal instead.
 const PERMIT_WAIT = 540000;
-const kTokens = (n) => (n >= 1e6 ? `${(n / 1e6).toFixed(1)}M` : `${Math.round(n / 1000)}k`);
 const RANK = { blocked: 0, done: 1, working: 2, idle: 3 };
-// The reading column of the chat when it's the main view (layouts/desk-chat.json).
-const COLUMN = 760;
+// One exec per working agent per wake: its step tail, then (if supported) its timeline.
+const POLL = `tail -n 60 "$1" 2>/dev/null; printf '\\n\\036\\n'; [ "$3" = 1 ] && "$2" timeline --address "$4" 2>/dev/null; exit 0`;
 
 // In the desk-chat layout the center is a stack: the chat, or the shown tab's terminals.
 // Anything that jumps to a terminal switches the stack first; other layouts just focus it.
@@ -40,11 +39,6 @@ export function openTerminal(address, { peek = false } = {}) {
   run(peek ? "terminal.peek" : "agent.focus", { terminal: address });
 }
 
-// "Worked for 9m 38s": from the message that started an agent's turn to its reply.
-const span = (ms) => {
-  const s = Math.round(ms / 1000);
-  return s < 60 ? `${s}s` : s < 3600 ? `${Math.floor(s / 60)}m ${s % 60}s` : `${Math.floor(s / 3600)}h ${Math.floor((s % 3600) / 60)}m`;
-};
 
 // A desk's live agents, parents before their children.
 export function deskMembers(slug) {
@@ -130,6 +124,15 @@ export class Desks {
     this.composeAt = 0; this.reviewAt = 0; this.reviewOpen = false;
     this.drafts = {}; this.draftDesk = null;
     this.thread = new ThreadViewport(cx);
+    this.thread.onMeasure = (key, cx) => this.trySeek(key, cx, true);
+    // Derived thread (model.js buildRows), rebuilt on reload; row objects cached by id + text.
+    this.model = buildRows([]); this.rowCache = new Map(); this.cacheDesk = null;
+    this.windowFrom = {};      // desk -> first drawn row (the window holds still while you read)
+    this.rowH = new Map();     // "desk:row" -> measured height (window px), for the minimap
+    this.drawnKeys = {};       // desk -> keys of the rows drawn last frame, in order
+    this.seekKey = null;       // { slug, key, tries } while a minimap jump waits for layout
+    this.folds = new Set();    // finished turns opened to their steps
+    this.toolsOpen = new Set(); this.subsOpen = new Set(); this.queueShown = false;
 
     this.input = TextareaState.new({ placeholder: "Message the team…", rows: 2 });
     this.input.set_auto_grow(2, 6);
@@ -150,9 +153,17 @@ export class Desks {
     // What each working agent is doing: its tool calls this turn, from bin/team's PreToolUse hook
     // (~/.herdr/team/.activity/<address>.jsonl). Polled only while someone in the open desk works.
     this.steps = {};                                   // address -> [{ at, tool, text }]
-    this.stepsOpen = store.get("desks.steps", true);   // the feed shown, or just the caption
-    this.stepsAll = new Set();                         // addresses whose whole feed is shown
     this.stepsSeen = {};                               // address -> ms the newest row was first drawn (for its fade-in)
+    this.timelines = {};                               // address -> parsed `team timeline` (kept after the turn for context)
+    this.timelineSig = {}; this.noTimeline = {};       // last JSON seen; when it last failed (retry after a minute)
+    this.snapshots = store.get("desks.turns", {});     // address -> [{ first, ended, steps, summary, subagents }] of finished turns
+    // One shared clock for every elapsed label: only the primary copy ticks, only while a desk
+    // agent works and the window is in front. setShared redraws every copy.
+    cx.timer.every(1000, () => {
+      if (!(this.wide || (!chatLayout() && this.toasts)) || !appWindow().active) return;
+      const desk = new Set(terminals().filter((x) => x.labels?.task && x.labels?.role).map((x) => x.address));
+      if (agents().some((a) => a.status === "working" && desk.has(a.address))) setShared("desk.tick", Math.floor(Date.now() / 1000));
+    });
     // Woken by the hook's writes; the slow timer only clears feeds of agents that stopped.
     cx.timer.every(4000, (cx) => this.pollSteps(cx));
     cx.spawn(async (cx) => {
@@ -284,10 +295,17 @@ export class Desks {
       this.desks = desks;
       const open = this.desk();
       this.messages = open ? parse(await readTextFile(`${DIR()}/${open.slug}.jsonl`)) : [];
+      this.derive(open?.slug ?? null);
       if (open && (this.onScreen() || this.fixed || this.wide)) this.markRead(open.slug);
       this.publish();
-    } catch { this.messages = []; }
+    } catch { this.messages = []; this.derive(null); }
     cx.notify();
+  }
+
+  // Rows for the open desk, derived once per reload (never in render).
+  derive(slug) {
+    if (this.cacheDesk !== slug) { this.rowCache = new Map(); this.cacheDesk = slug; }
+    this.model = buildRows(this.messages, this.rowCache);
   }
 
   // A desk's live agents, parents before their children.
@@ -504,17 +522,10 @@ export class Desks {
 
   // ── pieces ────────────────────────────────────────────────────────────────
 
-  dot(t, status, size = 8) {
-    if (!status) return null;
-    if (status === "working") return svg("mods/workspace-chrome/spinner.svg").size(size + 3).flex_none().text_color(t.working).spin(900);
-    return div().size(size).flex_none().rounded(size / 2).bg(status === "idle" ? t.dim : t[status] ?? t.dim);
-  }
-
   avatar(t, role, status, size = 24) {
     const tile = role ? roleTile(div, svg, t, role, size) : div().size(size).rounded(7).bg(t.raised);
-    const mark = status && status !== "idle" ? (status === "working"
-      ? div().absolute().right(-3).bottom(-3).size(11).rounded(6).bg(t.chrome).flex().items_center().justify_center().child(this.dot(t, status, 7))
-      : div().absolute().right(-2).bottom(-2).size(10).rounded(5).border(2).border_color(t.chrome).bg(t[status] ?? t.dim)) : null;
+    const mark = status && status !== "idle"
+      ? div().absolute().right(-3).bottom(-3).size(12).rounded(6).bg(t.chrome).flex().items_center().justify_center().child(statusMark(t, status, 10)) : null;
     return div().relative().flex_none().child(tile).when(Boolean(mark), (el) => el.child(mark));
   }
 
@@ -544,7 +555,7 @@ export class Desks {
         .cursor_pointer().hover((s) => s.border_color(t.input).bg(t.hover)).on_click((_e, cx) => this.go(d.slug, cx))
         .child(h_flex().gap(8).items_center()
           .child(div().min_w(0).truncate().text_size(13.5).font_semibold().text_color(t.foreground).child(d.name))
-          .when(Boolean(top?.status === "blocked"), (el) => el.child(pill(t, "needs you", t.blocked)))
+          .when(Boolean(top?.status === "blocked"), (el) => el.child(h_flex().flex_none().gap(4).items_center().text_size(11).text_color(t.muted).child(statusMark(t, "blocked", 11)).child("needs you")))
           .child(div().flex_1())
           .when(unread > 0, (el) => el.child(div().min_w(18).h(18).px(5).rounded(9).bg(t.accent).text_color(t.accent_foreground)
             .text_size(10.5).font_semibold().flex().items_center().justify_center().child(String(unread))))
@@ -628,106 +639,6 @@ export class Desks {
 
   // ── a desk ────────────────────────────────────────────────────────────────
 
-  // The thread, after AI-chat conventions: your turns are a muted bubble on the right (at most
-  // 4/5 wide); agents' turns are full-width Markdown with no bubble, under one name row per run
-  // of messages; agent-to-agent asides are smaller; long ones fold behind "Show more".
-  message(t, m, i, prev) {
-    const id = `msg-${this.view}-${m.id ?? `${m.at}-${i}`}`;
-    if (m.kind === "permission") {
-      const who = this.roles.byId(m.from)?.name ?? m.from, end = this.permitDone?.get(m.id);
-      const how = !end ? "waiting for you" : end === "allow" ? "you allowed it" : end === "always" ? "you allowed it from now on"
-        : end === "deny" ? "you denied it" : "answered in its terminal";
-      return h_flex().id(id).justify_center().pt(10).pb(2)
-        .child(div().max_w_4_5().truncate().text_size(11).text_color(end === "deny" ? t.blocked : t.dim).tooltip(m.detail ?? "")
-          .child(`${who} asked to use ${m.tool}: ${(m.detail ?? "").split("\n")[0].slice(0, 80)} · ${how} · ${clock(m.at)}`));
-    }
-    if (m.kind === "compact") {
-      const who = this.roles.byId(m.from)?.name ?? m.from;
-      return h_flex().id(id).justify_center().pt(10).pb(2)
-        .child(div().max_w_4_5().truncate().text_size(11).text_color(t.dim)
-          .child(`${who} ${m.text}${m.trigger === "auto" ? " (Claude did it on its own)" : ""} · ${clock(m.at)}`));
-    }
-    if (m.kind === "fresh") {
-      return h_flex().id(id).justify_center().pt(10).pb(2)
-        .child(div().max_w_4_5().truncate().text_size(11).text_color(t.dim).tooltip(m.text ?? "")
-          .child(`${(m.text ?? "").split(". Handoff")[0]} · ${clock(m.at)}`));
-    }
-    if (m.kind === "desk" || m.kind === "start") {
-      const who = m.from === "kabeer" ? "You" : this.roles.byId(m.from)?.name ?? m.from;
-      const names = (m.roles ?? [m.role]).map((r) => this.roles.byId(r)?.name ?? r);
-      const list = names.length > 1 ? `${names.slice(0, -1).join(", ")} and ${names.at(-1)}` : names[0] ?? m.text;
-      const text = m.kind === "desk" ? `${who} started this desk${m.project ? ` in ${m.project}` : ""}` : `${who} added ${list}`;
-      return h_flex().id(id).justify_center().pt(10).pb(2)
-        .child(div().max_w_4_5().truncate().text_size(11).text_color(t.dim).child(`${text} · ${clock(m.at)}`));
-    }
-    const hovered = this.hoverMsg === id;
-    const side = ["ask", "answer", "route", "done", "blocked", "update", "flag"].includes(m.kind);
-    const long = side && (m.text ?? "").length > 600 && !this.expanded.has(id);
-    const size = this.wide ? 14 : 13;
-    const body = (size, color = t.foreground) => v_flex().gap(4)
-      .child(div().when(long, (el) => el.max_h(120).overflow_hidden())
-        .text_size(size).line_height(1.6).text_color(color).child(TextView.markdown(`${id}-md`, m.text).selectable(true)))
-      .when(long, (el) => el.child(div().id(`${id}-more`).text_size(12).text_color(t.accent).cursor_pointer()
-        .hover((s) => s.text_color(t.foreground)).on_click((_e, cx) => { this.expanded.add(id); cx.notify(); }).child("Show more")));
-    const tool = (key, name, tip, onClick, color) => h_flex().id(`${id}-${key}`).size(26).flex_none().items_center().justify_center().rounded(7)
-      .cursor_pointer().text_color(color ?? t.dim).hover((s) => s.bg(t.hover).text_color(t.foreground)).tooltip(tip)
-      .on_click(onClick).child(icon(name, 14));
-    const copy = tool("copy", this.copied === id ? "check" : "copy", this.copied === id ? "Copied" : "Copy",
-      (_e, cx) => this.copy(id, m.text, cx), this.copied === id ? t.done : null);
-
-    // Yours: a quiet bubble on the right, with delivery metadata underneath.
-    if (m.from === "kabeer") {
-      const to = (m.to ?? []).map((r) => this.roles.byId(r)?.name ?? r).join(", ");
-      const ok = Boolean(m.delivered?.length && !m.failed?.length);
-      return v_flex().id(id).items_end().gap(3).pt(this.wide ? 26 : 18)
-        .on_hover((h, cx) => this.hoverOn(id, h, cx))
-        // Plain text keeps what you typed and shares the theme foreground.
-        .child(div().max_w_4_5().px(15).py(10).rounded(18).bg(t.raised)
-          .text_size(size).line_height(1.55).text_color(t.foreground).child(m.text ?? ""))
-        .child(h_flex().h(24).gap(6).items_center().text_size(11).text_color(t.dim)
-          .when(hovered, (el) => el.child(copy))
-          .child(`To ${to} · ${clock(m.at)}`)
-          .when(ok, (el) => el.child(icon("check", 12).text_color(t.done))))
-        .when(Boolean(m.failed?.length), (el) => el.child(div().max_w_4_5().text_size(11).line_height(1.4).text_color(t.blocked)
-          .child(`Not delivered to ${m.failed.map((f) => `${this.roles.byId(f.role)?.name ?? f.role} (${f.why})`).join("; ")}. Send it again once they're free.`)));
-    }
-
-    // Theirs: no bubble. A turn opens with a name row ("Frontend · Worked for 3m 12s") and a
-    // hairline; the text runs the column's full width; the latest reply keeps its tools out.
-    const role = this.roles.byId(m.from), kind = KIND[m.kind];
-    // A long-context note offers Compact while that agent is still running and still over its limit.
-    const offer = m.kind === "context" ? this.members().find((x) => x.address === m.address && this.overLimit(x)) ?? null : null;
-    const aside = ["ask", "answer", "route"].includes(m.kind);
-    const to = m.to?.length ? m.to.map((r) => (r === "kabeer" ? "You" : this.roles.byId(r)?.name ?? r)).join(", ") : null;
-    // One name row per run: the same author, a plain message, within five minutes.
-    const grouped = !aside && !kind && prev && prev.from === m.from && !KIND[prev.kind] && !EVENTS.includes(prev.kind) && m.at - prev.at < 300000;
-    const name = role?.name ?? m.from;
-    const tile = aside ? 16 : 18;
-    const avatar = role ? roleTile(div, svg, t, role, tile) : div().size(tile).flex_none().rounded(5).bg(t.raised);
-    const latest = i === this.lastReply;
-    const live = latest ? this.members().find((x) => x.address === m.address) ?? this.members().find((x) => x.role === m.from) : null;
-    const meta = m.worked ? `Worked for ${span(m.worked)}` : clock(m.at);
-    return v_flex().id(id).relative().gap(6).pt(grouped ? 6 : aside ? 14 : this.wide ? 26 : 18)
-      .on_hover((h, cx) => this.hoverOn(id, h, cx))
-      .when(!grouped, (el) => el.child(h_flex().h(22).gap(7).items_center()
-        .child(avatar)
-        .child(div().flex_none().text_size(aside ? 12 : 12.5).font_semibold().text_color(aside ? t.muted : t.foreground).child(name))
-        .when(Boolean(to), (el) => el.child(div().flex_none().text_size(11.5).text_color(t.dim).child(`→ ${to}`)))
-        .when(Boolean(kind), (el) => el.child(pill(t, kind[0], t[kind[1]] ?? t.accent)))
-        .child(div().id(`${id}-meta`).flex_none().text_size(11.5).text_color(t.dim).tooltip(clock(m.at)).child(meta))
-        .child(aside ? div().flex_1() : div().flex_1().ml(4).h(1).bg(t.border))
-        .when(hovered && !latest, (el) => el.child(copy))))
-      .when(grouped && hovered && !latest, (el) => el.child(div().absolute().top(2).right(0).child(copy)))
-      .child(div().pl(aside ? tile + 7 : 0).child(body(aside ? size - 1 : size, aside ? t.muted : t.foreground)))
-      .when(latest, (el) => el.child(h_flex().ml(-5).gap(2)
-        .child(copy)
-        .when(Boolean(live), (el) => el.child(tool("term", "terminal", `Open ${name}'s terminal`, () => openTerminal(live.address))))))
-      .when(Boolean(offer), (el) => el.child(h_flex().pt(2).gap(6)
-        .child(button(t, `${id}-compact`, this.acting === `compact-${offer.address}` ? "Compacting…" : "Compact", (_e, cx) => this.compact(offer, cx),
-          { primary: true, disabled: Boolean(this.acting) || offer.status === "working",
-            tip: offer.status === "working" ? "Once its turn ends" : "Claude's /compact: same session, the history becomes a summary" }))));
-  }
-
   // A permission request, on top of the composer: who, the tool, exactly what (the command, the
   // file), and the answer. Claude waits on it; with no answer in time it asks in its terminal.
   permitCard(t, d, m) {
@@ -777,87 +688,112 @@ export class Desks {
     });
   }
 
-  // Three dots breathing out of step (native loops, so no re-render drives them).
+  openTerminal(address) { openTerminal(address); }
+
+  // ── live turns: steps and timelines ───────────────────────────────────────
+  // Woken by the activity watcher (every hook write) and a 4s fallback; never from render. One
+  // exec per working agent per wake: the tail of its step feed and `team timeline` together.
+  // Only a copy that drew the thread recently polls (the card builds a Desks too).
   pollSteps(cx) {
     const d = this.view !== "list" && this.view !== "new" ? this.desk(this.view) : null;
-    if (!d || this.polling) return;
+    if (!d || this.polling || Date.now() - (this.drawnAt ?? 0) > 15000) return;
     const working = this.members(d.slug).filter((m) => m.status === "working").map((m) => m.address);
-    for (const a of Object.keys(this.steps)) if (!working.includes(a)) { delete this.steps[a]; delete this.stepsSeen[a]; }
+    let ended = false;
+    for (const a of new Set([...Object.keys(this.steps), ...Object.keys(this.timelines).filter((a) => this.timelines[a]?.turn?.working)]))
+      if (!working.includes(a)) { this.endTurn(a); ended = true; }
+    if (ended) cx.notify();
     if (!working.length) return;
     this.polling = true;
     cx.spawn(async (cx) => {
       let changed = false;
       try {
         for (const a of working) {
-          const r = await exec("tail", ["-n", "60", `${home()}/.herdr/team/.activity/${a}.jsonl`]);
-          const list = r.code === 0 ? parse(r.stdout) : [];
+          const ask = Date.now() - (this.noTimeline[a] ?? 0) > 60000;
+          let out = "";
+          try { out = (await exec("sh", ["-c", POLL, "poll", `${DIR()}/.activity/${a}.jsonl`, TEAM(), ask ? "1" : "0", a])).stdout; } catch {}
+          const { steps, timeline } = splitPoll(out);
           const before = this.steps[a];
-          if (!before || before.length !== list.length || before[before.length - 1]?.at !== list[list.length - 1]?.at) { this.steps[a] = list; changed = true; }
+          if (!before || before.length !== steps.length || before.at(-1)?.at !== steps.at(-1)?.at) { this.steps[a] = steps; changed = true; }
+          if (!ask) continue;
+          if (!timeline) { this.noTimeline[a] = Date.now(); continue; }
+          const sig = JSON.stringify(timeline);
+          if (sig !== this.timelineSig[a]) { this.timelineSig[a] = sig; this.timelines[a] = timeline; changed = true; }
         }
       } finally { this.polling = false; }
-      if (changed) { cx.notify(); cx.timer.after(40, (cx) => cx.notify()); }  // the second frame lets the new row ease in
+      if (changed) { cx.notify(); cx.timer.after(40, (cx) => cx.notify()); }  // the second frame lets a new step ease in
     });
   }
 
-  // The feed under a working agent: its last few steps, newest at the bottom, each easing in
-  // as the older ones slide up. A chevron folds it to the caption; "all N" shows the whole turn.
-  stepIcon(tool) {
-    return tool === "Bash" ? "terminal" : ["Read", "Glob", "Grep"].includes(tool) ? "book"
-      : ["Edit", "Write", "MultiEdit", "NotebookEdit"].includes(tool) ? "pages"
-      : ["WebFetch", "WebSearch"].includes(tool) ? "fetch" : ["Task", "Agent"].includes(tool) ? "sparkles" : "play";
+  // A turn ended: keep what we saw of it for the reply's "Worked for" fold (the hook deletes
+  // the step file at Stop). The timeline stays for its context size.
+  endTurn(a) {
+    const steps = this.steps[a] ?? [], tl = this.timelines[a];
+    const live = tl?.turn?.working !== false ? tl : null;
+    const subagents = live?.subagents ?? [];
+    if (steps.length || subagents.length) {
+      const snap = { first: steps[0]?.at ?? live?.turn?.started_ms ?? Date.now(), ended: Date.now(), steps: steps.slice(-60),
+        summary: live?.tools?.summary || summarizeSteps(steps), subagents };
+      this.snapshots[a] = [snap, ...(this.snapshots[a] ?? [])].slice(0, 8);
+      const keep = Object.entries(this.snapshots).sort((x, y) => (y[1][0]?.ended ?? 0) - (x[1][0]?.ended ?? 0)).slice(0, 24);
+      this.snapshots = Object.fromEntries(keep);
+      store.set("desks.turns", this.snapshots);
+    }
+    delete this.steps[a]; delete this.stepsSeen[a]; this.toolsOpen.delete(a);
+    if (tl?.turn) this.timelines[a] = { ...tl, turn: { ...tl.turn, working: false } };
   }
 
-  feed(t, m, steps) {
-    const id = `feed-${m.address}`, all = this.stepsAll.has(m.address), LIMIT = 4;
-    const shown = all ? steps : steps.slice(-LIMIT), hidden = steps.length - shown.length;
-    const newest = steps[steps.length - 1]?.at, seen = this.stepsSeen[m.address];
-    if (newest && seen?.at !== newest) this.stepsSeen[m.address] = { at: newest, drawn: Date.now() };
-    const head = h_flex().id(`${id}-head`).h(22).gap(5).items_center().cursor_pointer().text_size(11).text_color(t.dim)
-      .hover((s) => s.text_color(t.foreground))
-      .on_click((_e, cx) => { this.stepsOpen = !this.stepsOpen; store.set("desks.steps", this.stepsOpen); cx.notify(); })
-      .child(icon(this.stepsOpen ? "chevron-down" : "chevron", 11))
-      .child(`${steps.length} step${steps.length === 1 ? "" : "s"} this turn`)
-      .when(this.stepsOpen && hidden > 0, (el) => el.child(div().flex_1()).child(div().id(`${id}-all`).text_color(t.accent).cursor_pointer()
-        .hover((s) => s.opacity(0.8)).on_click((_e, cx) => { cx.stop_propagation(); this.stepsAll.add(m.address); cx.notify(); }).child(`all ${steps.length}`)))
-      .when(this.stepsOpen && all && steps.length > LIMIT, (el) => el.child(div().flex_1()).child(div().id(`${id}-less`).text_color(t.accent).cursor_pointer()
-        .hover((s) => s.opacity(0.8)).on_click((_e, cx) => { cx.stop_propagation(); this.stepsAll.delete(m.address); cx.notify(); }).child("last 4")));
-    const rows = shown.map((st, i) => {
-      // The newest row starts low and faint on its first frame, then eases to its place.
-      const fresh = st.at === newest && Date.now() - (this.stepsSeen[m.address]?.drawn ?? 0) < 30;
-      const last = i === shown.length - 1;
-      return h_flex().id(`${id}-${st.at}`).h(fresh ? 6 : 22).opacity(fresh ? 0 : 1).overflow_hidden().gap(7).items_center().px(8)
-        .transition("height", { duration: 220, easing: "ease-out" }).transition("opacity", { duration: 260, easing: "ease-out" })
-        .child(icon(this.stepIcon(st.tool), 12).text_color(last ? t.working : t.dim))
-        .child(div().min_w(0).flex_1().truncate().text_size(11.5).text_color(last ? t.foreground : t.muted).child(st.text))
-        .child(div().flex_none().text_size(10.5).text_color(t.dim).child(ago(st.at)));
-    });
-    return v_flex().w_full().max_w(560).gap(2)
-      .child(head)
-      .when(this.stepsOpen, (el) => el.child(v_flex().py(4).rounded(8).bg(t.raised + "80").border_1().border_color(t.border).children(rows)));
+  // The newest step's time while it is on its first frames (it eases in), else null.
+  freshStep(a) {
+    const newest = this.steps[a]?.at(-1)?.at;
+    if (!newest) return null;
+    if (this.stepsSeen[a]?.at !== newest) this.stepsSeen[a] = { at: newest, drawn: Date.now() };
+    return Date.now() - this.stepsSeen[a].drawn < 30 ? newest : null;
   }
 
-  dots(t) {
-    return h_flex().h(20).gap(4).items_center().children([820, 960, 1100].map((period) =>
-      div().size(6).rounded(3).bg(t.dim).loop("opacity", { from: 0.25, to: 1, period })));
+  // ── minimap and window ───────────────────────────────────────────────────
+  rowMeasured(slug, key, height, cx) {
+    this.rowH.set(`${slug}:${key}`, height);
+    if (this.seekKey?.slug === slug) this.trySeek(slug, cx, false);
   }
-
-  // Where the reply will appear: who's working now, under their name like a message. "Replying"
-  // while they owe the chat a reply (bin/team labels them awaiting=… until their turn ends).
-  activity(t, members) {
-    return members.filter((m) => m.status === "working" || m.status === "blocked").map((m) => {
-      const role = this.roles.byId(m.role), name = role?.name ?? m.role, id = `act-${m.address}`;
-      const blocked = m.status === "blocked";
-      const steps = blocked ? [] : this.steps[m.address] ?? [], latest = steps[steps.length - 1];
-      const caption = blocked ? "needs you in its terminal" : this.waitingFor?.has(m.address) ? "waiting for your answer below" : m.handingOff ? "writing a handoff for a fresh session"
-        : latest ? latest.text : m.awaiting ? "replying" : `working${m.note ? ` · ${m.note}` : ""}`;
-      return v_flex().id(id).gap(6).pt(this.wide ? 26 : 18)
-        .child(h_flex().h(22).gap(7).items_center()
-          .child(this.avatar(t, role, null, 18))
-          .child(div().flex_none().text_size(12.5).font_semibold().text_color(t.foreground).child(name))
-          .child(div().min_w(0).flex_1().truncate().text_size(11.5).text_color(blocked ? t.blocked : t.dim).child(caption))
-          .when(blocked, (el) => el.child(button(t, `${id}-go`, "Open terminal", () => openTerminal(m.address), { primary: true, tip: "It's waiting on a prompt only its terminal can answer" }))))
-        .child(blocked ? icon("alert", 15).text_color(t.blocked) : steps.length ? this.feed(t, m, steps) : this.dots(t));
-    });
+  offsets(slug) {
+    const keys = this.drawnKeys[slug] ?? [], heights = new Map();
+    for (const k of keys) { const h = this.rowH.get(`${slug}:${k}`); if (h !== undefined) heights.set(k, h); }
+    return rowOffsets(keys, heights, ThreadViewport.top(settings().zoom || 1));
+  }
+  jumpTo(slug, key, cx) {
+    const s = this.thread.state(slug), index = this.model.rows.findIndex((r) => r.key === key);
+    if (index < 0) return;
+    if (index < (this.windowFrom[slug] ?? 0)) { s.following = false; this.windowFrom[slug] = Math.max(0, index - 2); }
+    this.seekKey = { slug, key, tries: 0 };
+    this.trySeek(slug, cx, false, true);
+    cx.notify();
+  }
+  // Seek once the target's offset is known and reachable; after two content measures, take
+  // what layout gives (a prompt in the last screen can't reach the top).
+  trySeek(slug, cx, measure, now = false) {
+    const want = this.seekKey;
+    if (!want || want.slug !== slug) return;
+    const y = this.offsets(slug).get(want.key);
+    if (y === undefined) return;
+    const s = this.thread.state(slug), target = Math.max(0, y - 8 * (settings().zoom || 1));
+    if (measure) want.tries++;
+    if (target > s.max + 1 && !now && want.tries < 2) return;
+    s.move(target); this.seekKey = null; cx.notify();
+  }
+  showEarlier(slug, cx) {
+    const s = this.thread.state(slug);
+    s.following = false; s.anchorBottom();
+    this.windowFrom[slug] = Math.max(0, (this.windowFrom[slug] ?? 0) - WINDOW);
+    cx.notify();
+  }
+  statusAction(action, cx) {
+    if (action.kind === "terminal") return openTerminal(action.arg);
+    if (action.kind === "resume") {
+      const session = (runtimeData().sessions ?? []).find((x) => x.id === action.arg);
+      if (session) this.workflow.recover(session, cx);
+      return;
+    }
+    if (action.kind === "queue") { this.queueShown = !this.queueShown; cx.notify(); }
   }
 
   // A desk with nothing said yet: what it's for, and who answers.
@@ -881,7 +817,7 @@ export class Desks {
         .child(this.avatar(t, role, m.status, 22))
         .child(div().text_size(12.5).font_semibold().text_color(t.foreground).child(role?.name ?? m.role))
         .child(div().min_w(0).flex_1().truncate().text_size(11).text_color(t.dim).child(where))
-        .child(statusBadge(t, m.status) ?? div())))
+        .child(statusMark(t, m.status, 12))))
       .when(Boolean(m.note), (el) => el.child(div().pl(compact ? 0 : 30).text_size(11.5).line_height(1.35).text_color(t.muted).child(m.note)))
       .when(Boolean(m.ctx), (el) => el.child(div().pl(compact ? 0 : 30).text_size(11).text_color(this.overLimit(m) ? t.blocked : t.dim)
         .child(`${kTokens(m.ctx)} tokens of context${this.overLimit(m) ? `, past the ${kTokens(this.roles.freshAt(m.role))} limit: compact it when it's free` : ""}`)))
@@ -961,38 +897,48 @@ export class Desks {
           .child(button(t, `br-${b.path}-x`, null, (_e, cx) => this.busy(`br-${b.path}`, () => fileBrief(b, "dismissed"), cx), { iconName: "minus", tip: "Dismiss" }));
       })) : null;
 
-    const said = this.messages.some((m) => !EVENTS.includes(m.kind));
-    // Consecutive "started X" events by one person read as one line: "You added CTO, Frontend and Backend".
-    const shown = [];
-    // Permission requests: how each ended (bin/team's permission-done), and the ones still waiting.
-    this.permitDone = new Map(this.messages.filter((m) => m.kind === "permission-done").map((m) => [m.re, m.decision]));
+    // The thread: rows derived on reload (model.js), drawn as a window of the newest WINDOW.
+    this.drawnAt = Date.now();
+    const model = this.model, now = Date.now(), s = this.thread.state(d.slug);
     const live = new Set(members.map((m) => m.address));
-    const waiting = this.messages.filter((m) => m.kind === "permission" && !this.permitDone.has(m.id) && live.has(m.address) && Date.now() - m.at < PERMIT_WAIT);
+    const waiting = model.rows.filter((r) => r.type === "permission" && !model.permitDone.has(r.m.id) && live.has(r.m.address) && now - r.m.at < PERMIT_WAIT).map((r) => r.m);
     this.waitingFor = new Set(waiting.map((m) => m.address));
-    for (const m of this.messages) {
-      if (m.kind === "permission-done") continue;
-      const last = shown.at(-1);
-      if (m.kind === "start" && last?.kind === "start" && last.from === m.from && m.at - last.at < 600000) {
-        shown[shown.length - 1] = { ...last, roles: [...(last.roles ?? [last.role]), m.role] };
-      } else shown.push(m);
-    }
-    // How long each reply took: from the first message that reached that agent (yours, or an
-    // agent's ask) since its last reply. The latest reply keeps its tools in view.
-    const started = new Map();
-    this.lastReply = -1;
-    shown.forEach((m, i) => {
-      if (EVENTS.includes(m.kind) || m.kind === "context") return;
-      if (m.from === "kabeer" || m.kind === "ask" || m.kind === "route") {
-        for (const r of m.to ?? []) if (!started.has(r)) started.set(r, m.at);
-        if (m.from === "kabeer") return;
-      }
-      if (started.has(m.from)) { m.worked = m.at - started.get(m.from); started.delete(m.from); }
-      if (m.kind !== "ask") this.lastReply = i;
-    });
+    const from = windowStart(model.rows.length, { following: s.following, from: this.windowFrom[d.slug] });
+    this.windowFrom[d.slug] = from;
     const col = (el) => (this.wide ? div().w_full().max_w(COLUMN).child(el) : el);
-    const rows = shown.map((m, i) => col(this.message(t, m, i, shown[i - 1])));
+    const keys = [], rows = [];
+    if (from > 0) {
+      keys.push("__earlier");
+      rows.push(measured(this, d.slug, "__earlier", h_flex().justify_center().pt(4).pb(8)
+        .child(h_flex().id("thread-earlier").h(28).px(12).gap(6).items_center().rounded(14).border_1().border_color(t.border)
+          .text_size(12).text_color(t.muted).cursor_pointer().hover((st) => st.bg(t.hover).text_color(t.foreground))
+          .on_click((_e, cx) => this.showEarlier(d.slug, cx))
+          .child(icon("up", 12)).child(`Show ${Math.min(from, WINDOW)} earlier`))));
+    }
+    if (!model.said) { keys.push("__empty"); rows.push(measured(this, d.slug, "__empty", this.emptyThread(t, members))); }
+    const ctx = { members, now };
+    model.rows.slice(from).forEach((row, j) => {
+      keys.push(row.key);
+      rows.push(measured(this, d.slug, row.key, messageRow(this, t, d.slug, row, { ...ctx, index: from + j })));
+    });
+    this.drawnKeys[d.slug] = keys;
+    // The end of the thread: who's working now, then what's waiting on you or pending.
+    const runtime = runtimeData();
+    const lost = (runtime.sessions ?? []).filter((x) => x.task === d.slug && ["disconnected", "recovering"].includes(x.state));
+    const queued = (runtime.queue ?? []).filter((q) => q.task === d.slug && !["delivered", "cancelled", "sent"].includes(q.state)).length;
+    if (!queued) this.queueShown = false;
+    const lines = statusLines({ waiting, blocked: members.filter((m) => m.status === "blocked" && !this.waitingFor.has(m.address)),
+      disconnected: lost, handingOff: members.filter((m) => m.handingOff && m.status !== "working"), queued, queueOpen: this.queueShown,
+      error: shared("desk.runtime.error"), name: (r) => this.roles.byId(r)?.name ?? r });
+    const nowLines = statusLineRows(this, t, lines);
+    let rail = null;
+    if (this.wide) {
+      const drawn = new Set(keys), offsets = this.offsets(d.slug);
+      const prompts = model.prompts.map((p) => ({ ...p, hidden: !drawn.has(p.key) }));
+      rail = minimap(this, t, d.slug, prompts, activePrompt(prompts, offsets, s.offset, s.viewport));
+    }
     const thread = this.thread.render(t, d.slug,
-      [...(said ? [] : [col(this.emptyThread(t, members))]), ...rows, ...this.activity(t, members).map(col)], this.wide);
+      [...rows, ...liveRows(this, t, members, now).map(col), ...(nowLines ? [col(nowLines)] : [])], this.wide, rail);
 
     // The composer, one frame: mention suggestions above it; the text; then who it goes to and a
     // round send button inside the frame.
@@ -1000,10 +946,8 @@ export class Desks {
     const text = this.input.value().trim();
     const canSend = Boolean(text) && to.length > 0 && !this.acting;
     const composer = v_flex().px(12).pt(8).pb(this.wide ? 18 : 12).gap(6).when(this.wide, (el) => el.w_full().max_w(COLUMN + 24))
-      .when(Boolean(shared("desk.runtime.error")), (el) => el.child(div().text_size(11).text_color(t.blocked).child("Session controls unavailable: " + shared("desk.runtime.error"))))
-      .children(this.workflow.disconnected(t, d.slug))
       .when(Boolean(this.workflow.side), (el) => el.child(this.workflow.sideForm(t, d.slug)))
-      .child(this.workflow.queue(t, d.slug))
+      .when(this.queueShown, (el) => el.child(this.workflow.queue(t, d.slug)))
       .children(waiting.map((m) => this.permitCard(t, d, m)))
       .when(sugg.length > 0, (el) => el.child(h_flex().gap(5).flex_wrap()
         .children(sugg.map((o, i) => this.chip(t, `sg-${o.id}`, i === 0, o.name, (_e, cx) => this.pickMention(o, cx),
@@ -1047,7 +991,11 @@ export class Desks {
       // As the main view, the desk's controls live in the floating card (card.js), not up here.
       .when(!this.wide, (el) => el.child(header))
       .when(Boolean(details) && !this.wide, (el) => el.child(details))
-      .when(this.wide, (el) => el.child(div().h(76).flex_none()))
+      // The floating card sits in the top band; the strip runs along the band's bottom edge.
+      // Opaque and in normal flow: the thread viewport starts below it and clips there.
+      .when(this.wide, (el) => el.child(v_flex().h(104).flex_none().justify_end().bg(t.background)
+        .child(band(h_flex().px(12).child(div().w_full().pb(4).border_b(1).border_color(t.border)
+          .child(headerStrip(this, t, members, now) ?? div().h(28)))))))
       .when(Boolean(d.parent_task), (el) => el.child(band(h_flex().px(12).py(6).gap(8).items_center()
         .child(button(t, "side-return", "Back to original desk", () => openDesk(d.parent_task), { iconName: "back" }))
         .child(div().text_size(11).text_color(t.dim).child("Separate conversation")))))

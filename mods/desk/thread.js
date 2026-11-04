@@ -13,13 +13,16 @@ export class ThreadViewport {
     return this.states.get(key);
   }
   latest(key) { this.state(key).latest(); }
-  render(t, key, children, wide) {
+  // Rows start this far down the content (window pixels), for offsets measured from row heights.
+  static top(zoom) { return 12 * zoom; }
+  // overlay: elements drawn over the viewport, outside the scrolled content (the minimap).
+  render(t, key, children, wide, overlay = null) {
     const s = this.state(key), { top, height } = s.thumb;
     // Size/pointer events are window pixels; numeric styles are zoomed by Herdr.
     const zoom = settings().zoom || 1;
     const measure = (viewport, content, cx) => {
       if (Math.abs(s.viewport - viewport) < .5 && Math.abs(s.content - content) < .5) return;
-      s.measure(viewport, content); cx.notify();
+      s.measure(viewport, content); this.onMeasure?.(key, cx); cx.notify();
     };
     const drag = (e, cx) => {
       if (this.drag?.key !== key) return;
@@ -46,9 +49,12 @@ export class ThreadViewport {
         } else return;
         cx.stop_propagation(); cx.notify();
       })
+      // Following the tail glides to new content; reader input (s.glide false) moves at once.
       .child(v_flex().id(`thread-content-${key}`).absolute().top(-s.offset / zoom).left(0).right(0)
+        .when(s.glide && s.following, el => el.spring("top", { response: 320, damping: 1 }))
         .px(wide ? 28 : 16).pt(12).pb(24).when(wide, el => el.items_center())
         .on_size_change((size, cx) => measure(s.viewport, size.height, cx)).children(children))
+      .when(Boolean(overlay), el => el.child(overlay))
       .when(s.max > 0, el => el.child(div().id(`thread-rail-${key}`).absolute().right(0).top(0).bottom(0).w(12)
         .on_mouse_down("left", (e, cx) => { cx.stop_propagation(); s.seek(e.local_position?.y ?? 0); cx.notify(); })
         .on_mouse_move(drag)

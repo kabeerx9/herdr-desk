@@ -49,3 +49,28 @@ test('conversations keep independent positions', () => {
   b.measure(600, 3000); a.measure(600, 5000);
   assert.equal(a.offset, 1200); assert.equal(b.offset, 2400);
 });
+test('following the tail glides only when content grows, never on the first measure', () => {
+  const s = new ScrollState(); s.measure(600, 5000);
+  assert.equal(s.glide, false);
+  s.measure(600, 5200); assert.equal(s.glide, true); assert.equal(s.offset, 4600);
+  s.measure(600, 5200); assert.equal(s.glide, false);
+  s.measure(500, 5400); assert.equal(s.glide, false, 'composer resize snaps');
+});
+test('reader input stops a glide immediately', () => {
+  const s = new ScrollState(); s.measure(600, 5000); s.measure(600, 5300);
+  assert.equal(s.glide, true);
+  s.wheel({ delta: { y: 40 } }); assert.equal(s.glide, false); assert.equal(s.following, false);
+  s.measure(600, 5600); assert.equal(s.glide, false, 'growth while reading never glides');
+  s.latest(); assert.equal(s.glide, false);
+  s.measure(600, 5800); s.seek(10); assert.equal(s.glide, false);
+});
+test('anchoring keeps the reader in place when rows are added above', () => {
+  const s = new ScrollState(); s.measure(600, 5000); s.move(1000);
+  s.anchorBottom(); s.measure(600, 8000);
+  assert.equal(s.offset, 4000); assert.equal(s.following, false);
+  s.measure(600, 8400); assert.equal(s.offset, 4000, 'anchor applies once');
+});
+test('anchoring while following just keeps following', () => {
+  const s = new ScrollState(); s.measure(600, 1000); s.anchorBottom(); s.measure(600, 3000);
+  assert.equal(s.offset, 2400); assert.equal(s.following, true);
+});
