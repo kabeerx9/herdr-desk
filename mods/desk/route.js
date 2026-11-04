@@ -1,7 +1,7 @@
 import { div, svg } from "gpui-kit";
 import { renderBlocks } from "./blocks.js";
 import { h_flex, v_flex, TextView } from "gpui-base";
-import { icon, statusMark } from "./ui.js";
+import { icon, statusMark, shownStatus } from "./ui.js";
 import { contextMeter } from "./model.js";
 import { subagents, mineBubble, commandChip, commandResult, commandNote, FACE } from "./timeline.js";
 
@@ -43,7 +43,7 @@ export function routeHeader(o, t, d, m) {
     .child(h_flex().flex_none().gap(7).items_center()
       .child(o.face(t, m.role, m.address, 18))
       .child(div().font_semibold().text_color(t.foreground).child(name))
-      .child(div().id("route-status").tooltip(STATUS[m.status] ?? "starting").child(statusMark(t, status, 12))))
+      .child(div().id("route-status").tooltip(STATUS[m.status] ?? "starting").child(statusMark(t, shownStatus(status, m.address), 12))))
     .when(Boolean(model), (el) => el.child(div().flex_none().min_w(0).truncate().text_size(11.5).text_color(t.dim).child(model)))
     .when(Boolean(meter), (el) => el.child(div().flex_none().text_size(11.5).text_color(meter.level === "normal" ? t.dim : t.blocked).child(meter.label)))
     .child(div().flex_1())

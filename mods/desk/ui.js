@@ -2,6 +2,13 @@ import { div, svg } from "gpui-kit";
 import { h_flex, v_flex } from "gpui-base";
 import { shared, setShared } from "herdr";
 
+// What a status mark shows: "done" only while it's unread (the sidebar publishes the unread
+// addresses as shared("desk.unread")); read, it's idle. Without that list, the status as is.
+export function shownStatus(status, address) {
+  const unread = shared("desk.unread");
+  return status === "done" && address && Array.isArray(unread) && !unread.includes(address) ? "idle" : status;
+}
+
 export const icon = (name, size = 14) => svg(`mods/desk/icons/${name}.svg`).size(size).flex_none();
 
 // Stable per-name color for project tiles.

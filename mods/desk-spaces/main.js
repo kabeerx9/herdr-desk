@@ -267,6 +267,12 @@ export default class Spaces extends View {
     this.folded = new Set(JSON.parse(localStorage.getItem("machines.folded") ?? "[]"));
     this.closed = new Set(JSON.parse(localStorage.getItem("spaces.folded") ?? "[]")); // spaces folded shut
     this.deskOpen = new Set(JSON.parse(localStorage.getItem("desks.open") ?? "[]")); // desks showing their members
+    // Done-and-unread: when each agent was last seen done-new (doneAt) and when Kabeer last looked at it
+    // (seenAt). Herdr's own "done" lasts until the next turn and counts as seen only when the terminal is
+    // focused, which the Desk chat never does, so the sidebar keeps its own read state.
+    this.doneAt = JSON.parse(localStorage.getItem("agents.doneAt") ?? "{}");
+    this.seenAt = JSON.parse(localStorage.getItem("agents.seenAt") ?? "{}");
+    this.lastStatus = null;
     this.lastView = shared("desk.view") ?? null;
     this.roles = new Map(); // role id → { name, icon }, from the Desk's roles.json
     this.rolesRaw = null;
@@ -325,8 +331,54 @@ export default class Spaces extends View {
       for (const k of Object.keys(this.git)) if (repos.has(this.git[k]?.repo)) due.add(k);
     }
     if (due.size) this.refreshGit(due, cx);
+    if (this.trackSeen(now)) cx.notify();
     if (sp.some((s) => !this.shown.has(s.id))) cx.notify();
   }
+
+  // Notes when an agent turns done, and marks what Kabeer is looking at as seen: the open desk's
+  // members in the chat, the open member route, or a focused terminal. True when a dot changes.
+  trackSeen(now) {
+    const all = agents();
+    const first = this.lastStatus === null;
+    const last = this.lastStatus ?? {};
+    let changed = false, dirty = false;
+    const next = {};
+    for (const a of all) {
+      next[a.address] = a.status;
+      if (a.status === "done" && last[a.address] !== "done") {
+        // On startup, a done agent counts as already read (no dot storm after a restart).
+        if (first) { if (!this.doneAt[a.address]) { this.seenAt[a.address] = now; dirty = true; } }
+        else { this.doneAt[a.address] = now; dirty = changed = true; }
+      }
+    }
+    this.lastStatus = next;
+    const unread = all.filter((a) => this.unread(a)).map((a) => a.address).sort();
+    if (JSON.stringify(unread) !== JSON.stringify(shared("desk.unread") ?? null)) setShared("desk.unread", unread);
+    if (window()?.active) {
+      const looking = new Set();
+      const route = shared("desk.route"), view = shared("desk.view");
+      const labels = new Map(terminals().map((x) => [x.address, x.labels ?? {}]));
+      if (chatView()) {
+        if (route?.address) looking.add(route.address);
+        else if (view) for (const a of all) if (labels.get(a.address)?.task === view) looking.add(a.address);
+      } else for (const a of all) if (a.focused) looking.add(a.address);
+      for (const addr of looking) {
+        if (this.unread({ address: addr, status: next[addr] })) changed = true;
+        if ((this.seenAt[addr] ?? 0) < now - 1000) { this.seenAt[addr] = now; dirty = true; }
+      }
+    }
+    if (dirty) {
+      const live = new Set(all.map((a) => a.address));
+      for (const m of [this.doneAt, this.seenAt]) for (const k of Object.keys(m)) if (!live.has(k)) delete m[k];
+      localStorage.setItem("agents.doneAt", JSON.stringify(this.doneAt));
+      localStorage.setItem("agents.seenAt", JSON.stringify(this.seenAt));
+    }
+    return changed;
+  }
+
+  unread(a) { return a.status === "done" && (this.doneAt[a.address] ?? 0) > (this.seenAt[a.address] ?? 0); }
+  // The status a row shows: done that's been read reads as idle.
+  st(a) { return a.status === "done" && !this.unread(a) ? "idle" : a.status; }
 
   // Places whose git could have changed: new ones (a new space, a cd), where a
   // command or an agent's turn just ended (a checkout, a commit, edits), those on
@@ -651,7 +703,7 @@ export default class Spaces extends View {
       .child(h_flex().min_w(0).flex_1().gap(6).items_center().text_size(12.5)
         .child(div().flex_none().max_w(120).truncate().text_color(selected || hovered ? t.foreground : t.muted).child(name))
         .when(Boolean(title), (el) => el.child(div().min_w(0).flex_shrink_1().truncate().text_color(t.dim).child(title))))
-      .child(this.trailing(t, { status: a.status, word: false }))];
+      .child(this.trailing(t, { status: this.st(a), word: false }))];
   }
 
   // An agent outside any desk: a desk-like row of its own (its face and title), so nothing
@@ -668,14 +720,14 @@ export default class Spaces extends View {
     const name = session?.title || fallback;
     const tools = hovered && canJoin ? [this.rowButton(t, `${id}-join`, dk("plus", 12), "Add to the desk", () => this.joinMenu(a, name, desk))] : [];
     const tip = [session?.title ? `${fallback} · ${session.title}` : fallback, branch].filter(Boolean).join(" · ");
-    const recede = !selected && a.status === "idle";
+    const recede = !selected && this.st(a) === "idle";
     return [this.rowBase(t, id, { selected, pl: INSET + x, tip })
       .on_click(() => this.openMember(a, l))
       .when(Boolean(canJoin), (el) => el.on_mouse_down("right", () => this.joinMenu(a, name, desk)))
       .child(this.face(t, k, FACE, selected))
       .child(div().min_w(0).flex_1().truncate().text_size(13).when(!recede, (el) => el.font_medium())
         .text_color(recede ? (hovered ? t.foreground : t.muted) : t.foreground).child(name))
-      .child(this.trailing(t, { status: a.status, tools }))];
+      .child(this.trailing(t, { status: this.st(a), tools }))];
   }
 
   // "Needs you": every blocked agent, any desk, pinned under search. Two lines: what it's asking
@@ -802,7 +854,7 @@ export default class Spaces extends View {
     for (const d of deskMap.values()) {
       d.title = this.deskTitle(d.slug, d.members);
       d.full = this.deskInfo.get(d.slug)?.name ?? d.slug;
-      d.status = mostUrgent(d.members.map((k) => k.a.status)) ?? "idle";
+      d.status = mostUrgent(d.members.map((k) => this.st(k.a))) ?? "idle";
       d.roles = d.members.map((k) => k.l.role);
       d.lead = d.members.find((k) => k.l.role === "cto") ?? d.members[0];
       d.space = { id: d.lead.a.space };
@@ -849,7 +901,7 @@ export default class Spaces extends View {
       const shown = [...desks.flatMap((d) => d.members), ...outside];
       const shutKey = r.synth ? r.key : r.w.id;
       const shut = this.closed.has(shutKey);
-      const info = { desks, shut, count: desks.length + outside.length, status: mostUrgent(shown.map((k) => k.a.status)), hint: hint(r) };
+      const info = { desks, shut, count: desks.length + outside.length, status: mostUrgent(shown.map((k) => this.st(k.a))), hint: hint(r) };
       const head = r.synth ? this.folderHeader(r, t, info) : this.header(r, t, info);
       if (shut) { order.push(...shown.map((k) => k.a.address)); return [head]; }
       const x = r.tree ? 16 : 0; // a worktree's rows sit under its own (indented) header
@@ -978,7 +1030,7 @@ export default class Spaces extends View {
 
   // The narrow rail: each space as its number and mark.
   compact({ w, i }, t, kids) {
-    const status = mostUrgent(kids.map((k) => k.a.status)) ?? w.status;
+    const status = mostUrgent(kids.map((k) => this.st(k.a))) ?? w.status;
     return v_flex().id(`space-${w.id}`).h(34).flex_none().items_center().justify_center().gap(2).rounded(6).cursor_pointer()
       .bg(w.active ? t.selected : CLEAR).when(!w.active, (el) => el.hover((s) => s.bg(t.hover)))
       .tooltip(w.name)

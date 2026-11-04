@@ -1,7 +1,7 @@
 import { div, svg } from "gpui-kit";
 import { h_flex, v_flex, TextareaState, Textarea, InputState, Input, TextView } from "gpui-base";
 import { terminals, agents, panes, spaces, exec, home, appHome, readTextFile, watchFolder, notify, run, shared, setShared, hc, playSound, pickFolder, settings, window as appWindow } from "herdr";
-import { button, empty, icon, statusMark } from "./ui.js";
+import { button, empty, icon, statusMark, shownStatus } from "./ui.js";
 import { Roles, roleTile, team, folderOf, findBriefs, startBrief, fileBrief, agentIcon, agentCli } from "./roles.js";
 import { WorkflowControls, runtimeData, runTeam, refreshRuntime, openDesk } from "./workflows.js";
 import { ReviewView } from "./review.js";
@@ -1125,10 +1125,10 @@ export class Desks {
     const child = (roleId, task) => this.spawnChild(m, d, roleId, task);
     return v_flex().id(id).ml(compact ? 0 : 10 + m.depth * 18).mr(compact ? 0 : 10).mb(4).px(10).py(7).gap(5).rounded(8).bg(t.raised)
       .when(!compact, el => el.child(h_flex().gap(8).items_center()
-        .child(this.avatar(t, role, m.status, 22))
+        .child(this.avatar(t, role, shownStatus(m.status, m.address), 22))
         .child(div().text_size(12.5).font_semibold().text_color(t.foreground).child(role?.name ?? m.role))
         .child(div().min_w(0).flex_1().truncate().text_size(11).text_color(t.dim).child(where))
-        .child(statusMark(t, m.status, 12))))
+        .child(statusMark(t, shownStatus(m.status, m.address), 12))))
       .when(Boolean(m.note), (el) => el.child(div().pl(compact ? 0 : 30).text_size(11.5).line_height(1.35).text_color(t.muted).child(m.note)))
       .when(Boolean(m.ctx), (el) => el.child(div().pl(compact ? 0 : 30).text_size(11).text_color(this.overLimit(m) ? t.blocked : t.dim)
         .child(`${kTokens(m.ctx)} tokens of context${this.overLimit(m) ? `, past the ${kTokens(this.roles.freshAt(m.role))} limit: compact it when it's free` : ""}`)))
@@ -1180,7 +1180,7 @@ export class Desks {
             .tooltip(`${role?.name ?? m.role}: ${STATUS[m.status] ?? "starting"}${m.ctx ? ` · ${kTokens(m.ctx)} tokens of context` : ""}${this.overLimit(m) ? " (long; compact it from the chat or Details)" : ""}${m.note ? ` · ${m.note}` : ""}`)
             .when(this.routeShown === m.address, (el) => el.bg(t.selected))
             .on_click((_e, cx) => (this.routeShown === m.address ? this.closeRoute(cx) : this.openRoute(m.address, cx)))
-            .child(this.avatar(t, role, m.status, 22))
+            .child(this.avatar(t, role, shownStatus(m.status, m.address), 22))
             .child(div().text_size(11.5).text_color(t.foreground).child(role?.name ?? m.role))
             .when(Boolean(m.ctx), (el) => el.child(div().text_size(10.5).text_color(this.overLimit(m) ? t.blocked : t.dim).child(kTokens(m.ctx))));
         }))

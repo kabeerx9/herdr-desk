@@ -1,7 +1,7 @@
 import { div } from "gpui-kit";
 import { h_flex, v_flex } from "gpui-base";
 import { theme, shared, setShared, terminals, agents, exec, appHome, notify } from "herdr";
-import { icon, button, statusMark, iconButton, offMain, mostUrgent, ROW, cardCollapsed, setCardCollapsed } from "./ui.js";
+import { icon, button, statusMark, shownStatus, iconButton, offMain, mostUrgent, ROW, cardCollapsed, setCardCollapsed } from "./ui.js";
 import { agentIcon, agentCli } from "./roles.js";
 import { runtimeData, openDesk, sessionOf, refreshRuntime } from "./workflows.js";
 import { Desks, deskMembers, showTerminals, openTerminal } from "./desks.js";
@@ -251,7 +251,7 @@ export class DeskCard {
     ];
     return this.row(t, r.id, {
       lead: div().w(78).flex_none().truncate().text_size(11).text_color(t.dim).child(r.kind),
-      name: r.name, muted: !r.stop, mark: statusMark(t, r.status, 12), actions,
+      name: r.name, muted: !r.stop, mark: statusMark(t, shownStatus(r.status, r.address ?? r.stop?.[0]), 12), actions,
       onClick: r.open ? () => r.open() : null, tip: r.name,
     });
   }
@@ -293,7 +293,7 @@ export class DeskCard {
       const rows = [this.row(t, id, {
         indent: m.depth * 12, lead: this.face(t, m, role),
         name: role?.name ?? m.role,
-        mark: statusMark(t, m.status ?? "idle", 12), actions: [more],
+        mark: statusMark(t, shownStatus(m.status ?? "idle", m.address), 12), actions: [more],
         // Its own conversation (a route of this desk); the terminal stays one click away in its actions.
         onClick: () => { showTerminals(false); setShared("desk.view", d.slug); setShared("desk.route", { task: d.slug, address: m.address }); },
         tip: [m.note ?? s?.title, "Open its conversation"].filter(Boolean).join(" · "),
@@ -306,7 +306,7 @@ export class DeskCard {
       ...subs.map((s) => {
         const a = app.get(s.address);
         return this.row(t, `sub-${s.address}`, { indent: 12, lead: h_flex().w(18).flex_none().justify_center().child(icon("sparkles", 13).text_color(t.dim)),
-          name: s.name || a?.app || s.program?.name || s.address, muted: true, mark: statusMark(t, a?.status ?? "idle", 12),
+          name: s.name || a?.app || s.program?.name || s.address, muted: true, mark: statusMark(t, shownStatus(a?.status ?? "idle", s.address), 12),
           onClick: () => openTerminal(s.address, { peek: true }), tip: "Sub-agent: peek at its terminal" });
       }),
     ];
@@ -421,7 +421,7 @@ export class DeskCard {
     if (collapsed) {
       // The pill: each member's mark stands in for the sections.
       const marks = members.length ? h_flex().flex_none().gap(3).items_center()
-        .children(members.slice(0, 4).map((m) => statusMark(t, m.status ?? "idle", 11)))
+        .children(members.slice(0, 4).map((m) => statusMark(t, shownStatus(m.status ?? "idle", m.address), 11)))
         .when(members.length > 4, (el) => el.child(div().text_size(11).text_color(t.dim).child(`+${members.length - 4}`))) : mark;
       return root.child(this.header(t, name, null, marks, true, false));
     }

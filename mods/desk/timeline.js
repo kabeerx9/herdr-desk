@@ -1,7 +1,7 @@
 import { div, svg } from "gpui-kit";
 import { renderBlocks } from "./blocks.js";
 import { h_flex, v_flex, TextView } from "gpui-base";
-import { button, icon, statusMark } from "./ui.js";
+import { button, icon, statusMark, shownStatus } from "./ui.js";
 import { KIND, span, summarizeSteps, thoughtLine, subagentHeader, subStatus, subElapsed, snapshotFor, contextMeter, stepKind } from "./model.js";
 
 // The desk chat's thread, drawn from rows model.js derived on reload. Everything here reads
@@ -460,7 +460,7 @@ export function headerStrip(o, t, members, now) {
   const model = role?.label ?? role?.model ?? null;
   return h_flex().id("chat-strip").h(28).gap(10).items_center().text_size(11.5).text_color(t.dim)
     .child(h_flex().flex_none().gap(6).items_center()
-      .child(statusMark(t, lead.status === "blocked" ? "blocked" : working ? "working" : lead.status === "done" ? "done" : "idle", 11))
+      .child(statusMark(t, lead.status === "blocked" ? "blocked" : working ? "working" : shownStatus(lead.status, lead.address) === "done" ? "done" : "idle", 11))
       .child(div().text_color(t.muted).child(role?.name ?? lead.role))
       .when(Boolean(started), (el) => el.child(div().child(`working ${span(now - started)}`))))
     .child(div().flex_1())
