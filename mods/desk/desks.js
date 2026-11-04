@@ -6,8 +6,10 @@ import { Roles, roleTile, team, folderOf, findBriefs, startBrief, fileBrief } fr
 import { WorkflowControls, runtimeData, runTeam, refreshRuntime, openDesk } from "./workflows.js";
 import { ReviewView } from "./review.js";
 import { ThreadViewport } from "./thread.js";
-import { buildRows, windowStart, WINDOW, splitPoll, summarizeSteps, statusLines, rowOffsets, activePrompt, kTokens } from "./model.js";
+import { buildRows, windowStart, WINDOW, splitPoll, summarizeSteps, statusLines, rowOffsets, activePrompt, kTokens, parseTranscript, buildRouteRows } from "./model.js";
 import { COLUMN, measured, messageRow, liveRows, statusLineRows, headerStrip } from "./timeline.js";
+import { routeKey, routeHeader, routeRow, routeEmpty, commandMenu } from "./route.js";
+import { commandsFor, slashQuery, matchCommands, resolveCommand, menuKey } from "./commands.js";
 import { minimap } from "./minimap.js";
 
 // Desks: each one an independent team (its own agents, thread and worktrees) that
@@ -134,14 +136,34 @@ export class Desks {
     this.folds = new Set();    // finished turns opened to their steps
     this.toolsOpen = new Set(); this.subsOpen = new Set(); this.queueShown = false;
 
-    this.input = TextareaState.new({ placeholder: "Message the team…", rows: 2 });
-    this.input.set_auto_grow(2, 6);
-    this.input.on("change", (_e, cx) => { this.trackMention(); cx.notify(); });
-    this.input.on("submit", (e, cx) => {
-      if (e.shift) return;
-      if (this.mention && this.suggestions().length) return this.pickMention(this.suggestions()[0], cx);
-      this.send(cx);
-    });
+    // Two composers: the team chat's (with @mentions) and a member route's (direct to that member).
+    // Both open the slash menu on a leading "/".
+    this.teamInput = TextareaState.new({ placeholder: "Message the team · / for commands", rows: 2 });
+    this.routeInput = TextareaState.new({ placeholder: "Message it directly · / for commands", rows: 2 });
+    this.input = this.teamInput;
+    for (const state of [this.teamInput, this.routeInput]) {
+      state.set_auto_grow(2, 6);
+      state.on("change", (_e, cx) => { if (state === this.teamInput) this.trackMention(); this.trackSlash(); cx.notify(); });
+      state.on("submit", (e, cx) => {
+        if (e.shift) return;
+        const menu = this.slashItems();
+        if (menu) { if (menu.length) this.pickCommand(menu[Math.min(this.slashIndex, menu.length - 1)], cx, true); else this.send(cx); return; }
+        if (state === this.teamInput && this.mention && this.suggestions().length) return this.pickMention(this.suggestions()[0], cx);
+        this.send(cx);
+      });
+    }
+    this.slashQ = null; this.slashIndex = 0; this.slashShut = null;
+    // The textarea's own bindings run before key listeners, so the open menu binds its keys in a
+    // context the composer declares only while it's open, one level above the input.
+    if (!globalThis.deskSlashKeys) try {
+      globalThis.deskSlashKeys = true;
+      const keys = { up: "desk_slash_up", down: "desk_slash_down", tab: "desk_slash_tab", escape: "desk_slash_escape" };
+      cx.bind_keys(Object.entries(keys).flatMap(([keystroke, action]) => [
+        { keystroke, action, context: "DeskSlashOpen > Input" }, { keystroke, action, context: "DeskSlashOpen" }]));
+    } catch {}
+    // Member routes: address -> { data (parsed team transcript), sig, at, working }; rows derived on fetch.
+    this.routeData = {}; this.routeRows = { rows: [], prompts: [] }; this.routeCache = new Map(); this.routeShown = null;
+    this.routeDrafts = {};
 
     this.newName = InputState.new({ placeholder: "Name (optional), e.g. Health check" });
     this.newTask = TextareaState.new({ placeholder: "What should the team do? It goes to the CTO, or to everyone you picked if there's no CTO.", rows: 4 });
@@ -165,10 +187,10 @@ export class Desks {
       if (agents().some((a) => a.status === "working" && desk.has(a.address))) setShared("desk.tick", Math.floor(Date.now() / 1000));
     });
     // Woken by the hook's writes; the slow timer only clears feeds of agents that stopped.
-    cx.timer.every(4000, (cx) => this.pollSteps(cx));
+    cx.timer.every(4000, (cx) => { this.pollSteps(cx); this.pollRoute(cx); });
     cx.spawn(async (cx) => {
       await exec("mkdir", ["-p", `${DIR()}/.activity`]);
-      for (;;) { await watchFolder(`${DIR()}/.activity`); this.pollSteps(cx); }
+      for (;;) { await watchFolder(`${DIR()}/.activity`); this.pollSteps(cx); this.pollRoute(cx); }
     });
 
     this.roles.load(cx);
@@ -198,6 +220,15 @@ export class Desks {
         this.reviewAt = review.at; this.reviewOpen = true;
         this.review.open({ ...review, messages: this.messages }, cx);
       }
+      // A route belongs to its desk: another desk shown (the sidebar sets desk.view) clears it.
+      // Only when desk.view changes: a sidebar member click writes desk.view, then desk.route.
+      const route = shared("desk.route");
+      if (this.viewSeen !== this.view) {
+        if (primary && route && !this.fixed && this.viewSeen !== undefined && route.task !== this.view) setShared("desk.route", null);
+        this.viewSeen = this.view;
+      }
+      const shownRoute = route && route.task === this.view ? route.address : null;
+      if (shownRoute !== this.routeShown) this.switchRoute(shownRoute, cx);
       const here = shared("desk.here")?.at ?? 0;
       if (here !== this.hereAt) { this.hereAt = here; if (this.loaded !== undefined) { this.newTarget = null; cx.notify(); } }
       if (this.loaded !== undefined && this.view !== this.loaded) this.reload(cx);
@@ -231,6 +262,7 @@ export class Desks {
   get view() { return this.fixed ?? shared("desk.view") ?? "list"; }
   go(view, cx) {
     setShared("desk.view", view);
+    if (shared("desk.route")) setShared("desk.route", null);
     this.addOpen = false; this.detailsOpen = false; this.confirmDelete = 0; this.mention = null;
     this.syncDraft(view);
     if (view !== "list" && view !== "new") this.markRead(view);
@@ -238,11 +270,11 @@ export class Desks {
   }
   syncDraft(task) {
     if (this.draftDesk === task) return;
-    if (this.draftDesk) this.drafts[this.draftDesk] = { text: this.input.value(), address: this.directTarget, task: this.directTask };
+    if (this.draftDesk) this.drafts[this.draftDesk] = { text: this.teamInput.value(), address: this.directTarget, task: this.directTask };
     const draft = task && this.drafts[task];
     this.draftDesk = task;
     this.directTarget = draft?.address ?? null; this.directTask = draft?.task ?? null;
-    this.input.set_value(draft?.text ?? "");
+    this.teamInput.set_value(draft?.text ?? "");
     this.mention = null;
   }
 
@@ -298,6 +330,7 @@ export class Desks {
       this.derive(open?.slug ?? null);
       if (open && (this.onScreen() || this.fixed || this.wide)) this.markRead(open.slug);
       this.publish();
+      if (this.routeShown) this.pollRoute(cx, true);
     } catch { this.messages = []; this.derive(null); }
     cx.notify();
   }
@@ -451,10 +484,157 @@ export class Desks {
     if (Date.now() > this.confirmDelete) { this.confirmDelete = Date.now() + 4000; cx.notify(); cx.timer.after(4100, (cx) => cx.notify()); return; }
     this.busy("delete", async () => {
       // Kept in .deleted/ (outside the list), so a deleted desk can be put back by moving it.
-      const r = await exec("sh", ["-c", 'mkdir -p "$1/.deleted" && mv "$1/$2.jsonl" "$1/.deleted/$2-$3.jsonl" && rm -f "$1/$2.cursors.json"', "del", DIR(), d.slug, String(Date.now())]);
+      const r = await exec("sh", ["-c", 'mkdir -p "$1/.deleted" && mv "$1/$2.jsonl" "$1/.deleted/$2-$3.jsonl" && rm -f "$1/$2.cursors.json" "$1/$2.lock"', "del", DIR(), d.slug, String(Date.now())]);
       if (r.code !== 0) throw new Error(r.stderr.trim());
       delete this.read[d.slug]; store.set("desks.read", this.read);
       setShared("desk.view", "list");
+    }, cx);
+  }
+
+
+  // ── member routes ─────────────────────────────────────────────────────────
+  // shared("desk.route") = { task, address }: the chat shows that member's own conversation.
+
+  // The live member the open route shows, or null (no route, another desk, or it stopped).
+  routeMember(slug = this.view) {
+    const r = shared("desk.route");
+    if (!r || r.task !== slug) return null;
+    return this.members(slug).find((m) => m.address === r.address) ?? null;
+  }
+  get route() { return this.routeShown ? this.routeMember() : null; }
+  openRoute(address, cx) {
+    if (!address || this.view === "list" || this.view === "new") return;
+    setShared("desk.route", { task: this.view, address });
+    this.switchRoute(address, cx);
+  }
+  closeRoute(cx) { setShared("desk.route", null); this.switchRoute(null, cx); }
+  // The composer, drafts and rows follow the shown route; its transcript is fetched at once.
+  switchRoute(address, cx) {
+    if (address === this.routeShown) return;
+    if (this.routeShown) this.routeDrafts[this.routeShown] = this.routeInput.value();
+    this.routeShown = address;
+    this.input = address ? this.routeInput : this.teamInput;
+    if (address) this.routeInput.set_value(this.routeDrafts[address] ?? "");
+    this.slashQ = null; this.mention = null;
+    this.routeCache = new Map();
+    this.deriveRoute();
+    if (address) { this.thread.latest(routeKey(address)); this.pollRoute(cx, true); }
+    cx.notify();
+  }
+  deriveRoute() {
+    const a = this.routeShown, data = a ? this.routeData[a]?.data : null;
+    const working = a ? agents().find((x) => x.address === a)?.status === "working" : false;
+    this.routeRows = buildRouteRows(data?.turns ?? [], this.routeCache, { working });
+  }
+  // Woken with the step feed (every hook write, a 4s fallback) and on thread reloads; never from
+  // render. While it works: at most once a second. Idle: once after the turn ends, then every 30s.
+  pollRoute(cx, force = false) {
+    const a = this.routeShown;
+    if (!a || this.routePolling) return;
+    const seen = this.routeData[a], now = Date.now();
+    const working = agents().find((x) => x.address === a)?.status === "working";
+    if (!force && seen) {
+      if (now - seen.at < 1000) return;
+      if (!working && !seen.working && now - seen.at < 30000) return;
+    }
+    this.routePolling = true;
+    cx.spawn(async (cx) => {
+      let entry = { data: seen?.data ?? null, sig: seen?.sig ?? null, at: Date.now(), working };
+      try {
+        const r = await exec(TEAM(), ["transcript", "--address", a, "--limit", "120"]);
+        if (r.code !== 0) {
+          let why = r.stderr.trim(); try { why = JSON.parse(why).error ?? why; } catch {}
+          entry = { ...entry, data: entry.data ?? { supported: true, turns: [], error: why.slice(0, 160) } };
+        } else if (r.stdout.trim() !== entry.sig) {
+          entry = { ...entry, data: parseTranscript(r.stdout) ?? { supported: true, turns: [], error: "unreadable output" }, sig: r.stdout.trim() };
+        }
+      } catch (e) { entry = { ...entry, data: entry.data ?? { supported: true, turns: [], error: String(e?.message ?? e).slice(0, 160) } }; }
+      finally { this.routePolling = false; }
+      const changed = entry.sig !== seen?.sig || !seen || entry.working !== seen.working;
+      this.routeData[a] = entry;
+      if (a === this.routeShown && changed) { this.deriveRoute(); cx.notify(); }
+    });
+  }
+  nameOfAddress(address) {
+    const m = terminals().find((x) => x.address === address);
+    const role = m?.labels?.role && this.roles.byId(m.labels.role);
+    return role?.name ?? m?.labels?.role ?? address;
+  }
+
+  // ── slash commands ────────────────────────────────────────────────────────
+
+  trackSlash() {
+    const v = this.input.value(), q = slashQuery(v);
+    if (q !== this.slashQ) this.slashIndex = 0;
+    this.slashQ = q;
+    if (this.slashShut !== null && this.slashShut !== v) this.slashShut = null;
+  }
+  // Who a command goes to: the route's member, else the message's recipients.
+  slashTargets() {
+    const route = this.route;
+    if (route) return [route];
+    const members = this.members(), { roles } = this.recipients(members);
+    return members.filter((m) => roles.includes(m.role));
+  }
+  slashCli() {
+    const clis = [...new Set(this.slashTargets().map((m) => this.roles.byId(m.role)?.cli ?? "claude"))];
+    return clis.length === 1 ? clis[0] : null;
+  }
+  // The open menu's items, or null when it's closed.
+  slashItems() {
+    if (this.slashQ === null || this.slashShut === this.input.value()) return null;
+    return matchCommands(commandsFor(this.slashCli()), this.slashQ);
+  }
+  // ↑/↓ move, Tab completes, Esc closes; Enter arrives as the textarea's submit.
+  slashKey(e, cx) {
+    const items = this.slashItems();
+    if (!items) return;
+    const key = e.key.toLowerCase() === "arrowup" ? "up" : e.key.toLowerCase() === "arrowdown" ? "down" : e.key.toLowerCase();
+    if (key === "enter") return;
+    const step = menuKey(key, this.slashIndex, items.length);
+    if (!step) return;
+    cx.stop_propagation();
+    if (step.index !== undefined) this.slashIndex = step.index;
+    if (step.complete && items.length) this.completeCommand(items[Math.min(this.slashIndex, items.length - 1)]);
+    if (step.close) this.slashShut = this.input.value();
+    cx.notify();
+  }
+  completeCommand(c) {
+    this.input.set_value(`/${c.name}${c.args ? " " : ""}`);
+    this.trackSlash(); this.input.focus();
+  }
+  // Picked from the menu: commands that take arguments complete for typing (unless Enter picked
+  // the exact name); the rest run at once.
+  pickCommand(c, cx, enter = false) {
+    if (c.args && (!enter || this.input.value().trim() !== `/${c.name}`)) { this.completeCommand(c); cx.notify(); return; }
+    this.input.set_value(""); this.slashQ = null;
+    this.runSlash(`/${c.name}`, cx);
+  }
+  runSlash(text, cx) {
+    const d = this.desk();
+    if (!d) return;
+    const targets = this.slashTargets(), cli = this.slashCli();
+    const it = resolveCommand(text, cli);
+    const one = targets[0];
+    const need = () => { notify({ title: "Who for?", body: "Open a member's conversation, or @mention one person.", level: "warning", timeout: 4000 }); };
+    if (it?.kind === "desk") {
+      if (it.action === "queue") { this.sendMode = this.sendMode === "queue" ? "now" : "queue"; cx.notify(); return; }
+      if (it.action === "wrap") return this.wrapUp(d, cx);
+      if (targets.length !== 1) return need();
+      if (it.action === "fresh") return this.freshStart(one, cx);
+      if (it.action === "terminal") return openTerminal(one.address);
+      if (it.action === "changes") return this.openReview(one, d, cx);
+      return;
+    }
+    if (!targets.length) return notify({ title: "Nobody's here", body: "Resume or add an agent first.", level: "warning", timeout: 4000 });
+    const to = targets.flatMap((m) => ["--to", `${m.address}:${m.role}`]);
+    this.thread.latest(this.route ? routeKey(this.route.address) : d.slug);
+    this.busy("send", async (cx) => {
+      const r = await exec(TEAM(), ["post", "--raw", "--task", d.slug, ...to, "--", text]);
+      let rec = null; try { rec = JSON.parse(r.stdout); } catch {}
+      if (rec?.failed?.length) notify({ title: `${text.split(" ")[0]} not delivered`, body: rec.failed.map((f) => `${this.roles.byId(f.role)?.name ?? f.role}: ${f.why}`).join("\n"), level: "warning", timeout: 7000 });
+      else if (r.code !== 0) throw new Error(r.stderr.trim() || "couldn't send the command");
+      if (this.routeShown) cx.timer.after(1500, (cx) => this.pollRoute(cx, true));
     }, cx);
   }
 
@@ -496,6 +676,21 @@ export class Desks {
   send(cx) {
     const d = this.desk(), members = this.members(), text = this.input.content().text.trim();
     if (!d || !text || this.acting) return;
+    if (/^\/[\w:-]/.test(text)) { this.input.set_value(""); this.slashQ = null; return this.runSlash(text, cx); }
+    const route = this.route;
+    if (route) {
+      const queuedR = this.sendMode === "queue";
+      this.thread.latest(routeKey(route.address));
+      this.input.set_value("");
+      return this.busy("send", async (cx) => {
+        try {
+          const rec = await runTeam([queuedR ? "queue" : "post", "--task", d.slug, "--to", `${route.address}:${route.role}`, "--", text]);
+          if (rec.failed?.length) notify({ title: "Not delivered", body: rec.failed.map((f) => f.why).join("\n"), level: "warning", timeout: 7000 });
+          refreshRuntime(cx, true);
+          cx.timer.after(1200, (cx) => this.pollRoute(cx, true));
+        } catch (e) { this.input.set_value(text); throw e; }
+      }, cx);
+    }
     const { roles } = this.recipients(members);
     if (!roles.length) return notify({ title: "Nobody's here", body: "Resume or add an agent first.", level: "warning", timeout: 4000 });
     const direct = this.directTask === d.slug && members.find((m) => m.address === this.directTarget && roles.includes(m.role));
@@ -761,7 +956,8 @@ export class Desks {
     return rowOffsets(keys, heights, ThreadViewport.top(settings().zoom || 1));
   }
   jumpTo(slug, key, cx) {
-    const s = this.thread.state(slug), index = this.model.rows.findIndex((r) => r.key === key);
+    const list = slug.startsWith("route-") ? this.routeRows.rows : this.model.rows;
+    const s = this.thread.state(slug), index = list.findIndex((r) => r.key === key);
     if (index < 0) return;
     if (index < (this.windowFrom[slug] ?? 0)) { s.following = false; this.windowFrom[slug] = Math.max(0, index - 2); }
     this.seekKey = { slug, key, tries: 0 };
@@ -867,7 +1063,8 @@ export class Desks {
           return h_flex().id(`mem-${m.address}`).h(28).pl(3).pr(9).gap(6).items_center().rounded(14).cursor_pointer().flex_none()
             .bg(t.raised).hover((s) => s.bg(t.hover))
             .tooltip(`${role?.name ?? m.role}: ${STATUS[m.status] ?? "starting"}${m.ctx ? ` · ${kTokens(m.ctx)} tokens of context` : ""}${this.overLimit(m) ? " (long; compact it from the chat or Details)" : ""}${m.note ? ` · ${m.note}` : ""}`)
-            .on_click(() => openTerminal(m.address))
+            .when(this.routeShown === m.address, (el) => el.bg(t.selected))
+            .on_click((_e, cx) => (this.routeShown === m.address ? this.closeRoute(cx) : this.openRoute(m.address, cx)))
             .child(this.avatar(t, role, m.status, 22))
             .child(div().text_size(11.5).text_color(t.foreground).child(role?.name ?? m.role))
             .when(Boolean(m.ctx), (el) => el.child(div().text_size(10.5).text_color(this.overLimit(m) ? t.blocked : t.dim).child(kTokens(m.ctx))));
@@ -897,62 +1094,96 @@ export class Desks {
           .child(button(t, `br-${b.path}-x`, null, (_e, cx) => this.busy(`br-${b.path}`, () => fileBrief(b, "dismissed"), cx), { iconName: "minus", tip: "Dismiss" }));
       })) : null;
 
-    // The thread: rows derived on reload (model.js), drawn as a window of the newest WINDOW.
+    // The thread: rows derived on reload (model.js), drawn as a window of the newest WINDOW. In a
+    // member route, that member's own conversation (team transcript) instead of the team chat.
     this.drawnAt = Date.now();
-    const model = this.model, now = Date.now(), s = this.thread.state(d.slug);
+    const route = this.routeShown ? members.find((m) => m.address === this.routeShown) ?? null : null;
+    const light = !settings().dark; this.light = light;
+    const model = this.model, now = Date.now();
+    const key = route ? routeKey(route.address) : d.slug, s = this.thread.state(key);
+    const rowsSrc = route ? this.routeRows.rows : model.rows;
     const live = new Set(members.map((m) => m.address));
-    const waiting = model.rows.filter((r) => r.type === "permission" && !model.permitDone.has(r.m.id) && live.has(r.m.address) && now - r.m.at < PERMIT_WAIT).map((r) => r.m);
+    const waiting = model.rows.filter((r) => r.type === "permission" && !model.permitDone.has(r.m.id) && live.has(r.m.address) && now - r.m.at < PERMIT_WAIT
+      && (!route || r.m.address === route.address)).map((r) => r.m);
     this.waitingFor = new Set(waiting.map((m) => m.address));
-    const from = windowStart(model.rows.length, { following: s.following, from: this.windowFrom[d.slug] });
-    this.windowFrom[d.slug] = from;
+    const from = windowStart(rowsSrc.length, { following: s.following, from: this.windowFrom[key] });
+    this.windowFrom[key] = from;
     const col = (el) => (this.wide ? div().w_full().max_w(COLUMN).child(el) : el);
     const keys = [], rows = [];
     if (from > 0) {
       keys.push("__earlier");
-      rows.push(measured(this, d.slug, "__earlier", h_flex().justify_center().pt(4).pb(8)
+      rows.push(measured(this, key, "__earlier", h_flex().justify_center().pt(4).pb(8)
         .child(h_flex().id("thread-earlier").h(28).px(12).gap(6).items_center().rounded(14).border_1().border_color(t.border)
           .text_size(12).text_color(t.muted).cursor_pointer().hover((st) => st.bg(t.hover).text_color(t.foreground))
-          .on_click((_e, cx) => this.showEarlier(d.slug, cx))
+          .on_click((_e, cx) => this.showEarlier(key, cx))
           .child(icon("up", 12)).child(`Show ${Math.min(from, WINDOW)} earlier`))));
     }
-    if (!model.said) { keys.push("__empty"); rows.push(measured(this, d.slug, "__empty", this.emptyThread(t, members))); }
-    const ctx = { members, now };
-    model.rows.slice(from).forEach((row, j) => {
-      keys.push(row.key);
-      rows.push(measured(this, d.slug, row.key, messageRow(this, t, d.slug, row, { ...ctx, index: from + j })));
-    });
-    this.drawnKeys[d.slug] = keys;
+    const routeRole = route ? this.roles.byId(route.role) : null;
+    if (route) {
+      const state = this.routeData[route.address]?.data;
+      if (!rowsSrc.length) { keys.push("__empty"); rows.push(measured(this, key, "__empty", routeEmpty(t, routeRole?.name ?? route.role, state))); }
+      else if (state?.partial && from === 0) { keys.push("__partial"); rows.push(measured(this, key, "__partial", h_flex().justify_center().pt(4)
+        .child(div().text_size(11).text_color(t.dim).child("Earlier messages are in its terminal")))); }
+      rowsSrc.slice(from).forEach((row) => {
+        keys.push(row.key);
+        rows.push(measured(this, key, row.key, routeRow(this, t, key, row, { role: routeRole, now })));
+      });
+    } else {
+      if (!model.said) { keys.push("__empty"); rows.push(measured(this, key, "__empty", this.emptyThread(t, members))); }
+      const ctx = { members, now };
+      model.rows.slice(from).forEach((row, j) => {
+        keys.push(row.key);
+        rows.push(measured(this, key, row.key, messageRow(this, t, d.slug, row, { ...ctx, index: from + j })));
+      });
+    }
+    this.drawnKeys[key] = keys;
     // The end of the thread: who's working now, then what's waiting on you or pending.
     const runtime = runtimeData();
-    const lost = (runtime.sessions ?? []).filter((x) => x.task === d.slug && ["disconnected", "recovering"].includes(x.state));
-    const queued = (runtime.queue ?? []).filter((q) => q.task === d.slug && !["delivered", "cancelled", "sent"].includes(q.state)).length;
+    const lost = (runtime.sessions ?? []).filter((x) => x.task === d.slug && ["disconnected", "recovering"].includes(x.state) && (!route || x.address === route.address));
+    const queued = (runtime.queue ?? []).filter((q) => q.task === d.slug && !["delivered", "cancelled", "sent"].includes(q.state)
+      && (!route || (q.targets ?? []).some((x) => x.address === route.address))).length;
     if (!queued) this.queueShown = false;
-    const lines = statusLines({ waiting, blocked: members.filter((m) => m.status === "blocked" && !this.waitingFor.has(m.address)),
-      disconnected: lost, handingOff: members.filter((m) => m.handingOff && m.status !== "working"), queued, queueOpen: this.queueShown,
+    const scope = route ? [route] : members;
+    const lines = statusLines({ waiting, blocked: scope.filter((m) => m.status === "blocked" && !this.waitingFor.has(m.address)),
+      disconnected: lost, handingOff: scope.filter((m) => m.handingOff && m.status !== "working"), queued, queueOpen: this.queueShown,
       error: shared("desk.runtime.error"), name: (r) => this.roles.byId(r)?.name ?? r });
     const nowLines = statusLineRows(this, t, lines);
     let rail = null;
     if (this.wide) {
-      const drawn = new Set(keys), offsets = this.offsets(d.slug);
-      const prompts = model.prompts.map((p) => ({ ...p, hidden: !drawn.has(p.key) }));
-      rail = minimap(this, t, d.slug, prompts, activePrompt(prompts, offsets, s.offset, s.viewport));
+      const drawn = new Set(keys), offsets = this.offsets(key);
+      const prompts = (route ? this.routeRows.prompts : model.prompts).map((p) => ({ ...p, hidden: !drawn.has(p.key) }));
+      rail = minimap(this, t, key, prompts, activePrompt(prompts, offsets, s.offset, s.viewport));
     }
-    const thread = this.thread.render(t, d.slug,
-      [...rows, ...liveRows(this, t, members, now).map(col), ...(nowLines ? [col(nowLines)] : [])], this.wide, rail);
+    const thread = this.thread.render(t, key,
+      [...rows, ...liveRows(this, t, scope, now).map(col), ...(nowLines ? [col(nowLines)] : [])], this.wide, rail);
 
-    // The composer, one frame: mention suggestions above it; the text; then who it goes to and a
-    // round send button inside the frame.
-    const sugg = this.suggestions();
+    // The composer: a bordered card (T3's): the text, then who it goes to, the send mode and a
+    // solid accent send button. The slash menu and @mention suggestions sit just above it.
+    const sugg = route ? [] : this.suggestions();
+    const menu = this.slashItems();
     const text = this.input.value().trim();
-    const canSend = Boolean(text) && to.length > 0 && !this.acting;
+    const toList = route ? [route.role] : to;
+    const canSend = Boolean(text) && toList.length > 0 && !this.acting;
+    const pill = (r) => {
+      const role = this.roles.byId(r);
+      return h_flex().flex_none().h(22).pl(2).pr(8).gap(5).items_center().rounded(11).bg(t.raised).text_color(t.foreground)
+        .when(Boolean(role), (el) => el.child(roleTile(div, svg, t, role, 18))).child(role?.name ?? r);
+    };
     const composer = v_flex().px(12).pt(8).pb(this.wide ? 18 : 12).gap(6).when(this.wide, (el) => el.w_full().max_w(COLUMN + 24))
-      .when(Boolean(this.workflow.side), (el) => el.child(this.workflow.sideForm(t, d.slug)))
+      .when(Boolean(this.workflow.side) && !route, (el) => el.child(this.workflow.sideForm(t, d.slug)))
       .when(this.queueShown, (el) => el.child(this.workflow.queue(t, d.slug)))
       .children(waiting.map((m) => this.permitCard(t, d, m)))
-      .when(sugg.length > 0, (el) => el.child(h_flex().gap(5).flex_wrap()
+      .when(Boolean(menu), (el) => el.child(commandMenu(this, t, menu, Math.min(this.slashIndex, Math.max(0, menu.length - 1)))))
+      .when(sugg.length > 0 && !menu, (el) => el.child(h_flex().gap(5).flex_wrap()
         .children(sugg.map((o, i) => this.chip(t, `sg-${o.id}`, i === 0, o.name, (_e, cx) => this.pickMention(o, cx),
           o.id === "all" ? icon("team", 13) : roleTile(div, svg, t, o, 16))))))
-      .child(v_flex().rounded(20).border_1().border_color(t.input).bg(t.raised)
+      .child(v_flex().id("composer").rounded(16).border_1().border_color(light ? t.input : t.border).bg(light ? t.background : t.popover)
+        .when(Boolean(menu), (el) => el.key_context("DeskSlashOpen"))
+        .on_action("desk_slash_up", (_e, cx) => this.slashKey({ key: "up" }, cx))
+        .on_action("desk_slash_down", (_e, cx) => this.slashKey({ key: "down" }, cx))
+        .on_action("desk_slash_tab", (_e, cx) => this.slashKey({ key: "tab" }, cx))
+        .on_action("desk_slash_escape", (_e, cx) => this.slashKey({ key: "escape" }, cx))
+        .on_key_down((e, cx) => this.slashKey(e, cx))
         .child(Textarea.new(this.input).w_full().px(14).pt(12).pb(4).text_size(this.wide ? 14 : 13).text_color(t.foreground)
           .token((ctx) => {
             const role = this.roles.byId(ctx.token.id);
@@ -962,44 +1193,41 @@ export class Desks {
           }))
         .child(h_flex().px(10).pb(10).gap(6).items_center()
           .child(h_flex().min_w(0).flex_1().gap(5).items_center().text_size(11.5).text_color(t.dim)
-            .when(to.length > 0, (el) => el.child(div().flex_none().child("To"))
-              .children(to.map((r) => {
-                const role = this.roles.byId(r);
-                return h_flex().flex_none().h(22).pl(2).pr(7).gap(5).items_center().rounded(11).bg(t.raised).text_color(t.foreground)
-                  .when(Boolean(role), (el) => el.child(roleTile(div, svg, t, role, 18))).child(role?.name ?? r);
-              }))
-              .when(implicit, (el) => el.child(div().min_w(0).truncate().child(this.directTarget && this.directTask === d.slug ? `· ${this.directTarget}` : "· @ to mention"))))
-            .when(!to.length, (el) => el.child(div().truncate().child("Nobody here yet: add someone above"))))
+            .when(toList.length > 0, (el) => el.child(div().flex_none().child("To")).children(toList.map(pill))
+              .when(route !== null, (el) => el.child(div().min_w(0).truncate().child("· directly")))
+              .when(!route && implicit, (el) => el.child(div().min_w(0).truncate().child(this.directTarget && this.directTask === d.slug ? `· ${this.directTarget}` : "· @ to mention"))))
+            .when(!toList.length, (el) => el.child(div().truncate().child("Nobody here yet: add someone above"))))
           .child(h_flex().id("send-mode").h(28).px(8).gap(5).items_center().rounded(8).flex_none()
-            .text_size(11.5).text_color(this.sendMode === "queue" ? t.accent : t.muted).cursor_pointer()
+            .text_size(11.5).text_color(this.sendMode === "queue" ? t.accent : t.dim).cursor_pointer()
             .hover(style => style.bg(t.hover).text_color(t.foreground))
-            .tooltip(this.sendMode === "queue" ? "Queue until the agent is idle. Click to send immediately instead." : "Send immediately. Click to queue until the agent is idle instead.")
+            .tooltip(this.sendMode === "queue" ? "Queue until the agent is idle. Click to send immediately instead. (/queue)" : "Send immediately. Click to queue until the agent is idle instead. (/queue)")
             .on_click((_e, cx) => { this.sendMode = this.sendMode === "queue" ? "now" : "queue"; cx.notify(); })
             .child(icon(this.sendMode === "queue" ? "clock" : "play", 12))
-            .child(this.sendMode === "queue" ? "Queue next" : "Send now").child(icon("chevron-down", 10)))
+            .child(this.sendMode === "queue" ? "Queue next" : "Send now"))
           .child(h_flex().id("desk-send").size(30).flex_none().items_center().justify_center().rounded(15)
-            .bg(canSend ? t.solid : t.raised).text_color(canSend ? t.solid_foreground : t.dim)
+            .bg(t.accent).text_color(t.accent_foreground).when(!canSend, (el) => el.opacity(0.35))
             .when(canSend, (el) => el.cursor_pointer().hover((s) => s.opacity(0.85)))
-            .tooltip(canSend ? `${this.sendMode === "queue" ? "Queue" : "Send"} (Enter) · new line: Shift+Enter` : to.length ? "Type a message" : "Add someone first")
+            .tooltip(canSend ? `${this.sendMode === "queue" ? "Queue" : "Send"} (Enter) · new line: Shift+Enter` : toList.length ? "Type a message, or / for commands" : "Add someone first")
             .on_click((_e, cx) => { if (canSend) this.send(cx); })
             .child(this.acting === "send" ? svg("mods/workspace-chrome/spinner.svg").size(14).spin(900) : icon("arrow-up", 14)))));
 
     // As the main view the header, details and briefs sit in the reading column too; the thread
     // scrolls full width so its scrollbar stays at the window's edge.
     const band = (el) => (this.wide ? h_flex().w_full().flex_none().justify_center().child(el.w_full().max_w(COLUMN + 24)) : el);
+    const strip = route ? routeHeader(this, t, d, route) : headerStrip(this, t, members, now) ?? div().h(28);
     return v_flex().size_full().min_h(0)
       // As the main view, the desk's controls live in the floating card (card.js), not up here.
       .when(!this.wide, (el) => el.child(header))
+      .when(!this.wide && Boolean(route), (el) => el.child(h_flex().px(8).py(4).border_b(1).border_color(t.border).child(strip)))
       .when(Boolean(details) && !this.wide, (el) => el.child(details))
       // The floating card sits in the top band; the strip runs along the band's bottom edge.
       // Opaque and in normal flow: the thread viewport starts below it and clips there.
       .when(this.wide, (el) => el.child(v_flex().h(104).flex_none().justify_end().bg(t.background)
-        .child(band(h_flex().px(12).child(div().w_full().pb(4).border_b(1).border_color(t.border)
-          .child(headerStrip(this, t, members, now) ?? div().h(28)))))))
-      .when(Boolean(d.parent_task), (el) => el.child(band(h_flex().px(12).py(6).gap(8).items_center()
+        .child(band(h_flex().px(12).child(div().w_full().pb(4).border_b(1).border_color(t.border).child(strip))))))
+      .when(Boolean(d.parent_task) && !route, (el) => el.child(band(h_flex().px(12).py(6).gap(8).items_center()
         .child(button(t, "side-return", "Back to original desk", () => openDesk(d.parent_task), { iconName: "back" }))
         .child(div().text_size(11).text_color(t.dim).child("Separate conversation")))))
-      .when(Boolean(briefs), (el) => el.child(band(briefs)))
+      .when(Boolean(briefs) && !route, (el) => el.child(band(briefs)))
       .child(thread)
       .child(band(composer));
   }

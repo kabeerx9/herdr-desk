@@ -630,6 +630,35 @@ def context_max(model):
     return CONTEXT_MAX_1M if re.search(r"\[1m\]|[-_]1m\b", str(model or ""), re.I) else CONTEXT_MAX
 
 
+def _subagents(path, calls, results, metas=None):
+    """Task/Agent calls with their results and subagents/ files: one row each (see team timeline)."""
+    metas = _subagent_metas(path) if calls and metas is None else (metas or {})
+    subagents = []
+    for call in calls[-20:]:
+        res, meta = results.get(call["tool_id"]), metas.get(call["tool_id"])
+        async_launch = bool(res and res["meta"].get("status") == "async_launched")
+        agent_id = (meta or {}).get("_id") or ("agent-" + res["meta"]["agentId"] if res and res["meta"].get("agentId") else None)
+        if res and res["error"]:
+            status = "failed"
+        elif meta is not None and "finished" in meta:
+            status = "done" if meta.get("finished") else "running"
+        else:
+            status = "done" if res and not async_launch else "running"
+        line, last = (None, None)
+        sub_file = (meta or {}).get("_file") or (os.path.join(path[:-len(".jsonl")], "subagents", agent_id + ".jsonl") if agent_id else None)
+        if sub_file and (status == "running" or async_launch):
+            line, last = _subagent_progress(sub_file)
+        if status in ("done", "failed") and res and not async_launch:
+            line = _first_line(res["text"]) or line
+        ended_ms = None
+        if status in ("done", "failed"):
+            ended_ms = res["at"] if res and not async_launch else last
+        subagents.append({"id": agent_id or call["tool_id"], "title": call["input"].get("description") or (meta or {}).get("description"),
+                          "type": call["input"].get("subagent_type") or (meta or {}).get("agentType") or "general-purpose",
+                          "status": status, "started_ms": call["at"], "ended_ms": ended_ms, "line": (line or None) and line[:140]})
+    return subagents
+
+
 def transcript_timeline(path, since_ms=None, limit=TAIL_BYTES):
     """What a Claude agent did this turn, from the transcript's tail only (see team timeline)."""
     lines, _cut = read_tail(path, limit)
@@ -712,33 +741,160 @@ def transcript_timeline(path, since_ms=None, limit=TAIL_BYTES):
         thought = {"text": thought["text"][:400], "heading": heading.group(1).strip() if heading else None,
                    "at": thought["at"], "source": thought["source"]}
 
-    metas = _subagent_metas(path) if calls else {}
-    subagents = []
-    for call in calls[-20:]:
-        res, meta = results.get(call["tool_id"]), metas.get(call["tool_id"])
-        async_launch = bool(res and res["meta"].get("status") == "async_launched")
-        agent_id = (meta or {}).get("_id") or ("agent-" + res["meta"]["agentId"] if res and res["meta"].get("agentId") else None)
-        if res and res["error"]:
-            status = "failed"
-        elif meta is not None and "finished" in meta:
-            status = "done" if meta.get("finished") else "running"
-        else:
-            status = "done" if res and not async_launch else "running"
-        line, last = (None, None)
-        sub_file = (meta or {}).get("_file") or (os.path.join(path[:-len(".jsonl")], "subagents", agent_id + ".jsonl") if agent_id else None)
-        if sub_file and (status == "running" or async_launch):
-            line, last = _subagent_progress(sub_file)
-        if status in ("done", "failed") and res and not async_launch:
-            line = _first_line(res["text"]) or line
-        ended_ms = None
-        if status in ("done", "failed"):
-            ended_ms = res["at"] if res and not async_launch else last
-        subagents.append({"id": agent_id or call["tool_id"], "title": call["input"].get("description") or (meta or {}).get("description"),
-                          "type": call["input"].get("subagent_type") or (meta or {}).get("agentType") or "general-purpose",
-                          "status": status, "started_ms": call["at"], "ended_ms": ended_ms, "line": (line or None) and line[:140]})
+    subagents = _subagents(path, calls, results)
     return {"supported": True, "turn": {"started_ms": started, "working": bool(turn) and not ended, "partial": partial},
             "thought": thought, "tools": {"summary": tools_summary(counts, failed), "counts": counts, "failed": failed},
             "subagents": subagents, "context": context, "title": title}
+
+
+TRANSCRIPT_TURNS = 120
+HC_WRAP = re.compile(r'^\s*<hc from="([^"]*)"[^>]*>(.*)</hc>\s*$', re.S)
+DESK_KABEER = re.compile(r'^\[desk chat\] Kabeer(?: \((?:to|via) [^)]*\))?: ', re.S)
+DIGEST = "\n\nAlso new in the chat"
+COMMAND = re.compile(r"<command-name>\s*(/[^<\s]+)\s*</command-name>")
+COMMAND_ARGS = re.compile(r"<command-args>(.*?)</command-args>", re.S)
+PASTED = re.compile(r'<pasted_content id="([^"]*)">\n?(.*?)\n?</pasted_content(?: id="\1")?>', re.S)
+TYPED_COMMAND = re.compile(r"^/[A-Za-z][\w:-]*(?: [^\n]*)?$")
+
+
+def prompt_text(entry):
+    """A prompt's text, with pastes (hc send's bracketed paste, `<pasted_content>`) unwrapped."""
+    text = "\n".join(str(b.get("text") or "") for b in _content(entry) if isinstance(b, dict) and b.get("type") == "text")
+    return PASTED.sub(lambda m: m.group(2), text).strip()
+
+
+def classify_prompt(text):
+    """Who a prompt in a member's transcript came from, and what they said, without the Desk's wrapping.
+    kabeer: a desk-chat delivery ("[desk chat] Kabeer: ...") or typed in its terminal;
+    desk: the Desk's own notices ("[desk] ...", other agents' asks/answers relayed by the chat, the brief);
+    parent: another agent's message (`<hc from=...>`), e.g. the CTO directing it or a child's report."""
+    text = str(text or "").strip()
+    sender = None
+    wrapped = HC_WRAP.match(text)
+    if wrapped:
+        sender, text = wrapped.group(1).split(" ")[0] or None, wrapped.group(2).strip()
+    m = DESK_KABEER.match(text)
+    if m:
+        body = text[m.end():]
+        cut = body.find(DIGEST)
+        return {"who": "kabeer", "text": (body[:cut] if cut >= 0 else body).strip(), "via": "chat"}
+    if text.startswith("[desk chat] ") or text.startswith("[desk] "):
+        body = text.split("] ", 1)[1]
+        cut = body.find(DIGEST)
+        return {"who": "desk", "text": (body[:cut] if cut >= 0 else body).strip()}
+    if sender:
+        return {"who": "parent", "text": text, "from": sender}
+    if "(Team task: " in text:
+        return {"who": "desk", "text": text}
+    return {"who": "kabeer", "text": text}
+
+
+def transcript_turns(path, limit=TRANSCRIPT_TURNS, tail=TAIL_BYTES):
+    """A member's own conversation, from the transcript's tail (see team transcript): prompts by who sent
+    them, the agent's replies, and the tool runs before each reply folded into it as a summary."""
+    lines, cut = read_tail(path, tail)
+    entries = []
+    for line in lines:
+        try:
+            entry = json.loads(line)
+        except ValueError:
+            continue
+        if isinstance(entry, dict) and not entry.get("isSidechain"):
+            entries.append(entry)
+    turns, results = [], {}
+    run = None  # the agent's work since its last text: {counts, failed, calls, at}
+
+    def work():
+        nonlocal run
+        if run is None:
+            run = {"counts": {k: 0 for k in CATEGORIES}, "failed": 0, "calls": [], "ids": set(), "at": None}
+        return run
+
+    def close(text, at):
+        """The reply text (or "" for work that's still going) closes the run before it into one entry."""
+        nonlocal run
+        r, run = run, None
+        tools = None
+        subs = []
+        if r:
+            failed = sum(1 for i in r["ids"] if (results.get(i) or {}).get("error"))
+            if any(r["counts"].values()):
+                tools = {"summary": tools_summary(r["counts"], failed), "counts": r["counts"], "failed": failed}
+            subs = r["calls"]
+        last = turns[-1] if turns else None
+        if text and not tools and not subs and last and last["who"] == "agent" and last.get("text") and not last.get("_open"):
+            last["text"] += "\n\n" + text
+            return
+        turns.append({"who": "agent", "text": text, "at": at if at is not None else (r or {}).get("at"),
+                      "tools": tools, "subagents": subs, **({"_open": True} if not text else {})})
+
+    for entry in entries:
+        kind, at = entry.get("type"), ts_ms(entry.get("timestamp"))
+        if kind == "system" and entry.get("subtype") == "compact_boundary":
+            if run:
+                close("", at)
+            turns.append({"who": "desk", "kind": "event", "text": "Conversation compacted", "at": at, "tools": None, "subagents": []})
+            continue
+        if kind == "assistant":
+            for block in _content(entry):
+                if not isinstance(block, dict):
+                    continue
+                if block.get("type") == "tool_use":
+                    r = work()
+                    r["at"] = r["at"] or at
+                    name = block.get("name") or ""
+                    r["counts"][TOOL_CATEGORY.get(name, "other")] += 1
+                    r["ids"].add(block.get("id"))
+                    if name in ("Task", "Agent"):
+                        r["calls"].append({"tool_id": block.get("id"), "input": block.get("input") or {}, "at": at})
+                elif block.get("type") == "text" and str(block.get("text") or "").strip():
+                    close(str(block["text"]).strip(), at)
+            continue
+        if kind != "user":
+            continue
+        blocks = _content(entry)
+        if any(isinstance(b, dict) and b.get("type") == "tool_result" for b in blocks):
+            for b in blocks:
+                if isinstance(b, dict) and b.get("type") == "tool_result":
+                    results[b.get("tool_use_id")] = {"error": bool(b.get("is_error")), "at": at, "text": _result_text(b),
+                                                    "meta": entry.get("toolUseResult") if isinstance(entry.get("toolUseResult"), dict) else {}}
+            continue
+        if entry.get("isMeta") or entry.get("isCompactSummary"):
+            continue
+        raw = prompt_text(entry)
+        command = COMMAND.search(raw)
+        if command:
+            if run:
+                close("", at)
+            args = COMMAND_ARGS.search(raw)
+            text = (command.group(1) + (" " + args.group(1).strip() if args and args.group(1).strip() else "")).strip()
+            # Claude logs a typed command twice: as typed, then as <command-name>. Keep one.
+            dup = next((x for x in reversed(turns[-3:]) if x.get("kind") == "command" and x["text"] == text), None)
+            if dup is None:
+                turns.append({"who": "kabeer", "kind": "command", "text": text, "at": at, "tools": None, "subagents": []})
+            continue
+        if not is_prompt(entry):
+            continue
+        if run:
+            close("", at)
+        said = classify_prompt(raw)
+        if said["who"] == "kabeer" and "via" not in said and TYPED_COMMAND.match(said["text"]):
+            said["kind"] = "command"
+        turns.append({**said, "at": at, "tools": None, "subagents": []})
+    if run:
+        close("", None)
+    # Subagents need the results, which can land after the call: resolve them once, at the end.
+    metas = None
+    for turn in turns:
+        calls = turn.get("subagents") or []
+        if calls and isinstance(calls[0], dict) and "tool_id" in calls[0]:
+            if metas is None:
+                metas = _subagent_metas(path)
+            turn["subagents"] = _subagents(path, calls, results, metas)
+        turn.pop("_open", None)
+    partial = cut or len(turns) > limit
+    return {"supported": True, "turns": turns[-limit:] if limit else turns, "partial": bool(partial)}
+
 
 
 def transcript_title(path, cache_path=None, max_scan=8 * 1024 * 1024):

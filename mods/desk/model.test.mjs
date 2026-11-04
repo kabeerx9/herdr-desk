@@ -131,3 +131,40 @@ test('minimap offsets walk measured rows and pick the prompt being read', () => 
   assert.equal(activePrompt(prompts, off, 400, 100), 2);
   assert.equal(activePrompt([{ key: 'z', hidden: true }, { key: 'c' }], off, 0, 100), 0);
 });
+
+import { parseTranscript, buildRouteRows } from './model.js';
+
+test('transcripts parse defensively', () => {
+  assert.equal(parseTranscript('nope'), null);
+  assert.equal(parseTranscript(''), null);
+  const p = parseTranscript(JSON.stringify({ supported: true, partial: true, turns: [
+    { who: 'kabeer', text: 'hi', at: 1 }, { who: 'robot', text: 'x' }, null,
+    { who: 'agent', text: 'ok', at: 2, tools: { counts: { read: 2 } } }] }));
+  assert.deepEqual(p.turns.map((x) => x.who), ['kabeer', 'agent']);
+  assert.equal(p.turns[1].tools.summary, 'Read 2 files');
+  assert.equal(p.partial, true);
+  assert.equal(parseTranscript('{"supported":false,"turns":[]}').supported, false);
+});
+
+test('route rows: types, stable keys, and the live tail left to the live row', () => {
+  const turns = [
+    { who: 'kabeer', text: 'go', at: 1 }, { who: 'kabeer', kind: 'command', text: '/clear', at: 2 },
+    { who: 'parent', text: 'from cto', at: 3 }, { who: 'agent', text: 'done', at: 4, tools: { summary: 'Ran 1 command' } },
+    { who: 'agent', text: '', at: 5, tools: { summary: 'Read 1 file' }, subagents: [] }];
+  const cache = new Map();
+  const a = buildRouteRows(turns, cache, { working: true });
+  assert.deepEqual(a.rows.map((r) => r.type), ['mine', 'command', 'notice', 'reply']);
+  assert.deepEqual(a.prompts.map((p) => p.text), ['go']);
+  const b = buildRouteRows(turns.slice(1), cache, { working: false });
+  assert.equal(b.rows[0], a.rows[1]);
+  assert.equal(b.rows.at(-1).type, 'reply');
+  const twins = buildRouteRows([{ who: 'agent', text: 'x', at: 9 }, { who: 'agent', text: 'x', at: 9 }]);
+  assert.notEqual(twins.rows[0].key, twins.rows[1].key);
+});
+
+test('a command message is a chip row: no turn, no prompt mark', () => {
+  const { rows, prompts, open } = buildRows([{ at: 1, from: 'kabeer', kind: 'command', to: ['cto'], text: '/clear' }]);
+  assert.equal(rows[0].type, 'command');
+  assert.deepEqual(prompts, []);
+  assert.deepEqual(open, {});
+});

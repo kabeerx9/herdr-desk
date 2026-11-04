@@ -17,6 +17,7 @@
 !/bin/test_desk_review.py
 !/bin/test_desk_timeline.py
 !/bin/test_team_overhaul.py
+!/bin/test_desk_transcript.py
 
 !/layouts/
 /layouts/*

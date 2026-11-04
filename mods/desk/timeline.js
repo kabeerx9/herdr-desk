@@ -36,6 +36,13 @@ export const stepIcon = (tool) => STEP_ICON[stepKind(tool)];
 
 const gapTop = (o) => (o.wide ? 28 : 20);
 const avatarOf = (t, role, size) => (role ? roleTile(div, svg, t, role, size) : div().size(size).flex_none().rounded(size / 2).bg(t.raised));
+// An author's avatar and name; for a live member, a link to its own conversation (its route).
+function who(o, t, id, address, avatar, name) {
+  return h_flex().id(id).flex_none().gap(8).items_center().rounded(6)
+    .when(Boolean(address), (el) => el.cursor_pointer().tooltip("Open its own conversation")
+      .hover((s) => s.opacity(0.8)).on_click((_e, cx) => o.openRoute(address, cx)))
+    .child(avatar).child(name);
+}
 const nameOf = (o, id) => (id === "kabeer" ? "You" : o.roles.byId(id)?.name ?? id);
 
 // Each drawn row is measured, so the minimap can find a prompt's offset.
@@ -60,6 +67,40 @@ function copyButton(o, t, id, text) {
   return tool(t, `${id}-copy`, done ? "check" : "copy", done ? "Copied" : "Copy", (_e, cx) => o.copy(id, text, cx), done ? t.done : null);
 }
 
+// Your message: a raised bubble on the right; who it went to and when show on hover.
+export function mineBubble(o, t, id, text, meta, { ok = false, failed = null } = {}) {
+  const hovered = o.hoverMsg === id, size = o.wide ? 14 : 13;
+  return v_flex().id(id).items_end().gap(4).pt(gapTop(o))
+    .on_hover((h, cx) => o.hoverOn(id, h, cx))
+    .child(div().max_w_4_5().px(14).py(9).rounded(18).bg(t.raised).border_1().border_color(t.border)
+      .text_size(size).line_height(1.55).text_color(t.foreground).child(text))
+    .child(h_flex().h(22).gap(6).items_center().text_size(11).text_color(t.dim).when(!hovered, (el) => el.opacity(0))
+      .child(copyButton(o, t, id, text))
+      .child(meta)
+      .when(ok, (el) => el.child(icon("check", 11).text_color(t.dim))))
+    .when(Boolean(failed), (el) => el.child(notDelivered(t, failed)));
+}
+
+// A slash command you sent: a compact chip, not a bubble.
+export function commandChip(o, t, id, text, meta, { failed = null } = {}) {
+  const hovered = o.hoverMsg === id;
+  return v_flex().id(id).items_end().gap(3).pt(o.wide ? 18 : 14)
+    .on_hover((h, cx) => o.hoverOn(id, h, cx))
+    .child(h_flex().gap(8).items_center()
+      .child(div().text_size(11).text_color(t.dim).when(!hovered, (el) => el.opacity(0)).child(meta))
+      .child(h_flex().max_w(420).h(26).px(9).gap(6).items_center().rounded(8).border_1().border_color(failed ? t.blocked : t.input)
+        .text_size(12).text_color(t.foreground)
+        .child(icon("terminal", 12).text_color(t.dim))
+        .child(div().min_w(0).truncate().font_family("JetBrains Mono").child(text))))
+    .when(Boolean(failed), (el) => el.child(notDelivered(t, failed)));
+}
+
+function notDelivered(t, failed) {
+  return h_flex().max_w_4_5().gap(6).items_center()
+    .child(statusMark(t, "failed", 11))
+    .child(div().text_size(11.5).line_height(1.4).text_color(t.muted).child(`Not delivered to ${failed}. Send it again once they're free.`));
+}
+
 // One message row. Yours is a quiet bubble on the right; theirs is full-width prose under a
 // calm name row; a finished turn opens with a "Worked for" fold over its steps.
 export function messageRow(o, t, slug, row, ctx) {
@@ -79,21 +120,12 @@ export function messageRow(o, t, slug, row, ctx) {
     return quietLine(id, t, `${m.kind === "desk" ? `${who} started this desk${m.project ? ` in ${m.project}` : ""}` : `${who} added ${list}`} · ${clock(m.at)}`);
   }
   const hovered = o.hoverMsg === id, size = o.wide ? 14 : 13;
-  if (row.type === "mine") {
+  if (row.type === "mine" || row.type === "command") {
     const to = (m.to ?? []).map((r) => nameOf(o, r)).join(", ");
     const ok = Boolean(m.delivered?.length && !m.failed?.length);
-    return v_flex().id(id).items_end().gap(4).pt(gapTop(o))
-      .on_hover((h, cx) => o.hoverOn(id, h, cx))
-      .child(div().max_w_4_5().px(14).py(9).rounded(16).bg(t.raised)
-        .text_size(size).line_height(1.55).text_color(t.foreground).child(m.text ?? ""))
-      .child(h_flex().h(22).gap(6).items_center().text_size(11).text_color(t.dim)
-        .child(div().when(!hovered, (el) => el.opacity(0)).child(copyButton(o, t, id, m.text)))
-        .child(`To ${to} · ${clock(m.at)}`)
-        .when(ok, (el) => el.child(icon("check", 11).text_color(t.dim))))
-      .when(Boolean(m.failed?.length), (el) => el.child(h_flex().max_w_4_5().gap(6).items_center()
-        .child(statusMark(t, "failed", 11))
-        .child(div().text_size(11.5).line_height(1.4).text_color(t.muted)
-          .child(`Not delivered to ${m.failed.map((f) => `${nameOf(o, f.role)} (${f.why})`).join("; ")}. Send it again once they're free.`))));
+    const opts = { ok, failed: m.failed?.length ? m.failed.map((f) => `${nameOf(o, f.role)} (${f.why})`).join("; ") : null };
+    return row.type === "command" ? commandChip(o, t, id, m.text ?? "", `To ${to} · ${clock(m.at)}`, opts)
+      : mineBubble(o, t, id, m.text ?? "", `To ${to} · ${clock(m.at)}`, opts);
   }
 
   const role = o.roles.byId(m.from), kind = KIND[m.kind], aside = row.aside;
@@ -127,8 +159,8 @@ export function messageRow(o, t, slug, row, ctx) {
   return v_flex().id(id).relative().gap(6).pt(row.grouped ? 8 : aside ? 16 : gapTop(o))
     .on_hover((h, cx) => o.hoverOn(id, h, cx))
     .when(!row.grouped, (el) => el.child(h_flex().h(22).gap(8).items_center()
-      .child(avatarOf(t, role, tile))
-      .child(div().flex_none().text_size(aside ? 12 : 13).font_semibold().text_color(aside ? t.muted : t.foreground).child(role?.name ?? m.from))
+      .child(who(o, t, `${id}-who`, m.address && ctx.members.some((x) => x.address === m.address) ? m.address : null,
+        avatarOf(t, role, tile), div().flex_none().text_size(aside ? 12 : 13).font_semibold().text_color(aside ? t.muted : t.foreground).child(role?.name ?? m.from)))
       .when(Boolean(to), (el) => el.child(div().flex_none().text_size(12).text_color(t.dim).child(`to ${to}`)))
       .when(Boolean(kind), (el) => el.child(h_flex().flex_none().gap(4).items_center().text_size(12).text_color(t.muted)
         .when(Boolean(kind.mark), (x) => x.child(statusMark(t, kind.mark, 11))).child(kind.word)))
@@ -143,7 +175,7 @@ export function messageRow(o, t, slug, row, ctx) {
     .when(Boolean(fold), (el) => el.child(fold))
     .when(open, (el) => el.child(v_flex().gap(6).pb(4)
       .when(Boolean(snap.steps?.length), (x) => x.child(stepList(t, `${id}-steps`, snap.steps, { live: false })))
-      .when(Boolean(snap.subagents?.length), (x) => x.child(subagents(o, t, `${id}-subs`, snap.subagents, ctx.now)))))
+      .when(Boolean(snap.subagents?.length), (x) => x.child(subagents(o, t, `${id}-subs`, snap.subagents, ctx.now, m.address && ctx.members.some((y) => y.address === m.address) ? m.address : null)))))
     .child(body)
     .when(Boolean(m.criteria?.length), (el) => el.child(criteriaList(t, id, m.criteria, indent)))
     .when(latest, (el) => el.child(h_flex().ml(-5).gap(2)
@@ -169,8 +201,10 @@ export function stepList(t, id, steps, { live = true, fresh = null } = {}) {
 
 // Subagents: one row each (icon, mark, title, one detail line, elapsed); two or more fold
 // under a stacked header ("3 subagents · 2 running").
-export function subagents(o, t, id, subs, now) {
-  const rowOf = (s) => h_flex().id(`${id}-${s.id}`).w_full().max_w(600).py(4).gap(8).items_center()
+export function subagents(o, t, id, subs, now, parent = null) {
+  const rowOf = (s) => h_flex().id(`${id}-${s.id}`).w_full().max_w(600).py(4).px(4).ml(-4).gap(8).items_center().rounded(8)
+    .when(Boolean(parent), (el) => el.cursor_pointer().tooltip("Open the conversation that started it")
+      .hover((st) => st.bg(t.hover)).on_click((_e, cx) => o.openRoute(parent, cx)))
     .child(div().relative().flex_none().size(20).rounded(6).border_1().border_color(t.border).flex().items_center().justify_center()
       .child(icon("sparkles", 11).text_color(t.dim)))
     .child(statusMark(t, subStatus(s), 11))
@@ -209,8 +243,8 @@ export function liveRows(o, t, members, now) {
     const pad = 26;
     return v_flex().id(id).gap(6).pt(gapTop(o))
       .child(h_flex().h(22).gap(8).items_center()
-        .child(avatarOf(t, role, 18))
-        .child(div().flex_none().text_size(13).font_semibold().text_color(t.foreground).child(name))
+        .child(o.route ? h_flex().flex_none().gap(8).items_center().child(avatarOf(t, role, 18)).child(div().text_size(13).font_semibold().text_color(t.foreground).child(name))
+          : who(o, t, `${id}-who`, m.address, avatarOf(t, role, 18), div().text_size(13).font_semibold().text_color(t.foreground).child(name)))
         .child(statusMark(t, "working", 12))
         .when(Boolean(started), (el) => el.child(div().flex_none().text_size(11).text_color(t.dim).child(span(now - started))))
         .when(Boolean(caption), (el) => el.child(div().min_w(0).truncate().text_size(12).text_color(t.dim).child(caption))))
@@ -230,7 +264,7 @@ export function liveRows(o, t, members, now) {
           .when(Boolean(fresh?.tools?.failed), (x) => x.child(h_flex().flex_none().gap(4).items_center()
             .child(statusMark(t, "failed", 10)).child(`${fresh.tools.failed} failed`))))
         .when(open && steps.length > 0, (x) => x.child(stepList(t, `${id}-feed`, steps.slice(-40), { fresh: o.freshStep(m.address) })))))
-      .when(subs.length > 0, (el) => el.child(div().pl(pad).child(subagents(o, t, `${id}-subs`, subs, now))));
+      .when(subs.length > 0, (el) => el.child(div().pl(pad).child(subagents(o, t, `${id}-subs`, subs, now, o.route ? null : m.address))));
   });
 }
 

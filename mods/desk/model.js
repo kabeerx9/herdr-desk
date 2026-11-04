@@ -51,13 +51,13 @@ export function buildRows(messages, cache = new Map()) {
   merged.forEach((m, i) => {
     let worked = null, turnStart = null;
     const event = EVENTS.includes(m.kind);
-    if (!event && m.kind !== "context") {
+    if (!event && m.kind !== "context" && m.kind !== "command") {
       if (m.from === "kabeer" || m.kind === "ask" || m.kind === "route") {
         for (const r of m.to ?? []) if (!started.has(r)) started.set(r, m.at);
       }
       if (m.from !== "kabeer" && started.has(m.from)) { turnStart = started.get(m.from); worked = m.at - turnStart; started.delete(m.from); }
     }
-    const type = m.kind === "permission" ? "permission" : event ? "event" : m.from === "kabeer" ? "mine" : "agent";
+    const type = m.kind === "permission" ? "permission" : event ? "event" : m.kind === "command" ? "command" : m.from === "kabeer" ? "mine" : "agent";
     const aside = type === "agent" && ASIDE.includes(m.kind);
     const grouped = type === "agent" && !aside && !KIND[m.kind] && Boolean(prev) && prev.m.from === m.from && prev.type === "agent"
       && !KIND[prev.m.kind] && m.at - prev.m.at < 300000;
@@ -232,4 +232,41 @@ export function activePrompt(prompts, offsets, scroll, viewport) {
     if (y === undefined ? p.hidden : y <= line) active = i;
   });
   return active;
+}
+
+// ── member routes ────────────────────────────────────────────────────────────
+
+// bin/team transcript's JSON: { supported, turns, partial, reason }, or null when it errored.
+export function parseTranscript(stdout) {
+  let data;
+  try { data = JSON.parse(String(stdout ?? "").trim() || "null"); } catch { return null; }
+  if (!data || typeof data !== "object") return null;
+  const who = new Set(["kabeer", "desk", "agent", "parent"]);
+  const turns = (Array.isArray(data.turns) ? data.turns : []).filter((x) => x && typeof x === "object" && who.has(x.who)).map((x) => ({
+    who: x.who, kind: x.kind ?? null, text: String(x.text ?? ""), at: Number(x.at) || null, from: x.from ?? null, via: x.via ?? null,
+    tools: x.tools && typeof x.tools === "object" ? { summary: x.tools.summary || summarizeCounts(x.tools.counts), counts: x.tools.counts ?? {}, failed: Number(x.tools.failed) || 0 } : null,
+    subagents: Array.isArray(x.subagents) ? x.subagents.filter((s) => s && typeof s === "object") : [],
+  }));
+  return { supported: data.supported !== false, turns, partial: Boolean(data.partial), reason: data.reason ?? null };
+}
+
+// A member's conversation as rows, keyed by time + author + content so a row keeps its key
+// (and its measured height) as the tail window slides. `cache` keeps unchanged row objects.
+// A text-less agent entry (work still going) is dropped while `working`: the live row shows it.
+export function buildRouteRows(turns, cache = new Map(), { working = false } = {}) {
+  const rows = [], prompts = [], seen = new Map();
+  (turns ?? []).forEach((x, i) => {
+    if (x.who === "agent" && !x.text && (working && i === turns.length - 1)) return;
+    if (x.who === "agent" && !x.text && !x.tools && !x.subagents?.length) return;
+    const base = `${x.at ?? "n"}-${x.who}-${hash(x.text)}`;
+    const n = seen.get(base) ?? 0; seen.set(base, n + 1);
+    const key = n ? `${base}-${n}` : base;
+    const type = x.kind === "command" ? "command" : x.kind === "event" ? "event" : x.who === "kabeer" ? "mine" : x.who === "agent" ? "reply" : "notice";
+    const sig = `${type}|${(x.tools?.summary) ?? ""}|${x.subagents?.map((s) => s.status).join(",") ?? ""}`;
+    let row = cache.get(key);
+    if (!row || row.sig !== sig) { row = { key, sig, type, x }; cache.set(key, row); }
+    rows.push(row);
+    if (type === "mine") prompts.push({ key, text: x.text, at: x.at });
+  });
+  return { rows, prompts };
 }

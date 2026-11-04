@@ -10,6 +10,7 @@
   team answer <id> "<answer>"               answer an ask by hand (replies are posted automatically)
   team inbox [--all]                        what's new in your desk's chat since you last looked
   team post --task SLUG --to ADDR:ROLE... "<message>"   (the Desk) Kabeer's chat message
+  team post --raw --task SLUG --to ADDR:ROLE "/cmd"     (the Desk) typed exactly as is, e.g. a CLI slash command
   team finish [--address T] [--keep-worktree]  wrap up: flag leftovers, or remove the team worktree and close
   team hook claude|codex                    (the CLIs' end-of-turn hook) posts a reply the chat is waiting for
   team hook claude-permission               (Claude's PermissionRequest hook) asks in the desk chat, waits for Allow/Deny
@@ -19,6 +20,7 @@
   team compact --address T                  a long context: Claude's /compact (same session, history summarized)
   team fresh --address T [--force]          or a new session: it writes a handoff, then a new one of it takes over
   team timeline --address T [--since-ms N]  what a Claude agent is doing this turn (from its transcript)
+  team transcript --address T [--limit N]   one member's own conversation (Claude), newest N turn entries
   team settle|unsettle --address T          put an agent away until it works, blocks or reports done again
   team snooze --address T --until-ms N      the same, until a time
   team review-send --address T --file F     (the Desk) send a batch of review comments; empty = approved
@@ -29,13 +31,13 @@ One launcher for everyone (the CTO, the Desk's buttons, you): it reads roles.jso
 gives every editing role its own git worktree, and starts the role with hc in its own Herdr tab, labeled role=<id> task=<slug>.
 Children always outlive their parent, so closing the CTO doesn't end its workers.
 """
-import contextlib, io, json, os, re, secrets, shutil, subprocess, sys, time, shlex, uuid
+import contextlib, fcntl, io, json, os, re, secrets, shutil, subprocess, sys, time, shlex, uuid
 from desk_runtime import Store as RuntimeStore, RuntimeError as DeskRuntimeError, adapter as runtime_adapter
 from desk_runtime import attention as runtime_attention
 from desk_runtime import find_queue as runtime_find_queue, queue_item as runtime_queue_item
 from desk_runtime import foreground_agent, recover_interrupted_claims, reorder as runtime_reorder, session_view as runtime_session_view, upsert_session
 from desk_runtime import (classify_launch_failure, find_transcript, gate_verdict, parse_contract, parse_criteria, runner_variants,
-                          session_cli, step_text, transcript_timeline, transcript_title, triage_apply, triage_clear)
+                          session_cli, step_text, transcript_timeline, transcript_title, transcript_turns, triage_apply, triage_clear)
 
 APP = os.environ.get("HERDR_APP_HOME") or os.path.expanduser("~/.config/herdr-app")
 DESK = os.path.join(APP, "mods", "desk")
@@ -293,13 +295,53 @@ def chat_file(slug):
     return os.path.join(CHAT, f"{slug}.jsonl")
 
 
+@contextlib.contextmanager
+def chat_lock(slug):
+    """Appends and the one rewrite (desk_autoname) take this, so a rewrite never drops an append."""
+    os.makedirs(CHAT, exist_ok=True)
+    with open(chat_file(slug)[:-len(".jsonl")] + ".lock", "a") as lock:
+        fcntl.flock(lock, fcntl.LOCK_EX)
+        try:
+            yield
+        finally:
+            fcntl.flock(lock, fcntl.LOCK_UN)
+
+
 def chat_append(slug, rec):
     """One thread per desk, outside any repo, since a desk can span several."""
-    os.makedirs(CHAT, exist_ok=True)
     rec = {"at": int(time.time() * 1000), **rec}
-    with open(chat_file(slug), "a") as f:
+    with chat_lock(slug), open(chat_file(slug), "a") as f:
         f.write(json.dumps(rec) + "\n")
     return rec
+
+
+AUTO_NAME = re.compile(r"^(?:.+ · )?[A-Z][a-z]{2} \d{1,2} \d\d:\d\d$")
+
+
+def desk_autoname(slug, title):
+    """A desk nobody named ("tattvix · Nov 4 14:54") takes its CTO's session title, once.
+    The first {kind:"desk"} line is rewritten under the chat lock; a named desk is left alone."""
+    title = " ".join(str(title or "").split())[:80]
+    path = chat_file(slug)
+    if not title or not os.path.exists(path):
+        return False
+    with chat_lock(slug):
+        with open(path) as f:
+            first = f.readline()
+            try:
+                head = json.loads(first)
+            except ValueError:
+                return False
+            if not isinstance(head, dict) or head.get("kind") != "desk" or head.get("named") \
+                    or not (head.get("auto") or AUTO_NAME.match(str(head.get("name") or ""))):
+                return False
+            rest = f.read()
+        head.update(name=title, named="title", auto=False)
+        tmp = path + ".tmp"
+        with open(tmp, "w") as f:
+            f.write(json.dumps(head) + "\n" + rest)
+        os.replace(tmp, path)
+    return True
 
 
 def chat_read(slug):
@@ -1148,12 +1190,62 @@ def inbox(args):
     print("\n".join(chat_line(r, 100000) for r in recs) or "(nothing new in the desk chat)")
 
 
+RAW_KEYS_MAX = 200
+
+
+def type_raw(addr, text):
+    """Types text into an agent's terminal exactly as given. A short one-line slash command goes in
+    as keys, so the CLI's own command menu reads it as typed (a paste can arrive as a message);
+    anything else is pasted and submitted. Refuses a permission prompt: keys would answer it."""
+    info = terminal(addr)
+    if not is_agent(info):
+        return "Recipient is disconnected or no longer running its configured agent"
+    if (info.get("status") or {}).get("state") == "blocked":
+        return "It's waiting on a prompt in its terminal; answer that first"
+    if text.startswith("/") and "\n" not in text and len(text) <= RAW_KEYS_MAX:
+        keys = ["space" if c == " " else c for c in text] + ["enter"]
+        r = sh(["hc", "keys", addr, *keys])
+    else:
+        r = sh(["hc", "send", addr, text])
+    if r.returncode == 0:
+        return None
+    why = (r.stderr or r.stdout).strip()
+    try:
+        why = json.loads(why)["error"]["message"]
+    except (ValueError, KeyError, TypeError):
+        pass
+    return why[:160] or "couldn't type into it"
+
+
+def post_raw(args, text, targets):
+    """A command from the Desk chat: delivered exactly as typed, no "[desk chat]" tag, and no reply
+    is reserved (a CLI command isn't a chat message). Logged as kind "command"."""
+    delivered, delivered_to, failed = [], [], []
+    for addr, role in targets:
+        labels = terminal(addr).get("labels") or {}
+        if labels.get("task") != args.task or labels.get("role") != role:
+            failed.append({"role": role, "why": "Recipient is disconnected or belongs to another desk."})
+            continue
+        why = type_raw(addr, text)
+        if why:
+            failed.append({"role": role, "why": why})
+        else:
+            delivered.append(role); delivered_to.append(addr)
+    rec = chat_append(args.task, {"from": "kabeer", "kind": "command", "to": [r for _, r in targets], "text": text,
+                                  "delivered": delivered, "delivered_to": delivered_to, "failed": failed})
+    print(json.dumps(rec))
+    if failed and not delivered:
+        sys.exit(1)
+
+
 def post(args):
     """Kabeer's message from the Desk chat: logged, then typed into each recipient.
     The CTO also gets what it hasn't seen yet in the chat."""
     text = " ".join(args.text).strip()
     if not text or not args.to:
         die("post needs --to ADDR:ROLE and a message")
+    if getattr(args, "raw", False):
+        return post_raw(args, text, [t.split(":", 1) if ":" in t else (t, t) for t in args.to])
     targets = [t.split(":", 1) if ":" in t else (t, t) for t in args.to]
     names = ", ".join(r for _, r in targets)
     delivered, delivered_to, failed = [], [], []
@@ -1245,6 +1337,9 @@ def runtime_state(args):
         for key in ("settled_at", "snoozed_until", "evidence"):
             view.setdefault(key, None)
         view["title"] = session_title(rec)
+        if view["title"] and rec.get("role") == "cto" and rec.get("task"):
+            with contextlib.suppress(OSError):
+                desk_autoname(rec["task"], view["title"])
         sessions.append(view)
     queue = [x for x in data["queue"] if not args.task or x.get("task") == args.task]
     print(json.dumps({"sessions": sessions, "queue": queue,
@@ -1294,6 +1389,25 @@ def runtime_timeline(args):
     live = ((terminal(args.address).get("status") or {}).get("state"))
     if out.get("turn") and live is not None and live != "working":
         out["turn"]["working"] = False
+    print(json.dumps({"address": args.address, **out}))
+
+
+def runtime_transcript(args):
+    """One member's own conversation (team transcript): see desk_runtime.transcript_turns."""
+    rec = session_by_address(runtime_store().load(), args.address)
+    if not rec:
+        die("No saved session has address %s" % args.address)
+    if session_cli(rec) != "claude":
+        print(json.dumps({"address": args.address, "supported": False, "turns": [], "partial": False,
+                          "reason": "%s doesn't write a transcript the Desk can read" % session_cli(rec)})); return
+    path = find_transcript(rec.get("conversation"))
+    if not path:
+        print(json.dumps({"address": args.address, "supported": True, "turns": [], "partial": False, "reason": "No transcript yet"})); return
+    limit = args.limit if args.limit and args.limit > 0 else 120
+    try:
+        out = transcript_turns(path, min(limit, 500))
+    except OSError as exc:
+        die("Couldn't read the transcript: %s" % exc)
     print(json.dumps({"address": args.address, **out}))
 
 
@@ -1719,7 +1833,7 @@ def new_desk(args):
     # Unnamed: the project and when, e.g. "tattvix · Nov 4 14:54", rather than the slug.
     label = name or " · ".join(x for x in ((repo or {}).get("name") or (os.path.basename(folder) if folder else None),
                                            time.strftime("%b %-d %H:%M")) if x)
-    rec = chat_append(slug, {"from": "kabeer", "kind": "desk", "name": label, "folder": folder,
+    rec = chat_append(slug, {"from": "kabeer", "kind": "desk", "name": label, "auto": not name, "folder": folder,
                              "project": repo["name"] if repo else (os.path.basename(folder) if folder else None)})
     print(json.dumps({"slug": slug, **rec}))
 
@@ -1947,6 +2061,7 @@ def main():
     q = sub.add_parser("post")
     q.add_argument("--task", required=True)
     q.add_argument("--to", action="append", default=[])
+    q.add_argument("--raw", action="store_true", help="type the text exactly as given (a slash command); logged as a command")
     q.add_argument("text", nargs="+")
     fi = sub.add_parser("finish")
     fi.add_argument("--address"); fi.add_argument("--keep-open", action="store_true")
@@ -1986,6 +2101,8 @@ def main():
     sn.add_argument("--address", required=True); sn.add_argument("--until-ms", type=int, required=True)
     tl = sub.add_parser("timeline")
     tl.add_argument("--address", required=True); tl.add_argument("--since-ms", type=int)
+    tr = sub.add_parser("transcript")
+    tr.add_argument("--address", required=True); tr.add_argument("--limit", type=int)
     rs = sub.add_parser("review-send")
     rs.add_argument("--address", required=True); rs.add_argument("--file", required=True)
     ga = sub.add_parser("gate")
@@ -2052,6 +2169,8 @@ def main():
         runtime_triage(args)
     elif args.cmd == "timeline":
         runtime_timeline(args)
+    elif args.cmd == "transcript":
+        runtime_transcript(args)
     elif args.cmd == "review-send":
         review_send(args)
     elif args.cmd == "gate":
