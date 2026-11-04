@@ -147,7 +147,10 @@ class Panel {
   }
 
   projects() {
-    return (props()?.projects ?? []).map((p) => ({ ...p, folder: p.folder.replace(/^~/, home()) }));
+    const list = (props()?.projects ?? []).map((p) => ({ ...p, folder: p.folder.replace(/^~/, home()) }));
+    // The main chat (desk-chat) has no panel of its own: it reads the list from here.
+    if (JSON.stringify(shared("desk.projects")) !== JSON.stringify(list)) setShared("desk.projects", list);
+    return list;
   }
 
   hover(id, on, cx) {

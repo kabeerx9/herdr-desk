@@ -1,6 +1,6 @@
 import { div, svg } from "gpui-kit";
 import { h_flex, v_flex, TextareaState, Textarea, InputState, Input, TextView } from "gpui-base";
-import { terminals, agents, panes, spaces, exec, home, appHome, readTextFile, watchFolder, notify, run, shared, setShared, hc, playSound } from "herdr";
+import { terminals, agents, panes, spaces, exec, home, appHome, readTextFile, watchFolder, notify, run, shared, setShared, hc, playSound, pickFolder } from "herdr";
 import { pill, button, empty, icon, statusBadge } from "./ui.js";
 import { Roles, roleTile, team, folderOf, findBriefs, startBrief, fileBrief } from "./roles.js";
 
@@ -226,10 +226,33 @@ export class Desks {
     });
   }
 
-  // Where a desk's agents start: its project's space, else the space you're in.
+  projectList() { return this.panel?.projects?.() ?? shared("desk.projects") ?? []; }
+
+  // Where the new-desk form points: a folder you picked ("folder:<path>"), a project, or the
+  // space you're in (null).
+  targetFolder() {
+    const t = this.newTarget;
+    if (typeof t === "string" && t.startsWith("folder:")) return t.slice(7);
+    return (t && this.projectList().find((p) => p.name === t)?.folder) || folderOf(spaces().find((s) => s.active));
+  }
+  pickTarget(target, cx) { this.newTarget = target; store.set("desks.target", target); cx.notify(); }
+
+  // macOS's own folder picker; the last few picks stay as chips.
+  chooseFolder(cx) {
+    cx.spawn(async (cx) => {
+      const folder = await pickFolder({ prompt: "Choose the folder this desk works in" });
+      if (!folder) return;
+      const recent = [folder, ...store.get("desks.folders", []).filter((f) => f !== folder)].slice(0, 4);
+      store.set("desks.folders", recent);
+      this.pickTarget(`folder:${folder}`, cx);
+    });
+  }
+
+  // Where a desk's agents start: its project's space, else a space already in that folder
+  // (none: bin/team opens a new one there).
   spaceFor(folder) {
-    const project = this.panel?.projects?.().find((p) => folder && (folder === p.folder || folder.startsWith(p.folder + "/")));
-    return (project && this.panel.spaceFor(project)) || spaces().find((s) => !s.machine && folder && (folderOf(s) ?? "").startsWith(folder)) || null;
+    const project = this.projectList().find((p) => folder && (folder === p.folder || folder.startsWith(p.folder + "/")));
+    return (project && this.panel?.spaceFor(project)) || spaces().find((s) => !s.machine && folder && (folderOf(s) ?? "").startsWith(folder)) || null;
   }
 
   async addMember(role, d, task) {
@@ -259,16 +282,14 @@ export class Desks {
 
   // The name of a running desk in the repo the form points at, if any.
   sameRepo() {
-    const project = this.newTarget && this.panel?.projects?.().find((p) => p.name === this.newTarget);
-    const folder = project?.folder ?? folderOf(spaces().find((s) => s.active));
+    const folder = this.targetFolder();
     const other = folder && this.desks.find((d) => d.folder && (folder === d.folder || folder.startsWith(`${d.folder}/`)) && this.members(d.slug).length);
     return other?.name ?? null;
   }
 
   createDesk(cx) {
     const name = this.newName.value().trim(), task = this.newTask.value().trim();
-    const project = this.newTarget && this.panel?.projects?.().find((p) => p.name === this.newTarget);
-    const folder = project?.folder ?? folderOf(spaces().find((s) => s.active)) ?? home();
+    const folder = this.targetFolder() ?? home();
     const chosen = (this.roles.list ?? []).filter((r) => this.newRoles.has(r.id));
     if (!chosen.length) return notify({ title: "Pick who joins", body: "Choose at least one role for the desk.", level: "warning", timeout: 4000 });
     this.busy("new", async () => {
@@ -454,9 +475,13 @@ export class Desks {
   newView(t) {
     const current = spaces().find((s) => s.active);
     const label = (text) => div().pt(14).pb(6).text_size(11).font_semibold().text_color(t.muted).child(text);
-    const projects = this.panel?.projects?.() ?? [];
+    const projects = this.projectList();
     const roles = this.roles.list ?? [];
-    const here = this.newTarget === null ? folderOf(current) : projects.find((p) => p.name === this.newTarget)?.folder;
+    const here = this.targetFolder();
+    const picked = typeof this.newTarget === "string" && this.newTarget.startsWith("folder:") ? this.newTarget.slice(7) : null;
+    const base = (f) => f.replace(/\/+$/, "").split("/").pop() || f;
+    const where = picked ? base(picked) : this.newTarget ?? current?.name;
+    const recent = store.get("desks.folders", []).filter((f) => !projects.some((p) => p.folder === f));
     const inside = (a, b) => a === b || a.startsWith(`${b}/`);
     // Desks for this folder, or for the repo it's inside (a worktree, a subfolder); not every desk under ~.
     const earlier = here ? this.desks.filter((d) => d.folder && inside(here, d.folder)) : [];
@@ -464,7 +489,7 @@ export class Desks {
       .child(h_flex().pt(10).pb(4).gap(6).items_center()
         .child(button(t, "new-back", null, (_e, cx) => this.go("list", cx), { iconName: "back", tip: "All desks" }))
         .child(div().text_size(15).font_semibold().text_color(t.foreground)
-          .child(this.newTarget === null && current ? `New desk in ${current.name}` : "New desk")))
+          .child(where ? `New desk in ${where}` : "New desk")))
       .when(earlier.length > 0, (el) => el.child(label(`EARLIER DESKS HERE · ${earlier.length}`))
         .children(earlier.slice(0, 5).map((d) => {
           const running = this.members(d.slug).length;
@@ -479,8 +504,11 @@ export class Desks {
       .child(Input.new(this.newName).h(34).px(10).rounded(8).border_1().border_color(t.input).bg(t.background).text_size(12.5).text_color(t.foreground))
       .child(label("PROJECT"))
       .child(h_flex().gap(5).flex_wrap()
-        .child(this.chip(t, "np-here", this.newTarget === null, `Current${current ? ` · ${current.name}` : ""}`, (_e, cx) => { this.newTarget = null; store.set("desks.target", null); cx.notify(); }))
-        .children(projects.map((p) => this.chip(t, `np-${p.name}`, this.newTarget === p.name, p.name, (_e, cx) => { this.newTarget = p.name; store.set("desks.target", p.name); cx.notify(); }))))
+        .child(this.chip(t, "np-here", this.newTarget === null, `Current${current ? ` · ${current.name}` : ""}`, (_e, cx) => this.pickTarget(null, cx)))
+        .children(projects.map((p) => this.chip(t, `np-${p.name}`, this.newTarget === p.name, p.name, (_e, cx) => this.pickTarget(p.name, cx))))
+        .children(recent.map((f, i) => this.chip(t, `np-f${i}`, picked === f, base(f), (_e, cx) => this.pickTarget(`folder:${f}`, cx), icon("projects", 12))))
+        .child(this.chip(t, "np-choose", false, "Choose folder…", (_e, cx) => this.chooseFolder(cx), icon("plus", 12))))
+      .when(Boolean(picked), (el) => el.child(div().pt(6).truncate().text_size(11).text_color(t.dim).child(picked.replace(home(), "~"))))
       .when(Boolean(this.sameRepo()), (el) => el.child(div().pt(6).text_size(11).line_height(1.4).text_color(t.blocked)
         .child(`${this.sameRepo()} also works in this repo. That's fine: each engineer gets its own worktree, but keep the two desks off the same files.`)))
       .child(label("WHO JOINS"))
