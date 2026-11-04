@@ -6,7 +6,7 @@
 
 import { View, div, svg } from "gpui-kit";
 import { v_flex, h_flex } from "gpui-base";
-import { spaces, machines, panes, run, openOverlay, exec, hc, theme, shared, setShared, watchFolder, window, layout } from "herdr";
+import { spaces, machines, panes, run, openOverlay, closeOverlay, props, exec, hc, theme, shared, setShared, watchFolder, window, layout } from "herdr";
 
 function find(node, id) {
   if (node?.id === id) return node;
@@ -58,8 +58,42 @@ function statusBadge(t, status) {
     .text_size(10.5).font_semibold().text_color(color).child(mark).child(LABEL[status]);
 }
 
+// desk-chat's center is a stack: the chat, or the shown tab's terminals (mods/desk/desks.js
+// has the same switch; mods can't import each other's files).
+const chatLayout = () => shared("layout") === "desk-chat";
+function showTerminals(on) {
+  if (!chatLayout()) return;
+  setShared("deskchat.terminals", on);
+  run("layout.select", { stack: "center", child: on ? "main" : "chat" });
+  run(on ? "layout.show" : "layout.hide", { id: "tabs" });
+}
+
+// Right-click on a space: the ways in (its terminals, a new one, a new desk), then Herdr's own
+// space menu (rename, worktrees, close) under More.
+class SpaceMenu {
+  render() {
+    const t = theme(), { overlay, space } = props(), chat = chatLayout();
+    const go = (fn) => () => { closeOverlay(overlay); run("space.select", { id: space }); fn(); };
+    const item = (id, iconName, label, onClick) => h_flex().id(id).h(30).px(10).gap(9).items_center().rounded(6).cursor_pointer()
+      .text_size(12.5).text_color(t.foreground).hover((s) => s.bg(t.hover)).on_click(onClick)
+      .child(svg(`mods/desk/icons/${iconName}.svg`).size(14).flex_none().text_color(t.muted)).child(label);
+    return v_flex().id("space-menu").w_full().p(4).gap(1).bg(t.popover)
+      .child(item("sm-terms", "terminal", chat ? "Show its terminals" : "Open", go(() => showTerminals(true))))
+      .child(item("sm-new-term", "plus", "New terminal", go(() => { showTerminals(true); run("tab.new", { space }); })))
+      .when(chat, (el) => el.child(item("sm-desk", "team", "New desk here", go(() => {
+        setShared("desk.here", { space, at: Date.now() }); setShared("desk.view", "new"); showTerminals(false);
+      }))))
+      .child(div().h(1).mx(6).my(3).bg(t.border))
+      .child(item("sm-more", "chevron", "More…", () => {
+        closeOverlay(overlay);
+        openOverlay({ mod: "menu", kind: "popup", width: 200, height: 260, props: { tab: "space", target: { id: space } } });
+      }));
+  }
+}
+
 export default class Spaces extends View {
   init(_props, cx) {
+    if (props()?.spaceMenu) { this.part = new SpaceMenu(); return; }
     this.git = {}; // where() -> { name, branch, ahead, behind, repo, linked }, null: not a repo
     this.checked = {}; // where() -> when it was last looked at
     this.unsure = new Set(); // where()s git couldn't answer for (a machine away)
@@ -209,9 +243,19 @@ export default class Spaces extends View {
     });
   }
 
+  // Switch to the space. In desk-chat's chat view, also open a fresh desk for it: the new-desk
+  // page aimed at that space, with its earlier desks listed. Nothing starts until you send.
+  // In the terminal view a click only switches, so you can still reach plain terminals.
+  pick(w) {
+    run("space.select", { id: w.id });
+    if (shared("layout") !== "desk-chat" || shared("deskchat.terminals")) return;
+    setShared("desk.here", { space: w.id, at: Date.now() });
+    setShared("desk.view", "new");
+  }
+
   menu(w) {
     // A popup is as tall as its items; height is only the most.
-    openOverlay({ mod: "menu", kind: "popup", width: 200, height: 260, props: { tab: "space", target: { id: w.id } } });
+    openOverlay({ mod: "desk-spaces", kind: "popup", width: 200, height: 160, props: { spaceMenu: true, space: w.id } });
   }
 
   // Spaces in order, each worktree space moved under its main checkout's.
@@ -324,7 +368,7 @@ export default class Spaces extends View {
         this.pressed = null;
         this.over = null;
         if (from !== null && over === i && from !== i) run("space.move", { id: spaces()[from].id, index: i + 1 });
-        else if (from === i) run("space.select", { id: w.id });
+        else if (from === i) this.pick(w);
         cx.notify();
       })
       .on_mouse_down("right", () => this.menu(w))
@@ -365,12 +409,13 @@ export default class Spaces extends View {
       .gap(4)
       .when(w.active, (el) => el.bg(t.raised))
       .hover((s) => s.bg(t.hover))
-      .on_click(() => run("space.select", { id: w.id }))
+      .on_click(() => this.pick(w))
       .child(div().text_color(w.active ? t.foreground : t.muted).child(String(i + 1)))
       .child(div().text_color(tone(t, w.status)).child(glyph(w.status)));
   }
 
   render() {
+    if (this.part) return this.part.render();
     const t = theme();
     const collapsed = narrow();
     const palette = ["ansi6", "ansi3", "ansi4", "ansi5", "ansi2", "ansi1"];

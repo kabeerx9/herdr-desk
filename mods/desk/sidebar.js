@@ -3,6 +3,7 @@ import { h_flex, v_flex } from "gpui-base";
 import { agents, theme, run, layout, setAgentOrder, setShared, home, exec, watchFolder } from "herdr";
 import { Roles, labelsByAddress, roleTile } from "./roles.js";
 import { setOpen } from "./tabs.js";
+import { chatLayout, showTerminals } from "./desks.js";
 import { statusBadge } from "./ui.js";
 
 // The sidebar's agent list: every desk (its agents under it, each with its status;
@@ -59,8 +60,10 @@ export class Sidebar {
   }
 
   openDesk(view) {
-    setShared("desk.tab", "desks");
     setShared("desk.view", view);
+    // In desk-chat the chat is the main view; elsewhere it's the panel's Desks tab.
+    if (chatLayout()) return showTerminals(false);
+    setShared("desk.tab", "desks");
     setOpen(true);
   }
 
@@ -113,7 +116,8 @@ export class Sidebar {
     const others = all.filter((a) => !inDesk.has(a.address) && (a.status === "working" || a.status === "blocked"))
       .sort((x, y) => (x.status === "blocked" ? 0 : 1) - (y.status === "blocked" ? 0 : 1) || y.seq - x.seq);
     setAgentOrder([...groups.flatMap(([, list]) => list.map((m) => m.a.address)), ...others.map((a) => a.address)]);
-    const focus = (a) => () => run("pane.focus", { pane: a.pane });
+    // In desk-chat the terminals sit behind the chat: bring them forward first.
+    const focus = (a) => () => { showTerminals(true); run("pane.focus", { pane: a.pane }); };
     const meta = new Map(this.desks.map((d) => [d.slug, d]));
     const name = (slug) => (slug ? meta.get(slug)?.name ?? slug : "No desk");
     // Desks with nobody running, newest first (the Desks tab has the rest).

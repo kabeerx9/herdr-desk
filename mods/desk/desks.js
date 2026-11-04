@@ -134,6 +134,13 @@ export class Desks {
     cx.timer.every(5000, (cx) => this.roles.load(cx));
     cx.timer.every(2500, () => { if (this.toasts) this.watch.check(this.roles); });
     cx.timer.every(8000, (cx) => this.scanBriefs(cx));
+    // Another mod can open a desk (shared "desk.view": the sidebar, the spaces list); load it.
+    // "desk.here" (a space picked in the spaces list) points a new desk at that space.
+    cx.timer.every(400, (cx) => {
+      const here = shared("desk.here")?.at ?? 0;
+      if (here !== this.hereAt) { this.hereAt = here; if (this.loaded !== undefined) { this.newTarget = null; cx.notify(); } }
+      if (this.loaded !== undefined && this.view !== this.loaded) this.reload(cx);
+    });
     cx.spawn(async (cx) => {
       await exec("mkdir", ["-p", DIR()]);
       await this.reload(cx);
@@ -165,6 +172,7 @@ export class Desks {
   }
 
   async reload(cx) {
+    this.loaded = this.view;
     try {
       const r = await exec("sh", ["-c", LIST, "list", DIR()]);
       const desks = r.stdout.split("\n").filter(Boolean).map((line) => {
@@ -438,10 +446,24 @@ export class Desks {
     const label = (text) => div().pt(14).pb(6).text_size(11).font_semibold().text_color(t.muted).child(text);
     const projects = this.panel?.projects?.() ?? [];
     const roles = this.roles.list ?? [];
+    const here = this.newTarget === null ? folderOf(current) : projects.find((p) => p.name === this.newTarget)?.folder;
+    const inside = (a, b) => a === b || a.startsWith(`${b}/`);
+    const earlier = here ? this.desks.filter((d) => d.folder && (inside(here, d.folder) || inside(d.folder, here))) : [];
     return v_flex().id("desk-new-form").size_full().min_h(0).overflow_y_scrollbar().px(14).pb(14)
       .child(h_flex().pt(10).pb(4).gap(6).items_center()
         .child(button(t, "new-back", null, (_e, cx) => this.go("list", cx), { iconName: "back", tip: "All desks" }))
-        .child(div().text_size(15).font_semibold().text_color(t.foreground).child("New desk")))
+        .child(div().text_size(15).font_semibold().text_color(t.foreground)
+          .child(this.newTarget === null && current ? `New desk in ${current.name}` : "New desk")))
+      .when(earlier.length > 0, (el) => el.child(label(`EARLIER DESKS HERE · ${earlier.length}`))
+        .children(earlier.slice(0, 5).map((d) => {
+          const running = this.members(d.slug).length;
+          return h_flex().id(`ed-${d.slug}`).h(32).px(10).gap(8).items_center().rounded(8).cursor_pointer()
+            .border_1().border_color(t.border).mb(4).hover((s) => s.bg(t.hover))
+            .on_click((_e, cx) => this.go(d.slug, cx))
+            .child(icon("chat", 13).text_color(t.dim))
+            .child(div().min_w(0).flex_1().truncate().text_size(12.5).text_color(t.foreground).child(d.name))
+            .child(div().flex_none().text_size(11).text_color(running ? t.done : t.dim).child(running ? `${running} running` : ago(d.at)));
+        })))
       .child(label("NAME"))
       .child(Input.new(this.newName).h(34).px(10).rounded(8).border_1().border_color(t.input).bg(t.background).text_size(12.5).text_color(t.foreground))
       .child(label("PROJECT"))

@@ -1,6 +1,6 @@
 import { div, svg } from "gpui-kit";
 import { v_flex } from "gpui-base";
-import { theme, shared } from "herdr";
+import { theme, shared, setShared } from "herdr";
 import { TABS, currentTab, isOpen, setOpen, choose } from "./tabs.js";
 import { fetchUsage, railMeters, openLimits } from "./usage.js";
 import { inboxCount } from "./inbox.js";
@@ -23,6 +23,8 @@ export class Rail {
     if (c.endsWith("-limits")) return openLimits(c[0].toUpperCase() + c.slice(1, -"-limits".length));
     // desk.chat (⌘E in the desk-chat layout): the center between the chat and the terminals.
     if (c === "chat") return showTerminals(!shared("deskchat.terminals"));
+    // desk.new-here: a fresh desk for the current space, in the chat (what a space click does there).
+    if (c === "new-here") { setShared("desk.here", { at: Date.now() }); setShared("desk.view", "new"); return showTerminals(false); }
     if (c === "toggle") setOpen(!isOpen());
     else if (TABS.some((t) => t.id === c) && !(isOpen() && currentTab() === c)) choose(c);
   }
