@@ -2,6 +2,7 @@ import { div, svg, image } from "gpui-kit";
 import { h_flex, v_flex } from "gpui-base";
 import { agents, panes, spaces, run } from "herdr";
 import { icon, pill, button, section, empty, card } from "./ui.js";
+import { openTerminal } from "./desks.js";
 
 // The Inbox tab: every agent, grouped by what it needs from me, with enough
 // context (space › tab, what it's doing, branch, how long) to tell them apart.
@@ -40,7 +41,7 @@ function agentCard(panel, t, a, group, pane, tab) {
   const where = [a.program?.name, pane?.branch ?? shortPath(pane?.cwd)].filter(Boolean).join(" · ");
   return card(t, id, hovered).cursor_pointer().relative()
     .on_hover((h, cx) => panel.hover(id, h, cx))
-    .on_click(() => run("agent.focus", { terminal: a.address }))
+    .on_click(() => openTerminal(a.address))
     .child(div().absolute().left(0).top(8).bottom(8).w(3).rounded(2).bg(color))
     .child(h_flex().pl(4).gap(10).items_start()
       .child(programIcon(t, a.program, color))
@@ -54,7 +55,7 @@ function agentCard(panel, t, a, group, pane, tab) {
         .when(Boolean(a.title), (el) => el.child(div().truncate().text_size(12).text_color(t.foreground).child(a.title)))
         .child(h_flex().gap(6).items_center()
           .child(div().flex_1().truncate().text_size(11).text_color(t.dim).child(where))
-          .when(hovered, (el) => el.child(button(t, `${id}-go`, "Go", () => run("agent.focus", { terminal: a.address }))))))
+          .when(hovered, (el) => el.child(button(t, `${id}-go`, "Go", () => openTerminal(a.address))))))
     );
 }
 

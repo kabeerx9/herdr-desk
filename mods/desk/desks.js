@@ -18,6 +18,41 @@ const KIND = { done: ["done", "done"], blocked: ["blocked", "blocked"], update: 
 const EVENTS = ["desk", "start", "fresh", "compact"];
 const kTokens = (n) => (n >= 1e6 ? `${(n / 1e6).toFixed(1)}M` : `${Math.round(n / 1000)}k`);
 const RANK = { blocked: 0, done: 1, working: 2, idle: 3 };
+// The reading column of the chat when it's the main view (layouts/desk-chat.json).
+const COLUMN = 760;
+
+// In the desk-chat layout the center is a stack: the chat, or the shown tab's terminals.
+// Anything that jumps to a terminal switches the stack first; other layouts just focus it.
+export const chatLayout = () => shared("layout") === "desk-chat";
+export function showTerminals(on = true) {
+  if (!chatLayout()) return;
+  setShared("deskchat.terminals", on);
+  run("layout.select", { stack: "center", child: on ? "main" : "chat" });
+  run(on ? "layout.show" : "layout.hide", { id: "tabs" });
+}
+export function openTerminal(address, { peek = false } = {}) {
+  showTerminals(true);
+  run(peek ? "terminal.peek" : "agent.focus", { terminal: address });
+}
+
+// "Worked for 9m 38s": from the message that started an agent's turn to its reply.
+const span = (ms) => {
+  const s = Math.round(ms / 1000);
+  return s < 60 ? `${s}s` : s < 3600 ? `${Math.floor(s / 60)}m ${s % 60}s` : `${Math.floor(s / 3600)}h ${Math.floor((s % 3600) / 60)}m`;
+};
+
+// A desk's live agents, parents before their children.
+export function deskMembers(slug) {
+  const status = new Map(agents().map((a) => [a.address, a.status]));
+  const live = terminals().filter((t) => t.state === "live" && t.labels?.task === slug && t.labels?.role)
+    .map((t) => ({ address: t.address, role: t.labels.role, parent: t.parent, status: status.get(t.address) ?? t.status?.state ?? t.status ?? null,
+      phase: t.labels.phase, note: t.labels.note, awaiting: t.labels.awaiting ?? null, space: t.labels["herdr.space"], cwd: t.cwd, created: t.created_ms ?? 0,
+      ctx: Number(t.labels.ctx) || null, handingOff: (t.labels.awaiting ?? "").startsWith("fresh") }));
+  const addrs = new Set(live.map((m) => m.address));
+  const depth = (m) => (m.parent && addrs.has(m.parent) ? 1 + depth(live.find((x) => x.address === m.parent)) : 0);
+  return live.map((m) => ({ ...m, depth: depth(m) }))
+    .sort((a, b) => (a.role === "cto" ? -1 : b.role === "cto" ? 1 : a.depth - b.depth || a.created - b.created));
+}
 
 const clock = (ms) => {
   const d = new Date(ms), pad = (n) => String(n).padStart(2, "0");
@@ -57,9 +92,11 @@ class PhaseWatch {
 
 export class Desks {
   // panel: the Desk panel (projects, spaceFor, hover state). fixed: a desk this view always shows (a pane).
-  constructor(panel, cx, { fixed = null, toasts = false } = {}) {
+  // wide: the chat is the window's main view (centered column, roomier type).
+  constructor(panel, cx, { fixed = null, toasts = false, wide = false } = {}) {
     this.panel = panel;
     this.fixed = fixed;
+    this.wide = wide;
     this.toasts = toasts;
     this.roles = new Roles();
     this.desks = [];
@@ -114,6 +151,8 @@ export class Desks {
     this.reload(cx);
   }
   desk(slug = this.view) { return this.desks.find((d) => d.slug === slug) ?? null; }
+  // The open desk is in front of you: the panel's Desks tab, or the chat as the main view.
+  onScreen() { return shared("desk.tab") === "desks" || (chatLayout() && !shared("deskchat.terminals")); }
 
   markRead(slug) {
     const d = this.desk(slug);
@@ -140,7 +179,7 @@ export class Desks {
       // Toast what agents say in desks you aren't looking at.
       if (this.toasts && this.counts) for (const d of desks) {
         const before = this.counts[d.slug];
-        if (before === undefined || d.n <= before || (d.slug === this.view && shared("desk.tab") === "desks")) continue;
+        if (before === undefined || d.n <= before || (d.slug === this.view && this.onScreen())) continue;
         for (const m of parse(await readTextFile(`${DIR()}/${d.slug}.jsonl`)).slice(before)) {
           if (m.from !== "kabeer" && (m.kind === "say" || m.kind === "flag")) {
             notify({ title: `${this.roles.byId(m.from)?.name ?? m.from} · ${d.name}`, body: m.text.slice(0, 160), level: m.kind === "flag" ? "warning" : "info", timeout: 6000 });
@@ -151,24 +190,14 @@ export class Desks {
       this.desks = desks;
       const open = this.desk();
       this.messages = open ? parse(await readTextFile(`${DIR()}/${open.slug}.jsonl`)) : [];
-      if (open && (shared("desk.tab") === "desks" || this.fixed)) this.markRead(open.slug);
+      if (open && (this.onScreen() || this.fixed || this.wide)) this.markRead(open.slug);
       this.publish();
     } catch { this.messages = []; }
     cx.notify();
   }
 
   // A desk's live agents, parents before their children.
-  members(slug = this.view) {
-    const status = new Map(agents().map((a) => [a.address, a.status]));
-    const live = terminals().filter((t) => t.state === "live" && t.labels?.task === slug && t.labels?.role)
-      .map((t) => ({ address: t.address, role: t.labels.role, parent: t.parent, status: status.get(t.address) ?? t.status?.state ?? t.status ?? null,
-        phase: t.labels.phase, note: t.labels.note, awaiting: t.labels.awaiting ?? null, space: t.labels["herdr.space"], cwd: t.cwd, created: t.created_ms ?? 0,
-        ctx: Number(t.labels.ctx) || null, handingOff: (t.labels.awaiting ?? "").startsWith("fresh") }));
-    const addrs = new Set(live.map((m) => m.address));
-    const depth = (m) => (m.parent && addrs.has(m.parent) ? 1 + depth(live.find((x) => x.address === m.parent)) : 0);
-    return live.map((m) => ({ ...m, depth: depth(m) }))
-      .sort((a, b) => (a.role === "cto" ? -1 : b.role === "cto" ? 1 : a.depth - b.depth || a.created - b.created));
-  }
+  members(slug = this.view) { return deskMembers(slug); }
 
   scanBriefs(cx) {
     const d = this.desk();
@@ -464,22 +493,27 @@ export class Desks {
     const hovered = this.hoverMsg === id;
     const side = ["ask", "answer", "route", "done", "blocked", "update", "flag"].includes(m.kind);
     const long = side && (m.text ?? "").length > 600 && !this.expanded.has(id);
-    const body = (size) => v_flex().gap(4)
+    const size = this.wide ? 14 : 13;
+    const body = (size, color = t.foreground) => v_flex().gap(4)
       .child(div().when(long, (el) => el.max_h(120).overflow_hidden())
-        .text_size(size).line_height(1.5).text_color(t.foreground).child(TextView.markdown(`${id}-md`, m.text).selectable(true)))
-      .when(long, (el) => el.child(div().id(`${id}-more`).text_size(11.5).text_color(t.accent).cursor_pointer()
+        .text_size(size).line_height(1.6).text_color(color).child(TextView.markdown(`${id}-md`, m.text).selectable(true)))
+      .when(long, (el) => el.child(div().id(`${id}-more`).text_size(12).text_color(t.accent).cursor_pointer()
         .hover((s) => s.text_color(t.foreground)).on_click((_e, cx) => { this.expanded.add(id); cx.notify(); }).child("Show more")));
-    const copy = h_flex().id(`${id}-copy`).size(24).flex_none().items_center().justify_center().rounded(6).cursor_pointer()
-      .text_color(this.copied === id ? t.done : t.dim).hover((s) => s.bg(t.hover).text_color(t.foreground))
-      .tooltip(this.copied === id ? "Copied" : "Copy").on_click((_e, cx) => this.copy(id, m.text, cx))
-      .child(icon(this.copied === id ? "check" : "copy", 13));
+    const tool = (key, name, tip, onClick, color) => h_flex().id(`${id}-${key}`).size(26).flex_none().items_center().justify_center().rounded(7)
+      .cursor_pointer().text_color(color ?? t.dim).hover((s) => s.bg(t.hover).text_color(t.foreground)).tooltip(tip)
+      .on_click(onClick).child(icon(name, 14));
+    const copy = tool("copy", this.copied === id ? "check" : "copy", this.copied === id ? "Copied" : "Copy",
+      (_e, cx) => this.copy(id, m.text, cx), this.copied === id ? t.done : null);
 
+    // Yours: a dark bubble on the right, who it went to underneath.
     if (m.from === "kabeer") {
       const to = (m.to ?? []).map((r) => this.roles.byId(r)?.name ?? r).join(", ");
       const ok = Boolean(m.delivered?.length && !m.failed?.length);
-      return v_flex().id(id).items_end().gap(4).pt(16)
+      return v_flex().id(id).items_end().gap(3).pt(this.wide ? 26 : 18)
         .on_hover((h, cx) => this.hoverOn(id, h, cx))
-        .child(div().max_w_4_5().px(12).py(8).rounded(14).bg(t.raised).child(body(12.5)))
+        // Plain text: Markdown views keep their own dark text, unreadable on the dark bubble.
+        .child(div().max_w_4_5().px(15).py(10).rounded(18).bg(t.solid)
+          .text_size(size).line_height(1.55).text_color(t.solid_foreground).child(m.text ?? ""))
         .child(h_flex().h(24).gap(6).items_center().text_size(11).text_color(t.dim)
           .when(hovered, (el) => el.child(copy))
           .child(`To ${to} · ${clock(m.at)}`)
@@ -488,6 +522,8 @@ export class Desks {
           .child(`Not delivered to ${m.failed.map((f) => `${this.roles.byId(f.role)?.name ?? f.role} (${f.why})`).join("; ")}. Send it again once they're free.`)));
     }
 
+    // Theirs: no bubble. A turn opens with a name row ("Frontend · Worked for 3m 12s") and a
+    // hairline; the text runs the column's full width; the latest reply keeps its tools out.
     const role = this.roles.byId(m.from), kind = KIND[m.kind];
     // A long-context note offers Compact while that agent is still running and still over its limit.
     const offer = m.kind === "context" ? this.members().find((x) => x.address === m.address && this.overLimit(x)) ?? null : null;
@@ -496,20 +532,27 @@ export class Desks {
     // One name row per run: the same author, a plain message, within five minutes.
     const grouped = !aside && !kind && prev && prev.from === m.from && !KIND[prev.kind] && !EVENTS.includes(prev.kind) && m.at - prev.at < 300000;
     const name = role?.name ?? m.from;
-    const avatar = role ? roleTile(div, svg, t, role, aside ? 18 : 22) : div().size(aside ? 18 : 22).flex_none().rounded(6).bg(t.raised);
-    return v_flex().id(id).relative().gap(4).pt(grouped ? 4 : aside ? 10 : 16)
+    const tile = aside ? 16 : 18;
+    const avatar = role ? roleTile(div, svg, t, role, tile) : div().size(tile).flex_none().rounded(5).bg(t.raised);
+    const latest = i === this.lastReply;
+    const live = latest ? this.members().find((x) => x.address === m.address) ?? this.members().find((x) => x.role === m.from) : null;
+    const meta = m.worked ? `Worked for ${span(m.worked)}` : clock(m.at);
+    return v_flex().id(id).relative().gap(6).pt(grouped ? 6 : aside ? 14 : this.wide ? 26 : 18)
       .on_hover((h, cx) => this.hoverOn(id, h, cx))
-      .when(!grouped, (el) => el.child(h_flex().h(24).gap(8).items_center()
+      .when(!grouped, (el) => el.child(h_flex().h(22).gap(7).items_center()
         .child(avatar)
-        .child(div().text_size(aside ? 11.5 : 12.5).font_semibold().text_color(aside ? t.muted : t.foreground).child(name))
-        .when(Boolean(to), (el) => el.child(div().text_size(11).text_color(t.dim).child(`→ ${to}`)))
+        .child(div().flex_none().text_size(aside ? 12 : 12.5).font_semibold().text_color(aside ? t.muted : t.foreground).child(name))
+        .when(Boolean(to), (el) => el.child(div().flex_none().text_size(11.5).text_color(t.dim).child(`→ ${to}`)))
         .when(Boolean(kind), (el) => el.child(pill(t, kind[0], t[kind[1]] ?? t.accent)))
-        .child(div().text_size(11).text_color(t.dim).child(clock(m.at)))
-        .child(div().flex_1())
-        .when(hovered, (el) => el.child(copy))))
-      .when(grouped && hovered, (el) => el.child(div().absolute().top(0).right(0).child(copy)))
-      .child(div().pl(aside ? 26 : 30).pr(grouped ? 28 : 0).child(body(aside ? 12 : 12.5)).when(aside, (el) => el.opacity(0.92)))
-      .when(Boolean(offer), (el) => el.child(h_flex().pl(30).pt(2).gap(6)
+        .child(div().id(`${id}-meta`).flex_none().text_size(11.5).text_color(t.dim).tooltip(clock(m.at)).child(meta))
+        .child(aside ? div().flex_1() : div().flex_1().ml(4).h(1).bg(t.border))
+        .when(hovered && !latest, (el) => el.child(copy))))
+      .when(grouped && hovered && !latest, (el) => el.child(div().absolute().top(2).right(0).child(copy)))
+      .child(div().pl(aside ? tile + 7 : 0).child(body(aside ? size - 1 : size, aside ? t.muted : t.foreground)))
+      .when(latest, (el) => el.child(h_flex().ml(-5).gap(2)
+        .child(copy)
+        .when(Boolean(live), (el) => el.child(tool("term", "terminal", `Open ${name}'s terminal`, () => openTerminal(live.address))))))
+      .when(Boolean(offer), (el) => el.child(h_flex().pt(2).gap(6)
         .child(button(t, `${id}-compact`, this.acting === `compact-${offer.address}` ? "Compacting…" : "Compact", (_e, cx) => this.compact(offer, cx),
           { primary: true, disabled: Boolean(this.acting) || offer.status === "working",
             tip: offer.status === "working" ? "Once its turn ends" : "Claude's /compact: same session, the history becomes a summary" }))));
@@ -544,13 +587,13 @@ export class Desks {
       const role = this.roles.byId(m.role), name = role?.name ?? m.role, id = `act-${m.address}`;
       const blocked = m.status === "blocked";
       const caption = blocked ? "needs you in its terminal" : m.handingOff ? "writing a handoff for a fresh session" : m.awaiting ? "replying" : `working${m.note ? ` · ${m.note}` : ""}`;
-      return v_flex().id(id).gap(4).pt(16)
-        .child(h_flex().h(24).gap(8).items_center()
-          .child(this.avatar(t, role, null, 22))
-          .child(div().text_size(12.5).font_semibold().text_color(t.foreground).child(name))
-          .child(div().min_w(0).flex_1().truncate().text_size(11).text_color(blocked ? t.blocked : t.dim).child(caption))
-          .when(blocked, (el) => el.child(button(t, `${id}-go`, "Go", () => run("agent.focus", { terminal: m.address }), { tip: "Jump to its terminal" }))))
-        .child(div().pl(30).child(blocked ? icon("alert", 15).text_color(t.blocked) : this.dots(t)));
+      return v_flex().id(id).gap(6).pt(this.wide ? 26 : 18)
+        .child(h_flex().h(22).gap(7).items_center()
+          .child(this.avatar(t, role, null, 18))
+          .child(div().flex_none().text_size(12.5).font_semibold().text_color(t.foreground).child(name))
+          .child(div().min_w(0).flex_1().truncate().text_size(11.5).text_color(blocked ? t.blocked : t.dim).child(caption))
+          .when(blocked, (el) => el.child(button(t, `${id}-go`, "Open terminal", () => openTerminal(m.address), { primary: true, tip: "It's waiting on a prompt only its terminal can answer" }))))
+        .child(blocked ? icon("alert", 15).text_color(t.blocked) : this.dots(t));
     });
   }
 
@@ -580,7 +623,7 @@ export class Desks {
       .when(Boolean(m.ctx), (el) => el.child(div().pl(30).text_size(11).text_color(this.overLimit(m) ? t.blocked : t.dim)
         .child(`${kTokens(m.ctx)} tokens of context${this.overLimit(m) ? `, past the ${kTokens(this.roles.freshAt(m.role))} limit: compact it when it's free` : ""}`)))
       .child(h_flex().pl(30).gap(6).flex_wrap()
-        .child(button(t, `${id}-go`, "Go", () => run("agent.focus", { terminal: m.address })))
+        .child(button(t, `${id}-go`, "Go", () => openTerminal(m.address)))
         .when(role?.cli !== "codex", (el) => el
           .child(button(t, `${id}-compact`, "Compact", (_e, cx) => this.compact(m, cx),
             { primary: this.overLimit(m), disabled: Boolean(this.acting) || m.handingOff || m.status === "working" || m.status === "blocked",
@@ -610,7 +653,7 @@ export class Desks {
         .child(v_flex().min_w(0).flex_1()
           .child(div().truncate().text_size(14).font_semibold().text_color(t.foreground).child(d.name))
           .child(div().truncate().text_size(11).text_color(t.dim).child([d.project, `${members.length} in the desk`].filter(Boolean).join(" · "))))
-        .when(!this.fixed, (el) => el.child(button(t, "desk-pane", null, () => run("pane.split", { direction: "right", mod: "desk", props: { chat: true, task: d.slug } }), { iconName: "pane", tip: "Open beside your terminals" })))
+        .when(!this.fixed && !this.wide, (el) => el.child(button(t, "desk-pane", null, () => run("pane.split", { direction: "right", mod: "desk", props: { chat: true, task: d.slug } }), { iconName: "pane", tip: "Open beside your terminals" })))
         .when(members.length > 0, (el) => el.child(button(t, "desk-wrap", this.acting === "wrap" ? "Wrapping up…" : "Wrap up", (_e, cx) => this.wrapUp(d, cx),
           { disabled: Boolean(this.acting), tip: "Each agent: flags anything left locally, or cleans up its worktree and closes" })))
         .when(!members.length, (el) => el.child(button(t, "desk-del", deleting ? "Delete?" : null, (_e, cx) => this.deleteDesk(d, cx),
@@ -622,7 +665,7 @@ export class Desks {
           return h_flex().id(`mem-${m.address}`).h(28).pl(3).pr(9).gap(6).items_center().rounded(14).cursor_pointer().flex_none()
             .bg(t.raised).hover((s) => s.bg(t.hover))
             .tooltip(`${role?.name ?? m.role}: ${STATUS[m.status] ?? "starting"}${m.ctx ? ` · ${kTokens(m.ctx)} tokens of context` : ""}${this.overLimit(m) ? " (long; compact it from the chat or Details)" : ""}${m.note ? ` · ${m.note}` : ""}`)
-            .on_click(() => run("agent.focus", { terminal: m.address }))
+            .on_click(() => openTerminal(m.address))
             .child(this.avatar(t, role, m.status, 22))
             .child(div().text_size(11.5).text_color(t.foreground).child(role?.name ?? m.role))
             .when(Boolean(m.ctx), (el) => el.child(div().text_size(10.5).text_color(this.overLimit(m) ? t.blocked : t.dim).child(kTokens(m.ctx))));
@@ -661,29 +704,44 @@ export class Desks {
         shown[shown.length - 1] = { ...last, roles: [...(last.roles ?? [last.role]), m.role] };
       } else shown.push(m);
     }
-    const rows = shown.map((m, i) => this.message(t, m, i, shown[i - 1]));
-    const thread = v_flex().id("desk-thread").flex_1().min_h(0).px(16).pb(12).overflow_y_scrollbar().flex_col_reverse()
-      .children([...this.activity(t, members).reverse(), ...(said ? [] : [this.emptyThread(t, members)]), ...rows.reverse()]);
+    // How long each reply took: from the first message that reached that agent (yours, or an
+    // agent's ask) since its last reply. The latest reply keeps its tools in view.
+    const started = new Map();
+    this.lastReply = -1;
+    shown.forEach((m, i) => {
+      if (EVENTS.includes(m.kind) || m.kind === "context") return;
+      if (m.from === "kabeer" || m.kind === "ask" || m.kind === "route") {
+        for (const r of m.to ?? []) if (!started.has(r)) started.set(r, m.at);
+        if (m.from === "kabeer") return;
+      }
+      if (started.has(m.from)) { m.worked = m.at - started.get(m.from); started.delete(m.from); }
+      if (m.kind !== "ask") this.lastReply = i;
+    });
+    const col = (el) => (this.wide ? div().w_full().max_w(COLUMN).child(el) : el);
+    const rows = shown.map((m, i) => col(this.message(t, m, i, shown[i - 1])));
+    const thread = v_flex().id("desk-thread").flex_1().min_h(0).px(this.wide ? 28 : 16).pb(12).overflow_y_scrollbar().flex_col_reverse()
+      .when(this.wide, (el) => el.items_center())
+      .children([...this.activity(t, members).map(col).reverse(), ...(said ? [] : [col(this.emptyThread(t, members))]), ...rows.reverse()]);
 
     // The composer, one frame: mention suggestions above it; the text; then who it goes to and a
     // round send button inside the frame.
     const sugg = this.suggestions();
     const text = this.input.value().trim();
     const canSend = Boolean(text) && to.length > 0 && !this.acting;
-    const composer = v_flex().px(12).pt(8).pb(12).gap(6)
+    const composer = v_flex().px(12).pt(8).pb(this.wide ? 18 : 12).gap(6).when(this.wide, (el) => el.w_full().max_w(COLUMN + 24))
       .when(sugg.length > 0, (el) => el.child(h_flex().gap(5).flex_wrap()
         .children(sugg.map((o, i) => this.chip(t, `sg-${o.id}`, i === 0, o.name, (_e, cx) => this.pickMention(o, cx),
           o.id === "all" ? icon("team", 13) : roleTile(div, svg, t, o, 16))))))
-      .child(v_flex().rounded(14).border_1().border_color(t.input).bg(t.background)
-        .child(Textarea.new(this.input).w_full().px(12).pt(10).pb(4).text_size(12.5).text_color(t.foreground)
+      .child(v_flex().rounded(18).border_1().border_color(t.input).bg(t.background).shadow_sm()
+        .child(Textarea.new(this.input).w_full().px(14).pt(12).pb(4).text_size(this.wide ? 14 : 13).text_color(t.foreground)
           .token((ctx) => {
             const role = this.roles.byId(ctx.token.id);
             const color = role ? t[role.color] ?? t.accent : t.accent;
             return h_flex().h(ctx.line_height).px(5).items_center().rounded(5).bg(color + "24").text_color(color).font_medium()
               .child(`@${ctx.token.label ?? ctx.token.text}`);
           }))
-        .child(h_flex().px(8).pb(8).gap(6).items_center()
-          .child(h_flex().min_w(0).flex_1().gap(5).items_center().text_size(11).text_color(t.dim)
+        .child(h_flex().px(10).pb(10).gap(6).items_center()
+          .child(h_flex().min_w(0).flex_1().gap(5).items_center().text_size(11.5).text_color(t.dim)
             .when(to.length > 0, (el) => el.child(div().flex_none().child("To"))
               .children(to.map((r) => {
                 const role = this.roles.byId(r);
@@ -692,27 +750,30 @@ export class Desks {
               }))
               .when(implicit, (el) => el.child(div().min_w(0).truncate().child("· @ to choose"))))
             .when(!to.length, (el) => el.child(div().truncate().child("Nobody here yet: add someone above"))))
-          .child(h_flex().id("desk-send").size(28).flex_none().items_center().justify_center().rounded(14)
+          .child(h_flex().id("desk-send").size(30).flex_none().items_center().justify_center().rounded(15)
             .bg(canSend ? t.solid : t.raised).text_color(canSend ? t.solid_foreground : t.dim)
             .when(canSend, (el) => el.cursor_pointer().hover((s) => s.opacity(0.85)))
             .tooltip(canSend ? "Send (Enter) · new line: Shift+Enter" : to.length ? "Type a message" : "Add someone first")
             .on_click((_e, cx) => { if (canSend) this.send(cx); })
             .child(this.acting === "send" ? svg("mods/workspace-chrome/spinner.svg").size(14).spin(900) : icon("arrow-up", 14)))));
 
+    // As the main view the header, details and briefs sit in the reading column too; the thread
+    // scrolls full width so its scrollbar stays at the window's edge.
+    const band = (el) => (this.wide ? h_flex().w_full().flex_none().justify_center().child(el.w_full().max_w(COLUMN + 24)) : el);
     return v_flex().size_full().min_h(0)
-      .child(header)
-      .when(Boolean(details), (el) => el.child(details))
-      .when(Boolean(briefs), (el) => el.child(briefs))
+      .child(band(this.wide ? header.border_b(0).pt(14) : header))
+      .when(Boolean(details), (el) => el.child(band(details)))
+      .when(Boolean(briefs), (el) => el.child(band(briefs)))
       .child(thread)
-      .child(composer);
+      .child(band(composer));
   }
 
   render(t) {
     const view = this.view;
-    if (view === "new" && !this.fixed) return this.newView(t);
-    const d = view !== "list" ? this.desk(view) : null;
+    const d = view !== "list" && view !== "new" ? this.desk(view) : null;
     if (d) return this.deskView(t, d);
     if (this.fixed) return v_flex().p(14).child(empty(t, "This desk was deleted."));
-    return this.listView(t);
+    const page = view === "new" ? this.newView(t) : this.listView(t);
+    return this.wide ? h_flex().size_full().justify_center().pt(18).child(v_flex().h_full().w_full().max_w(COLUMN).child(page)) : page;
   }
 }

@@ -14,6 +14,7 @@
 !/layouts/
 /layouts/*
 !/layouts/desk.json
+!/layouts/desk-chat.json
 
 # Our light theme (Herdr ships the other files in themes/).
 !/themes/

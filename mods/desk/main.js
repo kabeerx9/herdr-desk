@@ -9,6 +9,7 @@ import { inboxView } from "./inbox.js";
 import { Sidebar } from "./sidebar.js";
 import { startRole } from "./roles.js";
 import { Desks } from "./desks.js";
+import { DeskCard } from "./card.js";
 import { UsagePopover } from "./usage.js";
 
 const ME = "kabeerx9";
@@ -54,13 +55,15 @@ const store = {
   set(k, v) { try { localStorage.setItem(k, JSON.stringify(v)); } catch {} },
 };
 
-// One mod, four parts: the panel (props.projects), its icon rail (props.rail),
+// One mod, six parts: the panel (props.projects), its icon rail (props.rail),
 // the usage popover the rail opens (props.popover), the sidebar agent list (props.agents),
-// and one desk popped out as a pane (props.chat, props.task = the desk).
+// one desk popped out as a pane (props.chat, props.task = the desk), and in the desk-chat
+// layout the chat as the main view (props.main) with its floating card (props.card).
 export default class Desk extends View {
   init(_props, cx) {
     const p = props();
-    this.part = p?.popover ? new UsagePopover() : p?.rail ? new Rail() : p?.agents ? new Sidebar() : p?.chat ? new ChatPane() : new Panel();
+    this.part = p?.popover ? new UsagePopover() : p?.rail ? new Rail() : p?.agents ? new Sidebar() : p?.chat ? new ChatPane()
+      : p?.main ? new MainChat() : p?.card ? new DeskCard() : new Panel();
     this.part.init(p, cx);
     // Only the rail is always shown, so it takes the key commands.
     if (p?.rail) cx.spawn(async (cx) => { for (;;) { this.part.command(await nextCommand()); cx.notify(); } });
@@ -75,6 +78,21 @@ class ChatPane {
   render(cx) {
     const t = theme();
     return v_flex().id("chat-pane").size_full().bg(t.chrome).text_color(t.foreground).child(this.chat.render(t));
+  }
+}
+
+// The chat as the window's main view: the open desk (shared with the panel and the card) in a
+// centered column. It tells the card when the center is too narrow for it to sit beside.
+class MainChat {
+  init(_p, cx) { this.chat = new Desks(null, cx, { wide: true }); }
+  render(_cx) {
+    const t = theme();
+    return v_flex().id("chat-main").size_full().bg(t.background).text_color(t.foreground)
+      .on_size_change((size) => {
+        const narrow = size.width < 1360;
+        if (shared("deskchat.narrow") !== narrow) setShared("deskchat.narrow", narrow);
+      })
+      .child(this.chat.render(t));
   }
 }
 

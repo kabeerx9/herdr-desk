@@ -4,6 +4,7 @@ import { theme, shared } from "herdr";
 import { TABS, currentTab, isOpen, setOpen, choose } from "./tabs.js";
 import { fetchUsage, railMeters, openLimits } from "./usage.js";
 import { inboxCount } from "./inbox.js";
+import { showTerminals } from "./desks.js";
 
 // The always-visible edge of the Desk: one icon per tab, a badge for counts.
 export class Rail {
@@ -20,6 +21,8 @@ export class Rail {
   command(c) {
     // desk.claude-limits / desk.codex-limits: the same popover a logo click opens.
     if (c.endsWith("-limits")) return openLimits(c[0].toUpperCase() + c.slice(1, -"-limits".length));
+    // desk.chat (⌘E in the desk-chat layout): the center between the chat and the terminals.
+    if (c === "chat") return showTerminals(!shared("deskchat.terminals"));
     if (c === "toggle") setOpen(!isOpen());
     else if (TABS.some((t) => t.id === c) && !(isOpen() && currentTab() === c)) choose(c);
   }

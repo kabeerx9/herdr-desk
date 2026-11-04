@@ -7,10 +7,11 @@ My personal UI for the [Herdr desktop app](https://github.com/herdrdev/herdr-app
 | Path | What it is |
 |---|---|
 | `layouts/desk.json` | The window: Herdr's default layout plus a collapsible Desk panel and an icon rail on the right. Pane headers use `desk-pane`. The `projects` list in the panel's props drives the Projects, PRs and Issues tabs. |
+| `layouts/desk-chat.json` | The same window with the desk chat as the main view: the center is a stack of the chat (`desk` with `main`) and the shown tab's terminals, with a floating card at the top right (`desk` with `card`: changes per worktree, pull requests, agents and sub-agents, and the Chat / Terminals switch). |
 | `mods/desk/` | The Desk. `main.js` holds the panel (Projects, PRs, Issues, Git, Pages tabs) and routes each copy by its props: panel, `rail`, or usage `popover`. `rail.js` draws the icon rail with Claude/Codex weekly limits at its foot, `git.js` the Git tab, `usage.js` the limits popover, `tabs.js` the state shared between copies. |
 | `mods/desk/usage.py` | Reads Claude Code's and Codex's own sign-ins and prints only plan-limit percentages. Tokens never leave that process. |
 | `mods/desk-pane/` | Pane header: program, repo path, branch with an uncommitted-file count, and agent status. Hover shows Claude-beside, Zed, split, zoom and close. A copy of Herdr's `pane` mod. |
-| `keys.json` | Herdr's keys, plus `cmd-shift-j` → `desk.toggle`. |
+| `keys.json` | Herdr's keys, plus `cmd-shift-j` → `desk.toggle`, and in `desk-chat` `cmd-e` → `desk.chat` (chat or terminals). |
 
 ## Commands
 
