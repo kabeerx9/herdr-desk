@@ -70,6 +70,9 @@ export class Desks {
     this.detailsOpen = false;
     this.confirmDelete = 0;
     this.mention = null;       // { start, q } while typing @…
+    this.hoverMsg = null;      // the message under the pointer (its copy button shows)
+    this.copied = null;        // the message just copied (its check shows for 2s)
+    this.expanded = new Set(); // long messages opened with "Show more"
     this.watch = new PhaseWatch();
 
     this.input = TextareaState.new({ placeholder: "Message the desk…  type @ to mention someone", rows: 2 });
@@ -412,59 +415,113 @@ export class Desks {
 
   // ── a desk ────────────────────────────────────────────────────────────────
 
-  message(t, m, i) {
+  // The thread, after AI-chat conventions: your turns are a muted bubble on the right (at most
+  // 4/5 wide); agents' turns are full-width Markdown with no bubble, under one name row per run
+  // of messages; agent-to-agent asides are smaller; long ones fold behind "Show more".
+  message(t, m, i, prev) {
     const id = `msg-${i}`;
     if (m.kind === "desk" || m.kind === "start") {
       const who = m.from === "kabeer" ? "You" : this.roles.byId(m.from)?.name ?? m.from;
-      const text = m.kind === "desk" ? `${who} started this desk${m.project ? ` in ${m.project}` : ""}` : `${who}: ${m.text}`;
-      return h_flex().id(id).justify_center().py(4).child(div().px(10).py(3).rounded(10).bg(t.raised).text_size(11).text_color(t.dim).child(`${text} · ${clock(m.at)}`));
+      const names = (m.roles ?? [m.role]).map((r) => this.roles.byId(r)?.name ?? r);
+      const list = names.length > 1 ? `${names.slice(0, -1).join(", ")} and ${names.at(-1)}` : names[0] ?? m.text;
+      const text = m.kind === "desk" ? `${who} started this desk${m.project ? ` in ${m.project}` : ""}` : `${who} added ${list}`;
+      return h_flex().id(id).justify_center().pt(10).pb(2)
+        .child(div().max_w_4_5().truncate().text_size(11).text_color(t.dim).child(`${text} · ${clock(m.at)}`));
     }
+    const hovered = this.hoverMsg === id;
+    const side = ["ask", "answer", "route", "done", "blocked", "update", "flag"].includes(m.kind);
+    const long = side && (m.text ?? "").length > 600 && !this.expanded.has(id);
+    const body = (size) => v_flex().gap(4)
+      .child(div().when(long, (el) => el.max_h(120).overflow_hidden())
+        .text_size(size).line_height(1.5).text_color(t.foreground).child(TextView.markdown(`${id}-md`, m.text).selectable(true)))
+      .when(long, (el) => el.child(div().id(`${id}-more`).text_size(11.5).text_color(t.accent).cursor_pointer()
+        .hover((s) => s.text_color(t.foreground)).on_click((_e, cx) => { this.expanded.add(id); cx.notify(); }).child("Show more")));
+    const copy = h_flex().id(`${id}-copy`).size(24).flex_none().items_center().justify_center().rounded(6).cursor_pointer()
+      .text_color(this.copied === id ? t.done : t.dim).hover((s) => s.bg(t.hover).text_color(t.foreground))
+      .tooltip(this.copied === id ? "Copied" : "Copy").on_click((_e, cx) => this.copy(id, m.text, cx))
+      .child(icon(this.copied === id ? "check" : "copy", 13));
+
     if (m.from === "kabeer") {
       const to = (m.to ?? []).map((r) => this.roles.byId(r)?.name ?? r).join(", ");
-      return v_flex().id(id).items_end().gap(3).py(5).pl(40)
-        .child(h_flex().gap(4).items_center().text_size(11).text_color(t.dim).child(`You → ${to} · ${clock(m.at)}`)
-          .when(Boolean(m.delivered?.length && !m.failed?.length), (el) => el.child(icon("check", 12).text_color(t.done))))
-        .child(div().max_w_full().px(11).py(7).rounded(12).bg(t.accent + "26").text_size(12.5).line_height(1.45).text_color(t.foreground)
-          .child(TextView.markdown(`${id}-md`, m.text).selectable(true)))
-        .when(Boolean(m.failed?.length), (el) => el.child(div().text_size(11).text_color(t.blocked)
-          .child(`Not delivered: ${m.failed.map((f) => `${this.roles.byId(f.role)?.name ?? f.role} (${f.why})`).join("; ")}`)));
+      const ok = Boolean(m.delivered?.length && !m.failed?.length);
+      return v_flex().id(id).items_end().gap(4).pt(16)
+        .on_hover((h, cx) => this.hoverOn(id, h, cx))
+        .child(div().max_w_4_5().px(12).py(8).rounded(14).bg(t.raised).child(body(12.5)))
+        .child(h_flex().h(24).gap(6).items_center().text_size(11).text_color(t.dim)
+          .when(hovered, (el) => el.child(copy))
+          .child(`To ${to} · ${clock(m.at)}`)
+          .when(ok, (el) => el.child(icon("check", 12).text_color(t.done))))
+        .when(Boolean(m.failed?.length), (el) => el.child(div().max_w_4_5().text_size(11).line_height(1.4).text_color(t.blocked)
+          .child(`Not delivered to ${m.failed.map((f) => `${this.roles.byId(f.role)?.name ?? f.role} (${f.why})`).join("; ")}. Send it again once they're free.`)));
     }
+
     const role = this.roles.byId(m.from), kind = KIND[m.kind];
-    const to = m.to?.length ? `→ ${m.to.map((r) => (r === "kabeer" ? "You" : this.roles.byId(r)?.name ?? r)).join(", ")}` : null;
-    return h_flex().id(id).items_start().gap(9).py(5).pr(28)
-      .child(role ? roleTile(div, svg, t, role, 26) : div().size(26).flex_none().rounded(7).bg(t.raised))
-      .child(v_flex().flex_1().min_w(0).gap(3)
-        .child(h_flex().gap(6).items_center()
-          .child(div().text_size(12).font_semibold().text_color(t.foreground).child(role?.name ?? m.from))
-          .when(Boolean(to), (el) => el.child(div().text_size(11).text_color(t.muted).child(to)))
-          .when(Boolean(kind), (el) => el.child(pill(t, kind[0], t[kind[1]] ?? t.accent)))
-          .child(div().text_size(11).text_color(t.dim).child(clock(m.at))))
-        .child(div().max_w_full().px(11).py(7).rounded(12).bg(kind ? (t[kind[1]] ?? t.accent) + "14" : to ? "#00000000" : t.raised)
-          .when(Boolean(to), (el) => el.border_1().border_color(t.border))
-          .text_size(12.5).line_height(1.45).text_color(t.foreground).child(TextView.markdown(`${id}-md`, m.text).selectable(true))));
+    const aside = ["ask", "answer", "route"].includes(m.kind);
+    const to = m.to?.length ? m.to.map((r) => (r === "kabeer" ? "You" : this.roles.byId(r)?.name ?? r)).join(", ") : null;
+    // One name row per run: the same author, a plain message, within five minutes.
+    const grouped = !aside && !kind && prev && prev.from === m.from && !KIND[prev.kind] && !["desk", "start"].includes(prev.kind) && m.at - prev.at < 300000;
+    const name = role?.name ?? m.from;
+    const avatar = role ? roleTile(div, svg, t, role, aside ? 18 : 22) : div().size(aside ? 18 : 22).flex_none().rounded(6).bg(t.raised);
+    return v_flex().id(id).relative().gap(4).pt(grouped ? 4 : aside ? 10 : 16)
+      .on_hover((h, cx) => this.hoverOn(id, h, cx))
+      .when(!grouped, (el) => el.child(h_flex().h(24).gap(8).items_center()
+        .child(avatar)
+        .child(div().text_size(aside ? 11.5 : 12.5).font_semibold().text_color(aside ? t.muted : t.foreground).child(name))
+        .when(Boolean(to), (el) => el.child(div().text_size(11).text_color(t.dim).child(`→ ${to}`)))
+        .when(Boolean(kind), (el) => el.child(pill(t, kind[0], t[kind[1]] ?? t.accent)))
+        .child(div().text_size(11).text_color(t.dim).child(clock(m.at)))
+        .child(div().flex_1())
+        .when(hovered, (el) => el.child(copy))))
+      .when(grouped && hovered, (el) => el.child(div().absolute().top(0).right(0).child(copy)))
+      .child(div().pl(aside ? 26 : 30).pr(grouped ? 28 : 0).child(body(aside ? 12 : 12.5)).when(aside, (el) => el.opacity(0.92)));
+  }
+
+  hoverOn(id, on, cx) {
+    if (on) this.hoverMsg = id;
+    else if (this.hoverMsg === id) this.hoverMsg = null;
+    cx.notify();
+  }
+
+  copy(id, text, cx) {
+    cx.spawn(async (cx) => {
+      const r = await exec("sh", ["-c", 'printf %s "$1" | pbcopy', "copy", text ?? ""]);
+      if (r.code !== 0) return notify({ title: "Couldn't copy", body: r.stderr.trim(), level: "error", timeout: 4000 });
+      this.copied = id;
+      cx.notify();
+      cx.timer.after(2000, (cx) => { if (this.copied === id) { this.copied = null; cx.notify(); } });
+    });
   }
 
   // Three dots breathing out of step (native loops, so no re-render drives them).
   dots(t) {
-    return h_flex().gap(4).items_center().children([820, 960, 1100].map((period) =>
-      div().size(6).rounded(3).bg(t.muted).loop("opacity", { from: 0.25, to: 1, period })));
+    return h_flex().h(20).gap(4).items_center().children([820, 960, 1100].map((period) =>
+      div().size(6).rounded(3).bg(t.dim).loop("opacity", { from: 0.25, to: 1, period })));
   }
 
-  // At the bottom of the thread, like typing dots: who's working right now. "Replying" while
-  // they owe the chat a reply (bin/team labels them awaiting=… until their turn ends).
+  // Where the reply will appear: who's working now, under their name like a message. "Replying"
+  // while they owe the chat a reply (bin/team labels them awaiting=… until their turn ends).
   activity(t, members) {
     return members.filter((m) => m.status === "working" || m.status === "blocked").map((m) => {
       const role = this.roles.byId(m.role), name = role?.name ?? m.role, id = `act-${m.address}`;
       const blocked = m.status === "blocked";
-      const replying = !blocked && Boolean(m.awaiting);
-      const caption = blocked ? `${name} needs you in its terminal` : replying ? `${name} is replying…` : `${name} is working${m.note ? ` · ${m.note}` : "…"}`;
-      return h_flex().id(id).items_center().gap(9).py(4)
-        .child(this.avatar(t, role, null, 26))
-        .child(h_flex().h(30).px(12).gap(8).items_center().rounded(15).bg(blocked ? t.blocked + "1f" : t.raised)
-          .child(blocked ? icon("alert", 14).text_color(t.blocked) : this.dots(t)))
-        .child(div().min_w(0).flex_1().truncate().text_size(11).text_color(blocked ? t.blocked : t.dim).child(caption))
-        .when(blocked, (el) => el.child(button(t, `${id}-go`, "Go", () => run("agent.focus", { terminal: m.address }), { tip: "Jump to its terminal" })));
+      const caption = blocked ? "needs you in its terminal" : m.awaiting ? "replying" : `working${m.note ? ` · ${m.note}` : ""}`;
+      return v_flex().id(id).gap(4).pt(16)
+        .child(h_flex().h(24).gap(8).items_center()
+          .child(this.avatar(t, role, null, 22))
+          .child(div().text_size(12.5).font_semibold().text_color(t.foreground).child(name))
+          .child(div().min_w(0).flex_1().truncate().text_size(11).text_color(blocked ? t.blocked : t.dim).child(caption))
+          .when(blocked, (el) => el.child(button(t, `${id}-go`, "Go", () => run("agent.focus", { terminal: m.address }), { tip: "Jump to its terminal" }))))
+        .child(div().pl(30).child(blocked ? icon("alert", 15).text_color(t.blocked) : this.dots(t)));
     });
+  }
+
+  // A desk with nothing said yet: what it's for, and who answers.
+  emptyThread(t, members) {
+    const lead = members.some((m) => m.role === "cto") ? "the CTO" : members.length ? "everyone here" : null;
+    return v_flex().id("thread-empty").py(28).gap(6).items_center()
+      .child(div().text_size(14).font_semibold().text_color(t.foreground).child("What should the team work on?"))
+      .child(div().max_w(300).text_size(12).line_height(1.5).text_color(t.muted).text_center()
+        .child(lead ? `Messages go to ${lead}. Type @ to talk to someone directly.` : "Add someone to this desk, then tell them what you need."));
   }
 
   memberDetail(t, m, d) {
@@ -545,26 +602,52 @@ export class Desks {
           .child(button(t, `br-${b.path}-x`, null, (_e, cx) => this.busy(`br-${b.path}`, () => fileBrief(b, "dismissed"), cx), { iconName: "minus", tip: "Dismiss" }));
       })) : null;
 
-    const thread = v_flex().id("desk-thread").flex_1().min_h(0).px(12).py(8).overflow_y_scrollbar().flex_col_reverse()
-      .children([...this.activity(t, members).reverse(), ...this.messages.map((m, i) => this.message(t, m, i)).reverse()]);
+    const said = this.messages.some((m) => !["desk", "start"].includes(m.kind));
+    // Consecutive "started X" events by one person read as one line: "You added CTO, Frontend and Backend".
+    const shown = [];
+    for (const m of this.messages) {
+      const last = shown.at(-1);
+      if (m.kind === "start" && last?.kind === "start" && last.from === m.from && m.at - last.at < 600000) {
+        shown[shown.length - 1] = { ...last, roles: [...(last.roles ?? [last.role]), m.role] };
+      } else shown.push(m);
+    }
+    const rows = shown.map((m, i) => this.message(t, m, i, shown[i - 1]));
+    const thread = v_flex().id("desk-thread").flex_1().min_h(0).px(16).pb(12).overflow_y_scrollbar().flex_col_reverse()
+      .children([...this.activity(t, members).reverse(), ...(said ? [] : [this.emptyThread(t, members)]), ...rows.reverse()]);
 
+    // The composer, one frame: mention suggestions above it; the text; then who it goes to and a
+    // round send button inside the frame.
     const sugg = this.suggestions();
-    const composer = v_flex().px(12).pt(6).pb(10).gap(6).border_t(1).border_color(t.border)
+    const text = this.input.value().trim();
+    const canSend = Boolean(text) && to.length > 0 && !this.acting;
+    const composer = v_flex().px(12).pt(8).pb(12).gap(6)
       .when(sugg.length > 0, (el) => el.child(h_flex().gap(5).flex_wrap()
         .children(sugg.map((o, i) => this.chip(t, `sg-${o.id}`, i === 0, o.name, (_e, cx) => this.pickMention(o, cx),
           o.id === "all" ? icon("team", 13) : roleTile(div, svg, t, o, 16))))))
-      .child(Textarea.new(this.input).w_full().px(10).py(8).rounded(10).border_1().border_color(t.input).bg(t.background).text_size(12.5).text_color(t.foreground)
-        .token((ctx) => {
-          const role = this.roles.byId(ctx.token.id);
-          return h_flex().h(ctx.line_height).px(5).gap(3).items_center().rounded(5).bg((role ? t[role.color] ?? t.accent : t.accent) + "2e")
-            .text_color(role ? t[role.color] ?? t.accent : t.accent).font_medium().child(`@${ctx.token.label ?? ctx.token.text}`);
-        }))
-      .child(h_flex().gap(8).items_center()
-        .child(div().min_w(0).flex_1().truncate().text_size(11).text_color(t.dim).child(to.length
-          ? `To ${to.map((r) => this.roles.byId(r)?.name ?? r).join(", ")}${implicit ? " · @ to choose" : ""}`
-          : "Nobody here yet: add someone above"))
-        .child(button(t, "desk-send", this.acting === "send" ? "Sending…" : "Send", (_e, cx) => this.send(cx),
-          { primary: true, disabled: Boolean(this.acting) || !this.input.value().trim() || !to.length })));
+      .child(v_flex().rounded(14).border_1().border_color(t.input).bg(t.background)
+        .child(Textarea.new(this.input).w_full().px(12).pt(10).pb(4).text_size(12.5).text_color(t.foreground)
+          .token((ctx) => {
+            const role = this.roles.byId(ctx.token.id);
+            const color = role ? t[role.color] ?? t.accent : t.accent;
+            return h_flex().h(ctx.line_height).px(5).items_center().rounded(5).bg(color + "24").text_color(color).font_medium()
+              .child(`@${ctx.token.label ?? ctx.token.text}`);
+          }))
+        .child(h_flex().px(8).pb(8).gap(6).items_center()
+          .child(h_flex().min_w(0).flex_1().gap(5).items_center().text_size(11).text_color(t.dim)
+            .when(to.length > 0, (el) => el.child(div().flex_none().child("To"))
+              .children(to.map((r) => {
+                const role = this.roles.byId(r);
+                return h_flex().flex_none().h(22).pl(2).pr(7).gap(5).items_center().rounded(11).bg(t.raised).text_color(t.foreground)
+                  .when(Boolean(role), (el) => el.child(roleTile(div, svg, t, role, 18))).child(role?.name ?? r);
+              }))
+              .when(implicit, (el) => el.child(div().min_w(0).truncate().child("· @ to choose"))))
+            .when(!to.length, (el) => el.child(div().truncate().child("Nobody here yet: add someone above"))))
+          .child(h_flex().id("desk-send").size(28).flex_none().items_center().justify_center().rounded(14)
+            .bg(canSend ? t.solid : t.raised).text_color(canSend ? t.solid_foreground : t.dim)
+            .when(canSend, (el) => el.cursor_pointer().hover((s) => s.opacity(0.85)))
+            .tooltip(canSend ? "Send (Enter) · new line: Shift+Enter" : to.length ? "Type a message" : "Add someone first")
+            .on_click((_e, cx) => { if (canSend) this.send(cx); })
+            .child(this.acting === "send" ? svg("mods/workspace-chrome/spinner.svg").size(14).spin(900) : icon("arrow-up", 14)))));
 
     return v_flex().size_full().min_h(0)
       .child(header)
