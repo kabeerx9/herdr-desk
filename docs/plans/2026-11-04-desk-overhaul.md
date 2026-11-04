@@ -104,3 +104,27 @@ plus its `subagents/agent-*.jsonl`. Codex/others: fields null, `supported:false`
    (osascript) for Needs-you items only when Herdr isn't frontmost; click focuses.
 4. Review: Last turn mode; line comments batched and sent; approve.
 5. Names: tab/pane names from session `title`.
+
+## Round 2 (2026-11-04): routes, sidebar, slash commands
+
+Kabeer: the sidebar and its per-row hover/selected look bad; `/clear` and other
+commands don't work in the chat; with several engineers there's nowhere to go
+per agent. Decision: T3's model. A desk is a thread; each member is a route.
+
+Shared state contract (both GUI builders):
+- `shared("desk.view")` = desk slug (unchanged).
+- `shared("desk.route")` = `{ task, address }` to show one member's own
+  conversation, or null for the desk's team chat. Setting desk.view clears it.
+
+Runtime:
+- `team transcript --address A [--limit N]` → `{address, supported, turns:[{who:"kabeer"|"desk"|"agent"|"parent", text, at, tools:{summary,counts,failed}, subagents:[...]}], partial}`
+  from the member's Claude transcript tail (same discovery/bounds as timeline;
+  desk-chat deliveries "[desk chat] Kabeer: …" become who:"kabeer"; `<hc from=…>`
+  messages become who:"parent").
+- `team post --raw` sends the text exactly as typed (no "[desk chat]" prefix),
+  for slash commands; records `{kind:"command"}` in the chat.
+
+Sidebar (desk-spaces): tree Space → Desks → Members. Rows 28px, no letter
+tiles, no per-row borders; selected = one full-width `t.selected` fill,
+radius 6; hover = `t.hover` at lower contrast; children indented 16px with a
+1px guide line; status mark right-aligned; time ago only on hover.
