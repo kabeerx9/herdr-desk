@@ -5,11 +5,13 @@
                     [--parent T | --no-parent] [--space ID] [--requested] [--share] [--by WHO]
   team report <done|blocked|update> "<summary>"
   team say "<message>"                      post to your desk's chat (Markdown renders)
-  team ask <role> "<question>"              ask someone in your desk; they answer once, to you
-  team answer <id> "<answer>"               answer an ask (its id is in the question)
+  team ask <role> "<question>"              ask someone in your desk; their reply comes back to you
+  team route <role> "<Kabeer's question>"   (CTO) pass a question on; their reply goes to the chat
+  team answer <id> "<answer>"               answer an ask by hand (replies are posted automatically)
   team inbox [--all]                        what's new in your desk's chat since you last looked
   team post --task SLUG --to ADDR:ROLE... "<message>"   (the Desk) Kabeer's chat message
-  team finish [--address T] [--keep-open]  wrap up: flag leftovers, or remove the team worktree and close
+  team finish [--address T] [--keep-worktree]  wrap up: flag leftovers, or remove the team worktree and close
+  team hook claude|codex                    (the CLIs' end-of-turn hook) posts a reply the chat is waiting for
   team new-desk [--name NAME] [--repo DIR]  a desk: an independent team with its own thread; prints its slug
   team roles
 
@@ -69,14 +71,22 @@ def load_roles():
 def argv_for(role, task):
     if isinstance(role.get("argv"), list):
         return role["argv"] + ([task] if task else [])
-    prompt, extra = role["promptText"], role.get("args", [])
+    prompt, extra, effort = role["promptText"], role.get("args", []), role.get("effort")
     if role.get("cli") == "codex":
         # --no-daemon: otherwise Codex runs its commands outside hc. -c parses TOML;
-        # a JSON string is a valid TOML basic string.
+        # a JSON string is a valid TOML basic string, and a JSON list a TOML array.
         base = ["codex", "--no-daemon"] + (["-m", role["model"]] if role.get("model") else [])
+        base += ["-c", f'model_reasoning_effort="{effort}"'] if effort else []
+        base += ["-c", "notify=" + json.dumps([SELF, "hook", "codex"])]
         base += ["-c", "developer_instructions=" + json.dumps(prompt)] if prompt else []
     else:
-        base = ["claude"] + (["--model", role["model"]] if role.get("model") else [])
+        # --tools first: it takes several values, so a value-less flag must follow it, never the task.
+        # Fewer tools and no MCP servers keep every call's prompt small (measured 41k -> 17k tokens).
+        base = ["claude"] + (["--tools", ",".join(role["tools"])] if role.get("tools") else [])
+        base += [] if role.get("mcp") else ["--strict-mcp-config"]
+        base += ["--model", role["model"]] if role.get("model") else []
+        base += ["--effort", effort] if effort else []
+        base += ["--settings", json.dumps({"hooks": {"Stop": [{"hooks": [{"type": "command", "command": f"{SELF} hook claude", "timeout": 20}]}]}})]
         base += ["--append-system-prompt", prompt] if prompt else []
     return base + extra + ([task] if task else [])
 
@@ -181,6 +191,11 @@ def desk_members(slug):
             if (info.get("labels") or {}).get("role"):
                 out.append({**t, "labels": info["labels"]})
     return out
+
+
+def expect_reply(addr, what):
+    """Marks a terminal as owing a reply; its end-of-turn hook posts that reply (team hook)."""
+    sh(["hc", "label", addr, f"awaiting={what}:{int(time.time() * 1000)}"])
 
 
 def send_text(addr, text):
@@ -316,7 +331,13 @@ def start(args):
     # Through the user's own login + interactive shell: hc's environment lacks what ~/.zshrc sets
     # up (nvm's node and npm, Android tools). exec swaps the shell for the agent itself.
     shell = os.environ.get("SHELL") or "/bin/zsh"
-    role = {**role, "promptText": role["promptText"] + f"\n\nYour desk is `{slug}`: your team chat and, for briefs, `team/briefs/{slug}/`."}
+    desk_note = f"\n\nYour desk is `{slug}`: your team chat and, for briefs, `team/briefs/{slug}/`."
+    if repo:
+        decisions = os.path.join(repo["common"], "team", "desks", slug, "decisions.md")
+        desk_note += (f" The desk's decisions file is `{decisions}` (contracts, data model, what's done and left): "
+                      + ("keep it current, rewritten not appended, under 100 lines." if role["id"] == "cto"
+                         else "read it before you start, if it exists."))
+    role = {**role, "promptText": role["promptText"] + desk_note}
     cmd += ["--", shell, "-lic", 'exec "$@"', "team-role"] + argv_for(role, task)
     r = sh(cmd)
     if r.returncode != 0:
@@ -411,6 +432,8 @@ def ask(args):
     delivered, failed = [], []
     for t in targets:
         why = send_text(t["address"], f"[desk chat] {who} asks you ({qid}): {text}")
+        if not why:
+            expect_reply(t["address"], f"ask-{qid}")
         (failed.append({"role": t["labels"]["role"], "why": why}) if why else delivered.append(t["address"]))
     rec = chat_append(slug, {"from": who, "address": ME, "kind": "ask", "id": qid, "to": [targets[0]["labels"]["role"]],
                              "text": text, "delivered_to": delivered, "failed": failed})
@@ -431,6 +454,102 @@ def answer(args):
     chat_append(slug, {"from": who, "address": ME, "kind": "answer", "re": args.id, "to": [q.get("from")], "text": text,
                        **({"failed": [{"role": q.get("from"), "why": why}]} if why else {"delivered_to": [asker]})})
     print(json.dumps({"ok": not why, **({"warning": f"logged, not delivered: {why}"} if why else {})}))
+
+
+def route(args):
+    """The CTO passes Kabeer's question to whoever knows; their reply goes to the chat
+    for Kabeer directly, so the CTO never rewrites it."""
+    slug, who = me_in_desk()
+    text = " ".join(args.text).strip()
+    members = [t for t in desk_members(slug) if t.get("address") != ME] if slug else []
+    targets = [t for t in members if args.role in (t["labels"]["role"], t.get("address"))]
+    if not targets:
+        here = ", ".join(sorted({t["labels"]["role"] for t in members})) or "nobody else"
+        die(f"no {args.role} in this desk (here: {here})")
+    t = targets[0]
+    why = send_text(t["address"], f"[desk chat] Kabeer (via {who}): {text}")
+    if not why:
+        expect_reply(t["address"], "chat")
+    chat_append(slug, {"from": who, "address": ME, "kind": "route", "to": [t["labels"]["role"]], "text": text,
+                       **({"failed": [{"role": t["labels"]["role"], "why": why}]} if why else {"delivered_to": [t["address"]]})})
+    print("passed on; the reply goes to the chat" if not why else f"not delivered: {why}")
+
+
+def hook(args):
+    """End of an agent's turn (Claude's Stop hook, Codex's notify). When the turn answered a desk
+    message, its final message is posted for it: the agent replies once, in its own words, and
+    never types the reply again into `team say`. Silent and quick; never blocks the agent."""
+    msg = ""
+    try:
+        if args.cli == "codex":
+            payload = json.loads(args.payload[-1]) if args.payload else {}
+            chain_codex_notify(args.payload)
+            if payload.get("type") != "agent-turn-complete":
+                return
+            msg = payload.get("last-assistant-message") or ""
+        else:
+            payload = json.load(sys.stdin)
+            msg = payload.get("last_assistant_message") or last_text(payload.get("transcript_path"))
+    except (ValueError, OSError):
+        return
+    if not ME or not msg.strip():
+        return
+    labels = terminal(ME).get("labels", {})
+    awaiting, slug, who = labels.get("awaiting"), labels.get("task"), labels.get("role")
+    if not awaiting or not slug or not who:
+        return
+    what, _, since = awaiting.rpartition(":")
+    sh(["hc", "label", ME, "awaiting="])
+    # It posted by hand this turn after all: don't post twice.
+    if any(r.get("address") == ME and r.get("kind") in ("say", "answer") and r.get("at", 0) >= int(since or 0)
+           for r in chat_read(slug)[-30:]):
+        return
+    msg = msg.strip()
+    if what.startswith("ask-"):
+        qid = what[4:]
+        q = next((r for r in reversed(chat_read(slug)) if r.get("kind") == "ask" and r.get("id") == qid), None)
+        asker = (q or {}).get("address")
+        why = None
+        if asker and terminal(asker).get("state") == "live":
+            note = f"[desk chat] {who} answers {qid}: {msg}"
+            if (terminal(asker).get("labels") or {}).get("role") == "cto":
+                note += digest_for(slug, asker)
+            why = send_text(asker, note)
+        chat_append(slug, {"from": who, "address": ME, "kind": "answer", "re": qid, "to": [(q or {}).get("from")], "text": msg, "auto": True,
+                           **({"delivered_to": [asker]} if asker and not why else {})})
+    else:
+        chat_append(slug, {"from": who, "address": ME, "kind": "say", "text": msg, "auto": True})
+
+
+def last_text(transcript):
+    """The newest assistant text in a Claude transcript (older Claude Codes' Stop input lacks it)."""
+    try:
+        with open(transcript) as f:
+            lines = f.readlines()[-200:]
+    except (OSError, TypeError):
+        return ""
+    for line in reversed(lines):
+        try:
+            r = json.loads(line)
+        except ValueError:
+            continue
+        if r.get("type") == "assistant":
+            parts = [c.get("text", "") for c in (r.get("message") or {}).get("content", []) if isinstance(c, dict) and c.get("type") == "text"]
+            if any(parts):
+                return "\n".join(parts)
+    return ""
+
+
+def chain_codex_notify(payload):
+    """Our notify replaces the one in ~/.codex/config.toml for team agents, so call that one too."""
+    try:
+        import tomllib
+        with open(os.path.expanduser("~/.codex/config.toml"), "rb") as f:
+            prog = tomllib.load(f).get("notify")
+        if isinstance(prog, list) and prog and SELF not in prog:
+            subprocess.Popen(prog + list(payload[-1:]), stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, start_new_session=True)
+    except Exception:
+        pass
 
 
 def inbox(args):
@@ -465,6 +584,7 @@ def post(args):
             failed.append({"role": role, "why": why})
         else:
             delivered.append(role); delivered_to.append(addr)
+            expect_reply(addr, "chat")
     rec = chat_append(args.task, {"from": "kabeer", "kind": "say", "to": [r for _, r in targets], "text": text,
                                   "delivered": delivered, "delivered_to": delivered_to, "failed": failed})
     print(json.dumps(rec))
@@ -522,13 +642,17 @@ def finish(args):
         top = repo["top"]
         branch = git_out(top, "rev-parse", "--abbrev-ref", "HEAD")
         dirty = [l for l in (git_out(top, "status", "--porcelain") or "").splitlines() if l.strip()]
+        kept_commits = None
         if dirty:
             left.append(f"{len(dirty)} uncommitted or untracked file{'s' if len(dirty) != 1 else ''}")
         main_branch = git_out(repo["main"], "rev-parse", "--abbrev-ref", "HEAD")
         nots = ["--not", "--remotes"] + ([f"refs/heads/{main_branch}"] if main_branch and main_branch != branch else [])
         ahead = git_out(top, "rev-list", "--count", "HEAD", *nots)
         if ahead and ahead != "0" and top != repo["main"]:
-            left.append(f"{ahead} commit{'s' if ahead != '1' else ''} on {branch} not pushed or merged into {main_branch}")
+            if args.keep_worktree:  # committed work is safe on its branch; only the agent goes
+                kept_commits = f"{ahead} commit{'s' if ahead != '1' else ''} on {branch}"
+            else:
+                left.append(f"{ahead} commit{'s' if ahead != '1' else ''} on {branch} not pushed or merged into {main_branch}")
         team_worktree = top != repo["main"] and inside(top, WORKTREES) and (branch or "").startswith("team/")
         where = f"{repo['name']}" + (f" ({branch})" if branch else "")
         # A read-only role in the main checkout doesn't own what's there (likely Kabeer's own work).
@@ -544,7 +668,9 @@ def finish(args):
             return
         others = [t["address"] for t in live_terminals() if t["address"] != target and inside(
             ((terminal(t["address"]).get("foreground") or {}).get("cwd") or t.get("cwd")), top)] if team_worktree else []
-        if team_worktree and others:
+        if args.keep_worktree:
+            notes.append(f"kept worktree {os.path.basename(top)}" + (f" ({kept_commits})" if kept_commits else ""))
+        elif team_worktree and others:
             notes.append(f"worktree {os.path.basename(top)} kept: {', '.join(others)} still works in it")
         elif team_worktree:
             r = sh(["git", "worktree", "remove", top], cwd=repo["main"])
@@ -586,6 +712,10 @@ def main():
     y.add_argument("text", nargs="+")
     ak = sub.add_parser("ask")
     ak.add_argument("role"); ak.add_argument("text", nargs="+")
+    ro = sub.add_parser("route")
+    ro.add_argument("role"); ro.add_argument("text", nargs="+")
+    hk = sub.add_parser("hook")
+    hk.add_argument("cli", choices=["claude", "codex"]); hk.add_argument("payload", nargs="*")
     an = sub.add_parser("answer")
     an.add_argument("id"); an.add_argument("text", nargs="+")
     ib = sub.add_parser("inbox")
@@ -596,6 +726,7 @@ def main():
     q.add_argument("text", nargs="+")
     fi = sub.add_parser("finish")
     fi.add_argument("--address"); fi.add_argument("--keep-open", action="store_true")
+    fi.add_argument("--keep-worktree", action="store_true", help="close the agent once nothing is uncommitted; keep its branch")
     fi.add_argument("--force", action="store_true", help="wrap up even while it's working")
     nd = sub.add_parser("new-desk")
     nd.add_argument("--name"); nd.add_argument("--repo")
@@ -611,6 +742,10 @@ def main():
         ask(args)
     elif args.cmd == "answer":
         answer(args)
+    elif args.cmd == "route":
+        route(args)
+    elif args.cmd == "hook":
+        hook(args)
     elif args.cmd == "inbox":
         inbox(args)
     elif args.cmd == "post":

@@ -14,7 +14,7 @@ const DIR = () => `${home()}/.herdr/team`;
 const TEAM = () => `${appHome()}/bin/team`;
 const STATUS = { blocked: "needs you", done: "done", working: "working", idle: "idle" };
 const KIND = { done: ["done", "done"], blocked: ["blocked", "blocked"], update: ["update", "accent"], flag: ["left locally", "blocked"],
-  finish: ["wrapped up", "dim"], ask: ["asks", "accent"], answer: ["answers", "done"] };
+  finish: ["wrapped up", "dim"], ask: ["asks", "accent"], answer: ["answers", "done"], route: ["passes on", "accent"] };
 const RANK = { blocked: 0, done: 1, working: 2, idle: 3 };
 
 const clock = (ms) => {
@@ -157,7 +157,7 @@ export class Desks {
     const status = new Map(agents().map((a) => [a.address, a.status]));
     const live = terminals().filter((t) => t.state === "live" && t.labels?.task === slug && t.labels?.role)
       .map((t) => ({ address: t.address, role: t.labels.role, parent: t.parent, status: status.get(t.address) ?? t.status?.state ?? t.status ?? null,
-        phase: t.labels.phase, note: t.labels.note, space: t.labels["herdr.space"], cwd: t.cwd, created: t.created_ms ?? 0 }));
+        phase: t.labels.phase, note: t.labels.note, awaiting: t.labels.awaiting ?? null, space: t.labels["herdr.space"], cwd: t.cwd, created: t.created_ms ?? 0 }));
     const addrs = new Set(live.map((m) => m.address));
     const depth = (m) => (m.parent && addrs.has(m.parent) ? 1 + depth(live.find((x) => x.address === m.parent)) : 0);
     return live.map((m) => ({ ...m, depth: depth(m) }))
@@ -450,18 +450,13 @@ export class Desks {
       div().size(6).rounded(3).bg(t.muted).loop("opacity", { from: 0.25, to: 1, period })));
   }
 
-  // At the bottom of the thread, like typing dots: who's working right now. "Replying" when the
-  // newest message to them (yours, or a question) is newer than their newest post.
+  // At the bottom of the thread, like typing dots: who's working right now. "Replying" while
+  // they owe the chat a reply (bin/team labels them awaiting=… until their turn ends).
   activity(t, members) {
-    const lastTo = {}, lastFrom = {};
-    this.messages.forEach((m, i) => {
-      for (const r of m.to ?? []) lastTo[r] = i;
-      if (m.from) lastFrom[m.from] = i;
-    });
     return members.filter((m) => m.status === "working" || m.status === "blocked").map((m) => {
       const role = this.roles.byId(m.role), name = role?.name ?? m.role, id = `act-${m.address}`;
       const blocked = m.status === "blocked";
-      const replying = !blocked && (lastTo[m.role] ?? -1) > (lastFrom[m.role] ?? -1);
+      const replying = !blocked && Boolean(m.awaiting);
       const caption = blocked ? `${name} needs you in its terminal` : replying ? `${name} is replying…` : `${name} is working${m.note ? ` · ${m.note}` : "…"}`;
       return h_flex().id(id).items_center().gap(9).py(4)
         .child(this.avatar(t, role, null, 26))
