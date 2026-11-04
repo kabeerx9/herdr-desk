@@ -153,7 +153,12 @@ export class Desks {
     this.stepsOpen = store.get("desks.steps", true);   // the feed shown, or just the caption
     this.stepsAll = new Set();                         // addresses whose whole feed is shown
     this.stepsSeen = {};                               // address -> ms the newest row was first drawn (for its fade-in)
-    cx.timer.every(900, (cx) => this.pollSteps(cx));
+    // Woken by the hook's writes; the slow timer only clears feeds of agents that stopped.
+    cx.timer.every(4000, (cx) => this.pollSteps(cx));
+    cx.spawn(async (cx) => {
+      await exec("mkdir", ["-p", `${DIR()}/.activity`]);
+      for (;;) { await watchFolder(`${DIR()}/.activity`); this.pollSteps(cx); }
+    });
 
     this.roles.load(cx);
     cx.timer.every(5000, (cx) => this.roles.load(cx));
@@ -200,7 +205,13 @@ export class Desks {
     cx.spawn(async (cx) => {
       await exec("mkdir", ["-p", DIR()]);
       await this.reload(cx);
-      for (;;) { await watchFolder(DIR()); await this.reload(cx); }
+      // macOS watches recursively: .activity/ (every tool call), .runtime.json and the locks
+      // change many times a second while agents work. Only a desk's thread file is news.
+      for (;;) {
+        const changed = await watchFolder(DIR());
+        if (!changed.some((p) => p === DIR() || p === `${DIR()}/` || /^[^/.][^/]*\.jsonl$/.test(p.slice(DIR().length + 1)))) continue;
+        await this.reload(cx);
+      }
     });
   }
 

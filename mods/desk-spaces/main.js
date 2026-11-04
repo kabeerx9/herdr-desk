@@ -189,6 +189,11 @@ export default class Spaces extends View {
     const sp = spaces();
     for (const s of sp) if (!this.shown.has(s.id)) this.born[s.id] ??= now;
     const due = this.due(now, sp, panes());
+    if (this.dirty?.size) {
+      const repos = new Set([...this.dirty].map((r) => JSON.stringify([null, r])));
+      this.dirty.clear();
+      for (const k of Object.keys(this.git)) if (repos.has(this.git[k]?.repo)) due.add(k);
+    }
     if (due.size) this.refreshGit(due, cx);
     if (sp.some((s) => !this.shown.has(s.id))) cx.notify();
   }
@@ -303,8 +308,9 @@ export default class Spaces extends View {
       try {
         while (this.watching.has(repo)) {
           await watchFolder(repo);
-          const mine = JSON.stringify([null, repo]);
-          if (this.watching.has(repo)) this.refreshGit(Object.keys(this.git).filter((k) => this.git[k]?.repo === mine), cx);
+          // A commit or checkout writes a burst of files: collect them, and checkNew's
+          // 250ms tick refreshes each repo once for the whole burst.
+          if (this.watching.has(repo)) (this.dirty ??= new Set()).add(repo);
         }
       } catch { this.watching.delete(repo); }
     });
