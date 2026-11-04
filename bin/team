@@ -161,7 +161,8 @@ def step_text(name, inp):
     if name == "Grep":
         return f"Search for {inp.get('pattern') or ''}".strip()
     if name == "WebFetch":
-        return f"Fetch {re.sub(r'^https?://([^/]+).*$', r'\1', inp.get('url') or '')}"
+        host = re.sub(r"^https?://([^/]+).*$", r"\1", inp.get("url") or "")
+        return f"Fetch {host}"
     if name == "WebSearch":
         return f"Search the web: {inp.get('query') or ''}"
     if name == "TodoWrite":
