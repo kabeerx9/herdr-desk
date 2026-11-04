@@ -13,7 +13,8 @@
   team finish [--address T] [--keep-worktree]  wrap up: flag leftovers, or remove the team worktree and close
   team hook claude|codex                    (the CLIs' end-of-turn hook) posts a reply the chat is waiting for
   team new-desk [--name NAME] [--repo DIR]  a desk: an independent team with its own thread; prints its slug
-  team fresh --address T [--force]          a long context: it writes a handoff, then a new session of it takes over
+  team compact --address T                  a long context: Claude's /compact (same session, history summarized)
+  team fresh --address T [--force]          or a new session: it writes a handoff, then a new one of it takes over
   team roles
 
 One launcher for everyone (the CTO, the Desk's buttons, you): it reads roles.json,
@@ -103,7 +104,10 @@ def argv_for(role, task):
         base += [] if role.get("mcp") else ["--strict-mcp-config"]
         base += ["--model", role["model"]] if role.get("model") else []
         base += ["--effort", effort] if effort else []
-        base += ["--settings", json.dumps({"hooks": {"Stop": [{"hooks": [{"type": "command", "command": f"{SELF} hook claude", "timeout": 20}]}]}})]
+        # Stop: post replies, measure context. SessionStart after a compaction (asked for or Claude's own): its new size.
+        base += ["--settings", json.dumps({"hooks": {
+            "Stop": [{"hooks": [{"type": "command", "command": f"{SELF} hook claude", "timeout": 20}]}],
+            "SessionStart": [{"matcher": "compact", "hooks": [{"type": "command", "command": f"{SELF} hook claude-compact", "timeout": 20}]}]}})]
         base += ["--append-system-prompt", prompt] if prompt else []
     return base + extra + ([task] if task else [])
 
@@ -500,8 +504,11 @@ def hook(args):
     """End of an agent's turn (Claude's Stop hook, Codex's notify). For Claude, records how big
     its context is now (the ctx label). When the turn answered a desk message, its final message is posted
     for it: the agent replies once, in its own words, and never types it again into `team say`.
-    When the turn wrote a handoff (team fresh), a new session takes over. Quick; never blocks."""
-    msg, ctx = "", None
+    When the turn wrote a handoff (team fresh), a new session takes over. After a compaction
+    (claude-compact, Claude's SessionStart hook), its new size. Quick; never blocks."""
+    msg = ""
+    if args.cli == "claude-compact":
+        return compacted()
     try:
         if args.cli == "codex":
             payload = json.loads(args.payload[-1]) if args.payload else {}
@@ -559,8 +566,70 @@ def hook(args):
         chat_append(slug, {"from": who, "address": ME, "kind": "say", "text": msg, "auto": True})
 
 
+def compacted():
+    """Claude compacted this agent's context (SessionStart, source compact). Its record lands
+    in the transcript just after this hook, so the size is read a moment later, apart."""
+    try:
+        payload = json.load(sys.stdin)
+    except ValueError:
+        return
+    if not ME or not payload.get("transcript_path"):
+        return
+    env = {k: v for k, v in os.environ.items() if k != "HC_TERMINAL_ID"}
+    subprocess.Popen([SELF, "measure", "--address", ME, "--transcript", payload["transcript_path"], "--compacted"], env=env,
+                     stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, start_new_session=True)
+
+
+def compact_meta(transcript):
+    try:
+        for line in tail_lines(transcript):
+            if '"compact_boundary"' in line:
+                return json.loads(line).get("compactMetadata")
+    except (OSError, TypeError, ValueError):
+        pass
+    return None
+
+
+def compact(args):
+    """Types /compact into a Claude agent, as keys (hc send would paste it as a message)."""
+    need_core()
+    info = terminal(args.address)
+    if info.get("state") != "live":
+        die(f"{args.address} isn't a live terminal")
+    role = next((r for r in load_roles() if r["id"] == (info.get("labels") or {}).get("role")), {})
+    if role.get("cli") == "codex":
+        die("compact is for Claude agents")
+    status = (info.get("status") or {}).get("state")
+    if status in ("working", "blocked"):
+        die(f"it's {'working' if status == 'working' else 'waiting on you in its terminal'}; compact once its turn ends")
+    keep = "keep the task and why decisions made files and commits touched next steps open questions and who is waiting"
+    keys = ["/", *"compact", "space", *["space" if c == " " else c for c in keep], "enter"]
+    r = sh(["hc", "keys", info.get("address") or args.address, *keys])
+    if r.returncode != 0:
+        die(f"couldn't type into it: {(r.stderr or r.stdout).strip()[:160]}")
+    print(json.dumps({"ok": True}))
+
+
 def measure(args):
-    """(Claude's hook, detached) labels ctx=<tokens>; the first time past the role's limit, says so in the chat."""
+    """(Claude's hook, detached) labels ctx=<tokens>; the first time past the role's limit, says so in the chat.
+    After a compaction, its new size, and a line in the chat."""
+    if args.compacted:
+        meta, before = None, (terminal(args.address).get("labels") or {})
+        for _ in range(20):
+            time.sleep(0.75)
+            meta = compact_meta(args.transcript)
+            if meta:
+                break
+        # postTokens counts only the summarized history; the system prompt and tools still come on top,
+        # so the new size is left to the next turn's measurement.
+        meta = meta or {}
+        pre = meta.get("preTokens") or before.get("ctx")
+        sh(["hc", "label", args.address, "ctxwarned=", "ctx="])
+        if before.get("task") and before.get("role"):
+            size = f" (was {int(pre) // 1000}k tokens)" if pre else ""
+            chat_append(before["task"], {"from": before["role"], "address": args.address, "kind": "compact",
+                                         "trigger": meta.get("trigger"), "text": f"compacted its context{size}"})
+        return
     ctx = None
     for _ in range(8):
         time.sleep(0.75)
@@ -575,8 +644,8 @@ def measure(args):
     sh(["hc", "label", args.address, f"ctx={ctx}", *(["ctxwarned=1"] if warn else [])])
     if warn:
         chat_append(slug, {"from": who, "address": args.address, "kind": "context", "ctx": ctx,
-                           "text": f"Context is at {ctx // 1000}k tokens. Every turn now re-reads all of it; "
-                                   "a fresh start (Details) hands over to a new session."})
+                           "text": f"My context is at {ctx // 1000}k tokens, and every turn re-reads all of it. "
+                                   "Compact it? I keep this session; the history becomes a summary."})
 
 
 def tail_lines(path, size=4_000_000):
@@ -594,6 +663,8 @@ def claude_context(transcript):
     except (OSError, TypeError):
         return None
     for line in lines:
+        if '"compact_boundary"' in line:  # compacted since its last call: unknown until its next one
+            return None
         if '"usage"' not in line:
             continue
         try:
@@ -885,7 +956,9 @@ def main():
     ro = sub.add_parser("route")
     ro.add_argument("role"); ro.add_argument("text", nargs="+")
     hk = sub.add_parser("hook")
-    hk.add_argument("cli", choices=["claude", "codex"]); hk.add_argument("payload", nargs="*")
+    hk.add_argument("cli", choices=["claude", "claude-compact", "codex"]); hk.add_argument("payload", nargs="*")
+    co = sub.add_parser("compact")
+    co.add_argument("--address", required=True)
     an = sub.add_parser("answer")
     an.add_argument("id"); an.add_argument("text", nargs="+")
     ib = sub.add_parser("inbox")
@@ -901,7 +974,7 @@ def main():
     nd = sub.add_parser("new-desk")
     nd.add_argument("--name"); nd.add_argument("--repo")
     me_ = sub.add_parser("measure")
-    me_.add_argument("--address", required=True); me_.add_argument("--transcript", required=True)
+    me_.add_argument("--address", required=True); me_.add_argument("--transcript", required=True); me_.add_argument("--compacted", action="store_true")
     fr = sub.add_parser("fresh")
     fr.add_argument("--address", required=True); fr.add_argument("--force", action="store_true")
     fr.add_argument("--take-over", action="store_true", help=argparse.SUPPRESS)
@@ -927,6 +1000,8 @@ def main():
         post(args)
     elif args.cmd == "finish":
         finish(args)
+    elif args.cmd == "compact":
+        compact(args)
     elif args.cmd == "measure":
         measure(args)
     elif args.cmd == "fresh":

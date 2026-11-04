@@ -15,7 +15,7 @@ const TEAM = () => `${appHome()}/bin/team`;
 const STATUS = { blocked: "needs you", done: "done", working: "working", idle: "idle" };
 const KIND = { done: ["done", "done"], blocked: ["blocked", "blocked"], update: ["update", "accent"], flag: ["left locally", "blocked"],
   finish: ["wrapped up", "dim"], ask: ["asks", "accent"], answer: ["answers", "done"], route: ["passes on", "accent"], context: ["long context", "blocked"] };
-const EVENTS = ["desk", "start", "fresh"];
+const EVENTS = ["desk", "start", "fresh", "compact"];
 const kTokens = (n) => (n >= 1e6 ? `${(n / 1e6).toFixed(1)}M` : `${Math.round(n / 1000)}k`);
 const RANK = { blocked: 0, done: 1, working: 2, idle: 3 };
 
@@ -260,6 +260,14 @@ export class Desks {
     }, cx);
   }
 
+  // Claude's /compact: same session, its history swapped for a summary (bin/team compact).
+  compact(m, cx) {
+    this.busy(`compact-${m.address}`, async () => {
+      const r = await exec(TEAM(), ["compact", "--address", m.address]);
+      if (r.code !== 0) { let msg = r.stderr.trim(); try { msg = JSON.parse(msg).error ?? msg; } catch {} throw new Error(msg); }
+    }, cx);
+  }
+
   overLimit(m) { return Boolean(m.ctx) && m.ctx >= this.roles.freshAt(m.role); }
 
   deleteDesk(d, cx) {
@@ -434,6 +442,12 @@ export class Desks {
   // of messages; agent-to-agent asides are smaller; long ones fold behind "Show more".
   message(t, m, i, prev) {
     const id = `msg-${i}`;
+    if (m.kind === "compact") {
+      const who = this.roles.byId(m.from)?.name ?? m.from;
+      return h_flex().id(id).justify_center().pt(10).pb(2)
+        .child(div().max_w_4_5().truncate().text_size(11).text_color(t.dim)
+          .child(`${who} ${m.text}${m.trigger === "auto" ? " (Claude did it on its own)" : ""} · ${clock(m.at)}`));
+    }
     if (m.kind === "fresh") {
       return h_flex().id(id).justify_center().pt(10).pb(2)
         .child(div().max_w_4_5().truncate().text_size(11).text_color(t.dim).tooltip(m.text ?? "")
@@ -475,6 +489,8 @@ export class Desks {
     }
 
     const role = this.roles.byId(m.from), kind = KIND[m.kind];
+    // A long-context note offers Compact while that agent is still running and still over its limit.
+    const offer = m.kind === "context" ? this.members().find((x) => x.address === m.address && this.overLimit(x)) ?? null : null;
     const aside = ["ask", "answer", "route"].includes(m.kind);
     const to = m.to?.length ? m.to.map((r) => (r === "kabeer" ? "You" : this.roles.byId(r)?.name ?? r)).join(", ") : null;
     // One name row per run: the same author, a plain message, within five minutes.
@@ -492,7 +508,11 @@ export class Desks {
         .child(div().flex_1())
         .when(hovered, (el) => el.child(copy))))
       .when(grouped && hovered, (el) => el.child(div().absolute().top(0).right(0).child(copy)))
-      .child(div().pl(aside ? 26 : 30).pr(grouped ? 28 : 0).child(body(aside ? 12 : 12.5)).when(aside, (el) => el.opacity(0.92)));
+      .child(div().pl(aside ? 26 : 30).pr(grouped ? 28 : 0).child(body(aside ? 12 : 12.5)).when(aside, (el) => el.opacity(0.92)))
+      .when(Boolean(offer), (el) => el.child(h_flex().pl(30).pt(2).gap(6)
+        .child(button(t, `${id}-compact`, this.acting === `compact-${offer.address}` ? "Compacting…" : "Compact", (_e, cx) => this.compact(offer, cx),
+          { primary: true, disabled: Boolean(this.acting) || offer.status === "working",
+            tip: offer.status === "working" ? "Once its turn ends" : "Claude's /compact: same session, the history becomes a summary" }))));
   }
 
   hoverOn(id, on, cx) {
@@ -558,12 +578,16 @@ export class Desks {
         .child(statusBadge(t, m.status) ?? div()))
       .when(Boolean(m.note), (el) => el.child(div().pl(30).text_size(11.5).line_height(1.35).text_color(t.muted).child(m.note)))
       .when(Boolean(m.ctx), (el) => el.child(div().pl(30).text_size(11).text_color(this.overLimit(m) ? t.blocked : t.dim)
-        .child(`${kTokens(m.ctx)} tokens of context${this.overLimit(m) ? `, past the ${kTokens(this.roles.freshAt(m.role))} limit: start fresh when it's free` : ""}`)))
+        .child(`${kTokens(m.ctx)} tokens of context${this.overLimit(m) ? `, past the ${kTokens(this.roles.freshAt(m.role))} limit: compact it when it's free` : ""}`)))
       .child(h_flex().pl(30).gap(6).flex_wrap()
         .child(button(t, `${id}-go`, "Go", () => run("agent.focus", { terminal: m.address })))
-        .when(role?.cli !== "codex", (el) => el.child(button(t, `${id}-fresh`, m.handingOff ? "Handing off…" : "Fresh start", (_e, cx) => this.freshStart(m, cx),
-          { primary: this.overLimit(m) && !m.handingOff, disabled: Boolean(this.acting) || m.handingOff || m.status === "working",
-            tip: "It writes a handoff, then a new session of it takes over here with that handoff" })))
+        .when(role?.cli !== "codex", (el) => el
+          .child(button(t, `${id}-compact`, "Compact", (_e, cx) => this.compact(m, cx),
+            { primary: this.overLimit(m), disabled: Boolean(this.acting) || m.handingOff || m.status === "working" || m.status === "blocked",
+              tip: "Claude's /compact: same session, the history becomes a summary" }))
+          .child(button(t, `${id}-fresh`, m.handingOff ? "Handing off…" : "Fresh start", (_e, cx) => this.freshStart(m, cx),
+            { disabled: Boolean(this.acting) || m.handingOff || m.status === "working",
+              tip: "A new session instead: it writes a handoff, then a new one of it takes over here" })))
         .when(engineer, (el) => el
           .child(button(t, `${id}-rev`, "Review", (_e, cx) => this.busy(`${id}-rev`, () => child("reviewer", "Review the commits on this branch against its base, and the brief if there is one. Your parent is the engineer who wrote it."), cx),
             { iconName: "sparkles", disabled: Boolean(this.acting), tip: "A Reviewer on this branch; it reports to this engineer" }))
@@ -597,7 +621,7 @@ export class Desks {
           const role = this.roles.byId(m.role);
           return h_flex().id(`mem-${m.address}`).h(28).pl(3).pr(9).gap(6).items_center().rounded(14).cursor_pointer().flex_none()
             .bg(t.raised).hover((s) => s.bg(t.hover))
-            .tooltip(`${role?.name ?? m.role}: ${STATUS[m.status] ?? "starting"}${m.ctx ? ` · ${kTokens(m.ctx)} tokens of context` : ""}${this.overLimit(m) ? " (long; Details has Fresh start)" : ""}${m.note ? ` · ${m.note}` : ""}`)
+            .tooltip(`${role?.name ?? m.role}: ${STATUS[m.status] ?? "starting"}${m.ctx ? ` · ${kTokens(m.ctx)} tokens of context` : ""}${this.overLimit(m) ? " (long; compact it from the chat or Details)" : ""}${m.note ? ` · ${m.note}` : ""}`)
             .on_click(() => run("agent.focus", { terminal: m.address }))
             .child(this.avatar(t, role, m.status, 22))
             .child(div().text_size(11.5).text_color(t.foreground).child(role?.name ?? m.role))
