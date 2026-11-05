@@ -10,6 +10,20 @@ class RuntimeTest(unittest.TestCase):
     def tearDown(self): self.tmp.cleanup()
     def test_store_is_private_and_atomic_round_trip(self):
         self.store.save(self.data); self.assertEqual(0o600, os.stat(self.store.path).st_mode & 0o777); self.assertEqual(self.data, self.store.load())
+    def ended(self, rec, reason="killed"):
+        return session_view(rec, {"t1":{"state":"finished", "reason":reason}})
+    def test_killed_after_its_done_report_is_finished_not_lost(self):
+        rec = upsert_session(self.data, {"address":"t1","role":"reviewer","task":"a","cli":"codex","evidence_at":100})
+        self.assertEqual("finished", self.ended(rec)["state"])
+        self.assertEqual([], attention(self.data, {"t1":{"state":"finished", "reason":"killed"}}, [])[:1])
+    def test_killed_without_a_done_report_stays_resumable(self):
+        view = self.ended({"address":"t1","cli":"claude","conversation":"abc"})
+        self.assertEqual("disconnected", view["state"]); self.assertTrue(view["can_resume"])
+    def test_a_crash_after_done_is_still_a_loss(self):
+        self.assertEqual("disconnected", self.ended({"address":"t1","cli":"claude","conversation":"abc","evidence_at":100}, "exited")["state"])
+    def test_killed_during_new_work_after_done_is_still_a_loss(self):
+        self.assertEqual("disconnected", self.ended({"address":"t1","cli":"claude","conversation":"abc","evidence_at":100,"prompt_at":200})["state"])
+        self.assertEqual("finished", self.ended({"address":"t1","cli":"claude","conversation":"abc","evidence_at":300,"prompt_at":200})["state"])
     def test_shell_is_disconnected_even_when_labeled_live(self):
         rec = upsert_session(self.data, {"address":"t1","role":"cto","task":"a","cli":"claude","conversation":"abc"})
         view = session_view(rec, {"t1":live("zsh")}); self.assertEqual("disconnected", view["state"]); self.assertTrue(view["can_resume"])

@@ -12,6 +12,7 @@
   team post --task SLUG --to ADDR:ROLE... "<message>"   (the Desk) Kabeer's chat message
   team post --raw --task SLUG --to ADDR:ROLE "/cmd"     (the Desk) typed exactly as is, e.g. a CLI slash command
   team finish [--address T] [--keep-worktree]  wrap up: flag leftovers, or remove the team worktree and close
+  team close [--address T] [--force]        close an agent whose part is done; keeps its worktree and files
   team hook claude|codex                    (the CLIs' end-of-turn hook) posts a reply the chat is waiting for
   team hook claude-permission               (Claude's PermissionRequest hook) asks in the desk chat, waits for Allow/Deny or a question's answers
   team choose --task <slug> <id> --answers <json>   (the Desk) answers a question card
@@ -239,6 +240,13 @@ def runtime_record(address, role, task, cwd, cli, conversation=None, parent_task
         **extra})))
 
 
+def ended_terminals():
+    """Terminals that have ended, for telling a deliberate close from a loss. Reasons only: no detail calls."""
+    data = hc_json("ls", "--all") or {}
+    items = data.get("terminals", []) if isinstance(data, dict) else data
+    return {x["address"]: x for x in items if isinstance(x, dict) and x.get("address") and x.get("state") != "live"}
+
+
 def activity_file(addr):
     return os.path.join(ACTIVITY, f"{addr}.jsonl")
 
@@ -269,6 +277,20 @@ def prompt_hook():
     except ValueError:
         payload = {}
     snapshot_turn((payload if isinstance(payload, dict) else {}).get("cwd") or os.getcwd())
+    note_new_work()
+
+
+def note_new_work():
+    """A prompt after a done report is new work: if the agent dies now, that's a loss again."""
+    if not ME:
+        return
+    try:
+        store = runtime_store()
+        rec = session_by_address(store.load(), ME)
+        if rec and (rec.get("evidence_at") or 0) > (rec.get("prompt_at") or 0):
+            store.mutate(lambda data: session_by_address(data, ME).update(prompt_at=int(time.time() * 1000)))
+    except (DeskRuntimeError, OSError):
+        pass  # never stops a turn
 
 
 def tool_step():
@@ -1875,9 +1897,10 @@ def runtime_state(args):
         data = store.load()
     if any(x.get("state") == "pending" for x in data["queue"]): wake_queue()
     records = [x for x in data["sessions"] if not args.task or x.get("task") == args.task]
+    seen = {**ended_terminals(), **terminal_map}
     sessions = []
     for rec in records:
-        view = runtime_session_view(rec, terminal_map)
+        view = runtime_session_view(rec, seen)
         for key in ("settled_at", "snoozed_until", "evidence"):
             view.setdefault(key, None)
         view["title"] = session_title(rec)
@@ -1887,7 +1910,7 @@ def runtime_state(args):
         sessions.append(view)
     queue = [x for x in data["queue"] if not args.task or x.get("task") == args.task]
     print(json.dumps({"sessions": sessions, "queue": queue,
-                      "attention": runtime_attention(data, terminal_map, chats)}))
+                      "attention": runtime_attention(data, seen, chats)}))
 
 
 def runtime_triage(args):
@@ -2532,21 +2555,57 @@ def finish(args):
     print(json.dumps(out))
     sys.stdout.flush()
     if not args.keep_open:
-        sh(["hc", "kill", target])
-        # An intentional wrap-up is terminal, unlike a crash/restart which remains
-        # recoverable. Mark only this known runtime record as finished.
-        try:
-            store = runtime_store()
-            def mark(data):
-                record = next((x for x in data["sessions"] if x.get("address") == target), None)
-                if record: record["finished"] = True
-            store.mutate(mark)
-        except (DeskRuntimeError, OSError):
-            pass
-        for _ in range(20):  # so a wrap-up of the next agent sees this one gone
-            if terminal(target).get("state") != "live":
-                break
-            time.sleep(0.15)
+        end_agent(target)
+
+
+def end_agent(target):
+    """Ends an agent on purpose. Marked first: a wrap-up is terminal, unlike a crash or restart, and
+    the Desk must never see it dead and unmarked. An agent closing itself dies at the kill."""
+    mark_finished(target)
+    sh(["hc", "kill", target])
+    for _ in range(20):  # so a wrap-up of the next agent sees this one gone
+        if terminal(target).get("state") != "live":
+            break
+        time.sleep(0.15)
+
+
+def mark_finished(target):
+    try:
+        def mark(data):
+            record = next((x for x in data["sessions"] if x.get("address") == target), None)
+            if record: record["finished"] = True
+        runtime_store().mutate(mark)
+    except (DeskRuntimeError, OSError):
+        pass
+
+
+def close(args):
+    """Closes one agent whose part is done. Unlike finish it checks nothing and removes nothing:
+    its worktree, branch and files all stay, and the chat says what was left uncommitted."""
+    target = args.address or ME
+    if not target:
+        die("close needs --address outside an hc terminal")
+    need_core()
+    info = terminal(target)
+    if not info or info.get("state") != "live":
+        mark_finished(target)  # already gone: only the Desk's record needs clearing
+        print(json.dumps({"closed": True, "already_gone": True}))
+        return
+    target = info.get("address") or target
+    labels = info.get("labels", {})
+    who, slug = labels.get("role") or info.get("name") or target, labels.get("task")
+    if (info.get("status") or {}).get("state") == "working" and not args.force:
+        rec = chat_append(slug, {"from": who, "address": target, "kind": "flag", "text": "Still working, so not closed. Close it once it stops."})
+        print(json.dumps({"closed": False, "why": "working", **rec}))
+        return
+    cwd = (info.get("foreground") or {}).get("cwd") or info.get("cwd")
+    repo = repo_of(cwd) if cwd and os.path.isdir(cwd) else None  # a removed worktree must not stop a close
+    dirty = [l for l in (git_out(repo["top"], "status", "--porcelain") or "").splitlines() if l.strip()] if repo else []
+    left = f" {len(dirty)} uncommitted or untracked file{'s' if len(dirty) != 1 else ''} stay in {repo['name']}." if dirty else ""
+    rec = chat_append(slug, {"from": who, "address": target, "kind": "finish", "text": f"Closed.{left}"})
+    print(json.dumps({"closed": True, **rec}))
+    sys.stdout.flush()
+    end_agent(target)
 
 
 def handoff_path(cwd, slug, role_id):
@@ -2691,6 +2750,8 @@ def main():
     fi.add_argument("--address"); fi.add_argument("--keep-open", action="store_true")
     fi.add_argument("--keep-worktree", action="store_true", help="close the agent once nothing is uncommitted; keep its branch")
     fi.add_argument("--force", action="store_true", help="wrap up even while it's working")
+    cl = sub.add_parser("close")
+    cl.add_argument("--address"); cl.add_argument("--force", action="store_true", help="close it even while it's working")
     jn = sub.add_parser("join")
     jn.add_argument("--task", required=True); jn.add_argument("--address", required=True); jn.add_argument("--role", required=True)
     nd = sub.add_parser("new-desk")
@@ -2768,6 +2829,8 @@ def main():
         post(args)
     elif args.cmd == "finish":
         finish(args)
+    elif args.cmd == "close":
+        close(args)
     elif args.cmd == "compact":
         compact(args)
     elif args.cmd == "measure":

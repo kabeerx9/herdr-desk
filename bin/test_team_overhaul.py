@@ -52,6 +52,7 @@ class Base(unittest.TestCase):
         self.tmp = tempfile.TemporaryDirectory()
         self.addCleanup(self.tmp.cleanup)
         self.info = {'t1': terminal()}
+        self.ended = {}
         self.roles = [{'id': 'cto', 'name': 'CTO', 'cli': 'claude', 'promptText': 'p'}]
         self.patches = [patch.object(team, 'CHAT', self.tmp.name), patch.object(team, 'ME', None),
                         patch.object(team, 'ACTIVITY', os.path.join(self.tmp.name, '.activity')),
@@ -59,6 +60,7 @@ class Base(unittest.TestCase):
                         patch.object(team, 'runtime_terminals', lambda: copy.deepcopy(self.info)),
                         patch.object(team, 'terminal', lambda a: copy.deepcopy(self.info.get(a, {}))),
                         patch.object(team, 'wake_queue', lambda: None),
+                        patch.object(team, 'ended_terminals', lambda: copy.deepcopy(self.ended)),
                         patch.object(team, 'STARTUP_DIALOG_S', 0),
                         patch.object(team, 'unique_name', lambda name: name[:30]),
                         patch.object(team, 'rename_tab', lambda *a: True),
@@ -574,6 +576,84 @@ class Attachments(unittest.TestCase):
         i = argv.index('--add-dir')
         self.assertTrue(argv[i + 2].startswith('--'))
         self.assertEqual('do it', argv[-1])
+
+
+class Closing(Base):
+    """Closing an agent on purpose must never read as losing it."""
+    def setUp(self):
+        super().setUp()
+        self.order = []
+        self.real_sh = team.sh
+        def sh(argv, **kw):
+            if argv[:2] == ['hc', 'kill']:
+                self.order.append(('kill', team.session_by_address(team.runtime_store().load(), argv[2]).get('finished')))
+                self.info['t1'] = {'state': 'finished', 'reason': 'killed'}
+                return types.SimpleNamespace(returncode=0, stdout='', stderr='')
+            return self.real_sh(argv, **kw) if argv[0] == 'git' else types.SimpleNamespace(returncode=0, stdout='', stderr='')
+        for p in (patch.object(team, 'sh', sh), patch.object(team, 'need_core', lambda: None), patch.object(team.time, 'sleep', lambda _s: None)):
+            p.start(); self.addCleanup(p.stop)
+
+    def chat(self):
+        return team.chat_read('desk')
+
+    def test_close_marks_it_finished_before_ending_it(self):
+        code, out = self.call(team.close, address='t1', force=False)
+        self.assertEqual((0, True), (code, out['closed']))
+        self.assertEqual([('kill', True)], self.order)
+        self.assertEqual('finished', self.state()['state'])
+        self.assertEqual('finish', self.chat()[-1]['kind'])
+
+    def test_close_keeps_uncommitted_files_and_says_so(self):
+        repo = Path(self.tmp.name) / 'repo'
+        git_repo(repo)
+        (repo / 'left.txt').write_text('unsaved\n')
+        self.info['t1'].update(cwd=str(repo), foreground={'cwd': str(repo)})
+        code, out = self.call(team.close, address='t1', force=False)
+        self.assertEqual((0, True, 1), (code, out['closed'], len(self.order)))
+        self.assertTrue((repo / 'left.txt').exists())
+        self.assertIn('1 uncommitted', self.chat()[-1]['text'])
+
+    def test_close_waits_for_a_working_agent_unless_forced(self):
+        self.info['t1']['status'] = {'state': 'working'}
+        self.assertFalse(self.call(team.close, address='t1', force=False)[1]['closed'])
+        self.assertEqual([], self.order)
+        self.assertTrue(self.call(team.close, address='t1', force=True)[1]['closed'])
+        self.assertEqual(1, len(self.order))
+
+    def test_close_clears_an_agent_already_gone_without_a_chat_line(self):
+        self.info['t1'] = {'state': 'finished', 'reason': 'killed'}
+        self.assertTrue(self.call(team.close, address='t1', force=False)[1]['closed'])
+        self.assertEqual(([], []), (self.order, self.chat()))
+        self.assertTrue(self.session()['finished'])
+
+    def test_finish_also_marks_before_ending(self):
+        self.info['t1'].update(cwd=self.tmp.name, foreground={'cwd': self.tmp.name})
+        self.call(team.finish, address='t1', keep_open=False, keep_worktree=True, force=False)
+        self.assertEqual([('kill', True)], self.order)
+
+    def test_state_sees_a_raw_kill_after_done(self):
+        team.runtime_store().mutate(lambda d: team.session_by_address(d, 't1').update(evidence_at=5))
+        del self.info['t1']
+        self.ended['t1'] = {'state': 'finished', 'reason': 'killed'}
+        self.assertEqual('finished', self.state()['state'])
+
+    def test_a_new_prompt_after_done_is_recorded_once(self):
+        def prompt():
+            with patch.object(team, 'ME', 't1'), patch.object(team.sys, 'stdin', io.StringIO('{}')):
+                team.prompt_hook()
+        prompt()
+        self.assertIsNone(self.session().get('prompt_at'))
+        team.runtime_store().mutate(lambda d: team.session_by_address(d, 't1').update(evidence_at=5))
+        prompt()
+        first = self.session()['prompt_at']
+        self.assertGreater(first, 5)
+        prompt()
+        self.assertEqual(first, self.session()['prompt_at'])
+
+    def test_the_cto_is_told_to_close_and_not_to_kill(self):
+        text = Path(os.path.dirname(__file__)).parent.joinpath('mods/desk/roles/cto.md').read_text()
+        self.assertIn('team close --address', text)
+        self.assertIn('Never use `hc kill`', text)
 
 
 class NearestBase(unittest.TestCase):

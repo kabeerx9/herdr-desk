@@ -132,10 +132,18 @@ def foreground_agent(terminal, expected_cli=None):
     return bool(candidates & set().union(*aliases.values()))
 
 
+def closed_after_done(session, terminal):
+    """Killed after reporting done, with no prompt since: the work ended on purpose. A crash, or a
+    kill during later work, stays a loss."""
+    done = session.get("evidence_at")
+    return bool(done and terminal and terminal.get("state") == "finished" and terminal.get("reason") == "killed"
+                and done >= (session.get("prompt_at") or 0))
+
+
 def session_view(session, terminals):
     terminal = terminals.get(session.get("address"))
     live = bool(terminal and terminal.get("state") == "live" and foreground_agent(terminal, session.get("executable") or session.get("cli")))
-    state = "active" if live else ("finished" if session.get("finished") else "recovering" if session.get("recovering") else "disconnected")
+    state = "active" if live else ("finished" if session.get("finished") or closed_after_done(session, terminal) else "recovering" if session.get("recovering") else "disconnected")
     caps = adapter(session.get("cli"), session.get("capabilities"))
     reason = None; fork_reason = None
     if state == "disconnected":
