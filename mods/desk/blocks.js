@@ -323,22 +323,43 @@ function quote(t, id, b) {
   return div().w_full().pl(12).border_l_2().border_color(t.border).text_color(t.muted).child(inline(`${id}-q`, b.text));
 }
 
-const ALIGN = { right: (el) => el.justify_end(), center: (el) => el.justify_center() };
-function cell(t, id, text, align, { head = false } = {}) {
+// Column sizes from the text, about 7px a character at 12.5px. `min` keeps short cells on one line
+// and the longest word whole; `grow` hands spare width to the columns with the most text. When the
+// minimums pass the chat's width, the table scrolls sideways.
+const CHAR_W = 7, CELL_PAD = 20, COL_MIN = 64;
+export function columnPlan(header, rows) {
+  return header.map((_, k) => {
+    const texts = [header[k], ...rows.map((r) => r[k] ?? "")].map(stripInline);
+    const longest = Math.max(...texts.map((x) => x.length));
+    const word = Math.max(...texts.flatMap((x) => x.split(/\s+/).map((w) => w.length)));
+    const min = Math.max(Math.min(longest, 20), Math.min(word, 30)) * CHAR_W + CELL_PAD;
+    return { min: Math.max(COL_MIN, min), grow: Math.max(1, Math.min(longest, 60)) };
+  });
+}
+
+// A block, not a flex row: text in a flex row keeps its one-line width and spills into the next cell.
+function cell(t, id, text, align, col, { head = false } = {}) {
   const tone = head ? null : cellTone(text);
   const color = head ? t.muted : tone === "done" ? t.done : tone === "fail" ? (t.failed ?? t.blocked) : tone === "warn" ? t.blocked : t.foreground;
   const bold = head || (Boolean(tone) && /^\s*\*\*/.test(text));
-  const el = h_flex().id(id).flex_1().flex_basis(0).min_w(0).px(10).py(7).text_size(12.5).line_height(1.45).text_color(color)
-    .when(bold, (x) => x.font_semibold());
-  return (ALIGN[align]?.(el) ?? el).child(tone || head ? stripInline(text) : runs(`${id}-t`, text));
+  return div().id(id).flex_grow(col.grow).flex_shrink(0).flex_basis(col.min).min_w(col.min).px(10).py(7)
+    .text_size(12.5).line_height(1.45).text_color(color)
+    .when(bold, (x) => x.font_semibold())
+    .when(align === "right", (x) => x.text_right())
+    .when(align === "center", (x) => x.text_center())
+    .child(tone || head ? stripInline(text) : runs(`${id}-t`, text));
 }
 
 function table(t, id, b) {
-  return v_flex().id(id).w_full().rounded(9).border_1().border_color(t.border).overflow_hidden()
-    .child(h_flex().w_full().bg(t.raised)
-      .children(b.header.map((c, k) => cell(t, `${id}-h${k}`, c, b.align[k], { head: true }))))
-    .children(b.rows.map((row, r) => h_flex().id(`${id}-r${r}`).w_full().border_t_1().border_color(t.border)
-      .children(row.map((c, k) => cell(t, `${id}-r${r}c${k}`, c, b.align[k])))));
+  const cols = columnPlan(b.header, b.rows);
+  const total = cols.reduce((sum, c) => sum + c.min, 0);
+  return div().id(id).w_full().min_w(0).rounded(9).border_1().border_color(t.border).overflow_hidden()
+    .child(div().id(`${id}-scroll`).w_full().overflow_x_scrollbar()
+      .child(v_flex().w_full().min_w(total)
+        .child(h_flex().w_full().items_stretch().bg(t.raised)
+          .children(b.header.map((c, k) => cell(t, `${id}-h${k}`, c, b.align[k], cols[k], { head: true }))))
+        .children(b.rows.map((row, r) => h_flex().id(`${id}-r${r}`).w_full().items_stretch().border_t_1().border_color(t.border)
+          .children(row.map((c, k) => cell(t, `${id}-r${r}c${k}`, c, b.align[k], cols[k])))))));
 }
 
 function list(t, id, b, depth = 0) {

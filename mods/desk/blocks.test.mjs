@@ -35,7 +35,7 @@ export async function resolve(spec, ctx, next) {
   return next(spec, ctx);
 }`)}`);
 
-const { parseBlocks, parseNext, splitRow, cellTone, renderBlocks, blocksFor } = await import('./blocks.js');
+const { parseBlocks, parseNext, splitRow, cellTone, columnPlan, renderBlocks, blocksFor } = await import('./blocks.js');
 
 const types = (text) => parseBlocks(text).map((b) => b.type);
 
@@ -167,6 +167,23 @@ test('streaming: an unclosed fence is plain text until it closes', () => {
 
 test('streaming: a Next line inside an open fence is not chips', () => {
   assert.deepEqual(types('```\nNext: [a] [b]'), ['plain']);
+});
+
+test('table columns: the long column gets the spare width, short cells stay on one line', () => {
+  const [text, time] = columnPlan(['What', 'Time on Nov 4'], [
+    ['Lesson and throughline written', '18:20'],
+    ['Last branch commit "Keep tour cards on screen, drop a moved ring, and measure past a hung target"', '18:31'],
+  ]);
+  assert.ok(text.grow > time.grow * 3);
+  assert.ok(time.min >= 13 * 7, 'the header fits on one line');
+  assert.ok(text.min <= 240, 'a long sentence wraps instead of forcing the column wide');
+});
+
+test('table columns: a long word holds its column, up to the cap; markup does not count', () => {
+  assert.ok(columnPlan(['F'], [['src/components/table/cell.tsx']])[0].min >= 29 * 7);
+  assert.equal(columnPlan(['F'], [['x'.repeat(200)]])[0].min, 230);
+  assert.equal(columnPlan(['F'], [['**a**']])[0].min, columnPlan(['F'], [['a']])[0].min);
+  assert.equal(columnPlan(['A', 'B'], [['', '']])[1].grow, 1);
 });
 
 test('streaming: a table appears only once its delimiter row is complete', () => {
