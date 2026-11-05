@@ -1,5 +1,7 @@
 """The cheap role's light gate, and cost from CLI logs."""
 import json
+import os
+import tempfile
 import unittest
 
 import desk_runtime as rt
@@ -78,6 +80,71 @@ class Cost(unittest.TestCase):
         self.assertEqual((2, 20, 80, 7), (u['calls'], u['input'], u['cache_read'], u['output']))
         self.assertIsNone(u['cost'])
         self.assertIsNone(rt.codex_usage(['{}']))
+
+
+def rollout_line(kind, at='2026-11-05T05:00:00.000Z', **item):
+    return json.dumps({'timestamp': at, 'type': 'event_msg', 'payload': {'type': 'item_completed', 'item': {'type': kind, **item}}})
+
+
+def text(value, key='text'):
+    return [{'type': key, 'text': value}]
+
+
+class CodexConversation(unittest.TestCase):
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        self.day = os.path.join(self.tmp.name, '2026', '11', '05')
+        os.makedirs(self.day)
+
+    def rollout(self, name, cwd, stamp, lines=()):
+        path = os.path.join(self.day, 'rollout-%s.jsonl' % name)
+        meta = {'type': 'session_meta', 'payload': {'id': name, 'cwd': cwd, 'timestamp': stamp}}
+        with open(path, 'w') as f:
+            f.write('\n'.join([json.dumps(meta), *lines]) + '\n')
+        return path
+
+    def session(self, stamp, cwd='/wt', **extra):
+        return {'cwd': cwd, 'at': rt.ts_ms(stamp), **extra}
+
+    def test_a_session_gets_the_first_rollout_in_its_folder_after_it_started(self):
+        self.rollout('old', '/wt', '2026-11-05T04:00:00.000Z')
+        self.rollout('other', '/elsewhere', '2026-11-05T05:00:01.000Z')
+        want = self.rollout('mine', '/wt', '2026-11-05T05:00:02.000Z')
+        self.rollout('next', '/wt', '2026-11-05T06:00:00.000Z')
+        self.assertEqual(want, rt.find_codex_rollout(self.session('2026-11-05T05:00:00.000Z'), self.tmp.name))
+
+    def test_a_known_conversation_id_wins_and_no_match_is_none(self):
+        want = self.rollout('abc', '/x', '2026-11-05T01:00:00.000Z')
+        self.assertEqual(want, rt.find_codex_rollout({'conversation': 'abc'}, self.tmp.name))
+        self.assertIsNone(rt.find_codex_rollout(self.session('2026-11-05T09:00:00.000Z'), self.tmp.name))
+        self.assertIsNone(rt.find_codex_rollout({'cwd': '/wt'}, self.tmp.name))
+
+    def test_turns_read_prompts_replies_and_tool_counts(self):
+        path = self.rollout('t', '/wt', '2026-11-05T05:00:00.000Z', [
+            rollout_line('UserMessage', content=text('[desk chat] Kabeer: check this')),
+            rollout_line('Reasoning'),
+            rollout_line('CommandExecution', parsed_cmd=[{'type': 'read'}], exit_code=0),
+            rollout_line('CommandExecution', parsed_cmd=[{'type': 'search'}], exit_code=0),
+            rollout_line('CommandExecution', parsed_cmd=[{'type': 'unknown'}], exit_code=1),
+            rollout_line('AgentMessage', content=text('All good.', 'Text')),
+            rollout_line('CommandExecution', parsed_cmd=[{'type': 'unknown'}], exit_code=0),
+            'not json "item_completed"'])
+        out = rt.codex_turns(path)
+        self.assertTrue(out['supported'])
+        prompt, reply, working = out['turns']
+        self.assertEqual(('kabeer', 'check this'), (prompt['who'], prompt['text']))
+        self.assertEqual(('agent', 'All good.'), (reply['who'], reply['text']))
+        self.assertEqual((1, 1, 1, 1), (reply['tools']['counts']['read'], reply['tools']['counts']['search'],
+                                        reply['tools']['counts']['command'], reply['tools']['failed']))
+        self.assertEqual('', working['text'], 'work with no reply yet still shows')
+
+    def test_the_limit_keeps_the_newest_turns(self):
+        path = self.rollout('l', '/wt', '2026-11-05T05:00:00.000Z',
+                            [rollout_line('AgentMessage', content=text('m%d' % i, 'Text')) for i in range(5)])
+        out = rt.codex_turns(path, limit=2)
+        self.assertEqual(['m3', 'm4'], [t['text'] for t in out['turns']])
+        self.assertTrue(out['partial'])
 
 
 if __name__ == '__main__':

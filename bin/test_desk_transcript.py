@@ -114,7 +114,7 @@ class TranscriptCommandTests(Base):
         self.assertEqual((True, []), (out['supported'], out['turns'])); self.assertIn('reason', out)
         team.runtime_store().mutate(lambda d: d['sessions'][0].update(cli='codex'))
         code, out = self.call(team.runtime_transcript, address='t1', limit=5)
-        self.assertEqual((False, []), (out['supported'], out['turns']))
+        self.assertEqual((True, []), (out['supported'], out['turns']))
         code, _ = self.call(team.runtime_transcript, address='nope', limit=5)
         self.assertEqual(1, code)
 

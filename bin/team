@@ -39,7 +39,7 @@ from desk_runtime import Store as RuntimeStore, RuntimeError as DeskRuntimeError
 from desk_runtime import attention as runtime_attention
 from desk_runtime import find_queue as runtime_find_queue, queue_item as runtime_queue_item
 from desk_runtime import foreground_agent, recover_interrupted_claims, reorder as runtime_reorder, session_view as runtime_session_view, upsert_session
-from desk_runtime import (classify_launch_failure, codex_usage, find_transcript, gate_verdict, light_gate_verdict, transcript_usage, parse_contract, parse_criteria, runner_variants,
+from desk_runtime import (classify_launch_failure, codex_turns, codex_usage, find_codex_rollout, find_transcript, gate_verdict, light_gate_verdict, transcript_usage, parse_contract, parse_criteria, runner_variants,
                           session_cli, step_text, transcript_timeline, transcript_title, transcript_turns, triage_apply, triage_clear)
 from desk_runtime import DIALOG_OPEN, NO_INPUT, cleared_transcript, command_result, screen_state
 from desk_runtime import diff_stat, dialog_matches, permission_dialog, pick_option, task_line
@@ -1724,15 +1724,16 @@ def runtime_transcript(args):
     rec = session_by_address(runtime_store().load(), args.address)
     if not rec:
         die("No saved session has address %s" % args.address)
-    if session_cli(rec) != "claude":
+    cli = session_cli(rec)
+    if cli not in ("claude", "codex"):
         print(json.dumps({"address": args.address, "supported": False, "turns": [], "partial": False,
-                          "reason": "%s doesn't write a transcript the Desk can read" % session_cli(rec)})); return
-    path = find_transcript(rec.get("conversation"))
+                          "reason": "%s doesn't write a transcript the Desk can read" % cli})); return
+    path = find_codex_rollout(rec) if cli == "codex" else find_transcript(rec.get("conversation"))
     if not path:
         print(json.dumps({"address": args.address, "supported": True, "turns": [], "partial": False, "reason": "No transcript yet"})); return
     limit = args.limit if args.limit and args.limit > 0 else 120
     try:
-        out = transcript_turns(path, min(limit, 500))
+        out = (codex_turns if cli == "codex" else transcript_turns)(path, min(limit, 500))
     except OSError as exc:
         die("Couldn't read the transcript: %s" % exc)
     print(json.dumps({"address": args.address, **out}))
@@ -1791,8 +1792,7 @@ def session_usage(rec):
     """What one saved session spent, read from its CLI's own log; None if there's no log."""
     conversation = rec.get("conversation")
     if session_cli(rec) == "codex":
-        hits = glob.glob(os.path.expanduser("~/.codex/sessions/*/*/*/*%s*.jsonl" % conversation)) if conversation else []
-        path, read = (max(hits, key=os.path.getmtime) if hits else None), codex_usage
+        path, read = find_codex_rollout(rec), codex_usage
     else:
         path, read = find_transcript(conversation), transcript_usage
     if not path:
