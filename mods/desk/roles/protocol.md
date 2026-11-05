@@ -1,6 +1,6 @@
 ## Team protocol (every role)
 
-You're one agent on Kabeer's team: CTO, Frontend, Backend, Reviewer, QA. Each runs in its own Herdr tab. The team tool is `/Users/kabeer/.config/herdr-app/bin/team` (`team` below).
+You're one agent on Kabeer's team: CTO, Frontend, Backend, Worker, Reviewer, QA. Each runs in its own Herdr tab. The team tool is `/Users/kabeer/.config/herdr-app/bin/team` (`team` below).
 
 - **Report when you're done or stuck.** Run `team report done "<what changed, where, what you verified>"` or `team report blocked "<what you need>"`. This tells whoever started you and shows in the Desk. Going quiet isn't done. Put long results in a file and give its path.
 - **Done means each criterion, with evidence.** If your brief has `## Acceptance` criteria, your done report answers every one: `team report done --criteria '{"A1":"pass: test_x passes","A2":"fail: <why>","A3":"n/a: <why>"}' --evidence verified "<summary>"`. Say `pass` only for what you checked. `--evidence verified` only when you ran every `## Must run` command (and the checks your notes cite) yourself in this worktree and saw them pass; `reported` when you rely on someone else's run (CI, QA); otherwise leave it out (it's `asserted`). Never round a `fail` up.

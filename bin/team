@@ -26,19 +26,20 @@
   team settle|unsettle --address T          put an agent away until it works, blocks or reports done again
   team snooze --address T --until-ms N      the same, until a time
   team review-send --address T --file F     (the Desk) send a batch of review comments; empty = approved
-  team gate --address T                     (CTO) may this engineer's branch be integrated? JSON verdict
+  team gate --address T [--light "checked"] (CTO) may this engineer's branch be integrated? JSON verdict
+  team cost [--task DESK] [--json]          tokens and API-rate dollars per agent, from each CLI's logs
   team roles
 
 One launcher for everyone (the CTO, the Desk's buttons, you): it reads roles.json,
 gives every editing role its own git worktree, and starts the role with hc in its own Herdr tab, labeled role=<id> task=<slug>.
 Children always outlive their parent, so closing the CTO doesn't end its workers.
 """
-import contextlib, fcntl, io, json, os, re, secrets, shutil, subprocess, sys, time, shlex, uuid
+import contextlib, fcntl, glob, io, json, os, re, secrets, shutil, subprocess, sys, time, shlex, uuid
 from desk_runtime import Store as RuntimeStore, RuntimeError as DeskRuntimeError, adapter as runtime_adapter
 from desk_runtime import attention as runtime_attention
 from desk_runtime import find_queue as runtime_find_queue, queue_item as runtime_queue_item
 from desk_runtime import foreground_agent, recover_interrupted_claims, reorder as runtime_reorder, session_view as runtime_session_view, upsert_session
-from desk_runtime import (classify_launch_failure, find_transcript, gate_verdict, parse_contract, parse_criteria, runner_variants,
+from desk_runtime import (classify_launch_failure, codex_usage, find_transcript, gate_verdict, light_gate_verdict, transcript_usage, parse_contract, parse_criteria, runner_variants,
                           session_cli, step_text, transcript_timeline, transcript_title, transcript_turns, triage_apply, triage_clear)
 from desk_runtime import DIALOG_OPEN, NO_INPUT, cleared_transcript, command_result, screen_state
 from desk_runtime import diff_stat, dialog_matches, permission_dialog, pick_option, task_line
@@ -1769,6 +1770,55 @@ def review_send(args):
     print(json.dumps({"ok": True, "address": addr, "approved": not batch, "bytes": len(text.encode("utf-8"))}))
 
 
+def branch_files(cwd):
+    """Files this branch changed since it left the default branch, or None if that can't be read."""
+    if not cwd:
+        return None
+    default = (git_out(cwd, "symbolic-ref", "--short", "refs/remotes/origin/HEAD") or "").strip()
+    for ref in filter(None, (default, "main", "master")):
+        base = git_out(cwd, "merge-base", "HEAD", ref)
+        if base:
+            names = git_out(cwd, "diff", "--name-only", base.strip(), "HEAD")
+            return (names or "").split()
+    return None
+
+
+def session_usage(rec):
+    """What one saved session spent, read from its CLI's own log; None if there's no log."""
+    conversation = rec.get("conversation")
+    if session_cli(rec) == "codex":
+        hits = glob.glob(os.path.expanduser("~/.codex/sessions/*/*/*/*%s*.jsonl" % conversation)) if conversation else []
+        path, read = (max(hits, key=os.path.getmtime) if hits else None), codex_usage
+    else:
+        path, read = find_transcript(conversation), transcript_usage
+    if not path:
+        return None
+    with open(path, encoding="utf-8", errors="replace") as f:
+        return read(f)
+
+
+def cost(args):
+    """Tokens and API-rate dollars per agent, from each CLI's own logs."""
+    rows = []
+    for rec in runtime_store().load()["sessions"]:
+        if args.task and rec.get("task") != args.task:
+            continue
+        usage = session_usage(rec)
+        if usage and usage["calls"]:
+            rows.append({"task": rec.get("task"), "role": rec.get("role"), "address": rec.get("address"),
+                         "model": (usage["models"] or [(rec.get("role_config") or {}).get("model")])[0], **usage})
+    if args.json:
+        print(json.dumps(rows))
+        return
+    print("%-24s %-10s %-20s %6s %10s %10s %11s %8s %9s" % ("desk", "role", "model", "calls", "fresh in", "cache wr", "cache rd", "out", "API $"))
+    for r in rows:
+        print("%-24s %-10s %-20s %6d %10d %10d %11d %8d %9s" % (
+            (r["task"] or "")[:24], r["role"] or "", (r["model"] or "")[:20], r["calls"], r["input"], r["cache_write"],
+            r["cache_read"], r["output"], "n/a" if r["cost"] is None else "%.2f" % r["cost"]))
+    priced = sum(r["cost"] or 0 for r in rows)
+    print("Total at API rates: $%.2f (an estimate; Codex rows have no price)" % priced)
+
+
 def runtime_gate(args):
     """The CTO's merge gate for one engineer: JSON verdict on stdout, exit 1 unless it's pass."""
     data = runtime_store().load()
@@ -1779,7 +1829,14 @@ def runtime_gate(args):
     head = git_out(cwd, "rev-parse", "HEAD") if cwd else None
     dirty = bool(git_out(cwd, "status", "--porcelain", "--untracked-files=no")) if head else False
     chats = [{**r, "task": r.get("task") or eng.get("task")} for r in chat_read(eng.get("task"))]
-    verdict = gate_verdict(eng, data["sessions"], chats, head, dirty)
+    light = getattr(args, "light", None)
+    if light is not None:
+        role = next((r for r in load_roles() if r["id"] == eng.get("role")), {})
+        verdict = light_gate_verdict(eng, head, dirty, branch_files(cwd), light, bool(role.get("light_review")))
+        if verdict["verdict"] == "pass":
+            chat_append(eng.get("task"), {"from": "cto", "kind": "say", "text": "Skipped the Reviewer for %s: %s" % (role.get("name", eng.get("role")), light.strip())})
+    else:
+        verdict = gate_verdict(eng, data["sessions"], chats, head, dirty)
     print(json.dumps({"address": args.address, "role": eng.get("role"), "cwd": cwd,
                       "branch": git_out(cwd, "rev-parse", "--abbrev-ref", "HEAD") if head else None, **verdict}))
     if verdict["verdict"] != "pass":
@@ -2442,6 +2499,9 @@ def main():
     rs.add_argument("--address", required=True); rs.add_argument("--file", required=True)
     ga = sub.add_parser("gate")
     ga.add_argument("--address", required=True)
+    ga.add_argument("--light", metavar="WHAT_YOU_CHECKED", help="a light_review role only: pass on the CTO's own diff read, no Reviewer")
+    co = sub.add_parser("cost")
+    co.add_argument("--task"); co.add_argument("--json", action="store_true")
     sub.add_parser("roles")
     args = p.parse_args()
     if args.cmd == "start":
@@ -2514,6 +2574,8 @@ def main():
         review_send(args)
     elif args.cmd == "gate":
         runtime_gate(args)
+    elif args.cmd == "cost":
+        cost(args)
     else:
         print(json.dumps([{k: r.get(k) for k in ("id", "name", "cli", "model", "worktree", "on_request")} for r in load_roles()]))
 

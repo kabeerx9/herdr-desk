@@ -36,7 +36,7 @@ const SECTIONS = [
 ];
 // The header matches the chat's top band (desks.js), so the two hairlines meet in one line.
 const HEAD = 44, FOOT = 44, SECTION = 28;
-const ENGINEERS = new Set(["frontend", "backend"]);
+const ENGINEERS = new Set(["frontend", "backend", "worker"]);
 const REVIEWS = { reviewer: "Reviewer", qa: "QA" };
 
 const num = (text, word) => Number(new RegExp(`(\\d+) ${word}`).exec(text)?.[1] ?? 0);

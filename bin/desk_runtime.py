@@ -411,6 +411,114 @@ def gate_verdict(engineer, sessions, chats, head, dirty=False, max_rounds=MAX_RE
             "review": chosen, "reasons": reasons}
 
 
+# A mechanical job's lighter gate: the CTO reads the diff, no Reviewer starts. Refused for paths where a
+# wrong change costs more than a review. Matching on paths over-fires by design: a false hit just
+# means a normal Reviewer round.
+RISKY_PATH = re.compile(r"(auth|login|session|token|password|secret|credential|permission|rbac|payment|billing|invoice|"
+                        r"stripe|checkout|migrat|schema|\.sql$|\.env|deploy|\.github/)", re.I)
+
+
+def light_gate_verdict(engineer, head, dirty, files, note, allowed):
+    """The merge gate for a role with light_review, when the CTO has read the diff itself."""
+    reasons = []
+    if not allowed:
+        reasons.append("%s has no light review; it needs a Reviewer" % (engineer.get("role") or "this role"))
+    if not head:
+        reasons.append("couldn't read the branch's HEAD")
+    if dirty:
+        reasons.append("the worktree has uncommitted changes; commit them first")
+    if files is None:
+        reasons.append("couldn't list the branch's changed files; it needs a Reviewer")
+    elif not files:
+        reasons.append("the branch has no changes against its base")
+    risky = [f for f in files or [] if RISKY_PATH.search(f)]
+    if risky:
+        reasons.append("risky paths need a Reviewer: " + ", ".join(risky[:5]))
+    if not (note or "").strip():
+        reasons.append("say what you checked in the diff (--light \"...\")")
+    return {"verdict": "fail" if reasons else "pass", "head": head, "engineer_cli": session_cli(engineer), "rounds": 0,
+            "max_rounds": 0, "review": {"kind": "cto", "note": (note or "").strip()}, "reasons": reasons}
+
+
+# ── Cost ─────────────────────────────────────────────────────────────────────
+
+# Dollars per million tokens: input, output, cache read. A cache write costs 2x input for the 1h
+# cache and 1.25x for 5m. On a subscription this is an API-rate estimate that compares roles; it
+# isn't a bill. Haiku 5.5's prices rise 5x for prompts past 100K tokens.
+PRICES = {"claude-fable-5-1": (10.0, 50.0, 0.25), "claude-opus-5-5": (4.0, 20.0, 0.20),
+          "claude-sonnet-5-5": (2.0, 10.0, 0.20), "claude-haiku-5-5": (0.10, 0.50, 0.01)}
+
+
+def call_cost(model, usage):
+    """API-rate dollars for one model call, or None for a model with no known price."""
+    price = PRICES.get(model)
+    if not price:
+        return None
+    inp, out, read = price
+    fresh = usage.get("input_tokens") or 0
+    cached = usage.get("cache_read_input_tokens") or 0
+    written = usage.get("cache_creation_input_tokens") or 0
+    parts = usage.get("cache_creation") or {}
+    hour = parts.get("ephemeral_1h_input_tokens") or 0
+    five = parts.get("ephemeral_5m_input_tokens") or 0
+    if not hour and not five:
+        five = written
+    scale = 5 if model == "claude-haiku-5-5" and fresh + cached + written > 100000 else 1
+    return scale * (fresh * inp + hour * inp * 2 + five * inp * 1.25 + cached * read
+                    + (usage.get("output_tokens") or 0) * out) / 1e6
+
+
+def transcript_usage(lines):
+    """Token totals and cost of a Claude transcript. A reply's usage repeats on each of its content
+    lines, so each message id counts once; the last line for an id has the final count."""
+    calls = {}
+    for line in lines:
+        if '"usage"' not in line:
+            continue
+        try:
+            rec = json.loads(line)
+        except ValueError:
+            continue
+        msg = rec.get("message") or {}
+        if rec.get("type") == "assistant" and msg.get("usage") and msg.get("model") != "<synthetic>":
+            calls[msg.get("id") or id(rec)] = msg
+    out = {"calls": len(calls), "input": 0, "cache_write": 0, "cache_read": 0, "output": 0, "cost": 0.0, "models": [], "priced": True}
+    for msg in calls.values():
+        usage, model = msg["usage"], msg.get("model")
+        out["input"] += usage.get("input_tokens") or 0
+        out["cache_write"] += usage.get("cache_creation_input_tokens") or 0
+        out["cache_read"] += usage.get("cache_read_input_tokens") or 0
+        out["output"] += usage.get("output_tokens") or 0
+        cost = call_cost(model, usage)
+        out["priced"] = out["priced"] and cost is not None
+        out["cost"] += cost or 0
+        if model not in out["models"]:
+            out["models"].append(model)
+    return out
+
+
+def codex_usage(lines):
+    """Token totals of a Codex rollout: its last token_count holds the running totals. No dollars:
+    these models have no price table here."""
+    total, calls = None, 0
+    for line in lines:
+        if '"token_count"' not in line:
+            continue
+        try:
+            payload = json.loads(line).get("payload") or {}
+        except ValueError:
+            continue
+        info = payload.get("info") if payload.get("type") == "token_count" else None
+        if info and info.get("total_token_usage"):
+            total = info["total_token_usage"]
+            calls += 1
+    if not total:
+        return None
+    cached = total.get("cached_input_tokens") or 0
+    return {"calls": calls, "input": (total.get("input_tokens") or 0) - cached, "cache_write": 0, "cache_read": cached,
+            "output": total.get("output_tokens") or 0, "cost": None, "models": [], "priced": False}
+
+
 # ── Runner fallback ──────────────────────────────────────────────────────────
 
 def runner_variants(role):
