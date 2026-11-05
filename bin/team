@@ -37,6 +37,7 @@ Children always outlive their parent, so closing the CTO doesn't end its workers
 """
 import contextlib, fcntl, glob, io, json, os, re, secrets, shutil, subprocess, sys, time, shlex, uuid
 from desk_runtime import Store as RuntimeStore, RuntimeError as DeskRuntimeError, adapter as runtime_adapter
+from desk_runtime import nearest_base
 from desk_runtime import attention as runtime_attention
 from desk_runtime import find_queue as runtime_find_queue, queue_item as runtime_queue_item
 from desk_runtime import foreground_agent, recover_interrupted_claims, reorder as runtime_reorder, session_view as runtime_session_view, upsert_session
@@ -173,6 +174,9 @@ def argv_for(role, task):
         # Prompt suggestions: Claude's grey guess at the next message sits in the input box, and the
         # screen text can't tell it from typing, so the Desk reads it as unsent text. Nobody types
         # there anyway, and each guess is a model call.
+        # Before --settings: --add-dir takes several values, so a one-value flag must follow it.
+        os.makedirs(ATTACHMENTS, exist_ok=True)
+        base += ["--add-dir", ATTACHMENTS]
         base += ["--settings", json.dumps({"env": {"CLAUDE_CODE_SHELL": "/bin/bash", "CLAUDE_CODE_ENABLE_PROMPT_SUGGESTION": "false"}, "hooks": {
             "Stop": [{"hooks": [{"type": "command", "command": f"{SELF} hook claude", "timeout": 20}]}],
             "PreToolUse": [{"matcher": "*", "hooks": [{"type": "command", "command": f"{SELF} hook claude-tool", "timeout": 10}]}],
@@ -305,6 +309,34 @@ PERMIT_WAIT = float(os.environ.get("TEAM_PERMIT_WAIT", PERMIT_TIMEOUT - 60))  # 
 # A question gets longer than a permission: it's a decision, and Kabeer may be away. Claude's hook
 # timeout covers both, so it's this one; each wait below gives up on its own clock.
 QUESTION_TIMEOUT = 3600
+# Files Kabeer attaches in the Desk. Agents get their paths; --add-dir lets Claude read them.
+ATTACHMENTS = os.path.join(CHAT, ".attachments")
+ATTACH_MAX = 50_000_000
+IMAGE_EXTS = {".png", ".jpg", ".jpeg", ".gif", ".webp"}
+CLIPBOARD_SCRIPT = """on run argv
+  if (clipboard info for «class furl») is not {} then return "file:" & POSIX path of (the clipboard as «class furl»)
+  try
+    set d to the clipboard as «class PNGf»
+  on error
+    return "none"
+  end try
+  set h to open for access (POSIX file (item 1 of argv)) with write permission
+  set eof of h to 0
+  write d to h
+  close access h
+  return "image"
+end run"""
+PICK_SCRIPT = """try
+  activate
+  set fs to choose file with prompt "Attach files" with multiple selections allowed
+on error
+  return ""
+end try
+set out to ""
+repeat with f in fs
+  set out to out & POSIX path of f & linefeed
+end repeat
+return out"""
 QUESTION_WAIT = float(os.environ.get("TEAM_QUESTION_WAIT", QUESTION_TIMEOUT - 60))
 
 
@@ -467,6 +499,66 @@ def dialog_open(addr, info):
     Keys typed into a dialog answer it; the agent stays stuck until someone presses Esc."""
     state = screen_state(screen_of(addr), cli_of(info))
     return f"{role_label(info)} {DIALOG_OPEN}" if state["state"] == "dialog" else None
+
+
+def attachment_kind(path):
+    return "image" if os.path.splitext(path)[1].lower() in IMAGE_EXTS else "file"
+
+
+def keep_attachment(slug, src, name=None):
+    """A copy of a file in the desk's attachments folder, so the chat's preview and the agent's
+    read survive the original moving. Returns its record, or an error string."""
+    try:
+        if not os.path.isfile(src):
+            return f"{os.path.basename(src) or src} isn't a file"
+        if os.path.getsize(src) > ATTACH_MAX:
+            return f"{os.path.basename(src)} is over {ATTACH_MAX // 1000000} MB"
+        folder = os.path.join(ATTACHMENTS, re.sub(r"[^a-z0-9_-]+", "-", slug.lower()))
+        os.makedirs(folder, exist_ok=True)
+        name = re.sub(r"[^\w. -]+", "_", name or os.path.basename(src)).strip() or "file"
+        path = os.path.join(folder, f"{secrets.token_hex(3)}-{name}")
+        shutil.copyfile(src, path)
+    except OSError as e:
+        return f"couldn't keep {os.path.basename(src)}: {e.strerror or e}"
+    return {"path": path, "name": name, "kind": attachment_kind(name)}
+
+
+def clipboard_file(slug):
+    """The clipboard as a file: a copied file's path, or a new PNG of its image. None when it's neither."""
+    folder = os.path.join(ATTACHMENTS, ".clipboard")
+    os.makedirs(folder, exist_ok=True)
+    out = os.path.join(folder, secrets.token_hex(4) + ".png")
+    r = sh(["osascript", "-e", CLIPBOARD_SCRIPT, out])
+    got = r.stdout.strip()
+    if got.startswith("file:"):
+        return got[5:], None
+    if got == "image":
+        return out, time.strftime("pasted-%H%M%S.png")
+    return None, None
+
+
+def attach(args):
+    """Files for the Desk's composer: pasted, picked or dropped. Prints {files, errors}."""
+    sources = [(p, None) for p in args.paths]
+    if args.clipboard:
+        path, name = clipboard_file(args.task)
+        if path:
+            sources.append((path, name))
+    if args.pick:
+        r = sh(["osascript", "-e", PICK_SCRIPT])
+        sources += [(p, None) for p in r.stdout.splitlines() if p]
+    kept = [keep_attachment(args.task, p, n) for p, n in sources]
+    for path, name in sources:
+        if name:
+            try:
+                os.remove(path)
+            except OSError:
+                pass
+    print(json.dumps({"files": [k for k in kept if isinstance(k, dict)], "errors": [k for k in kept if isinstance(k, str)]}))
+
+
+def attachment_note(files):
+    return "\n\nAttached files:\n" + "\n".join(f"- {f['path']}" for f in files) if files else ""
 
 
 def send_text(addr, text):
@@ -1689,8 +1781,11 @@ def post(args):
     """Kabeer's message from the Desk chat: logged, then typed into each recipient.
     The CTO also gets what it hasn't seen yet in the chat."""
     text = " ".join(args.text).strip()
-    if not text or not args.to:
+    files = [{"path": p, "name": os.path.basename(p).split("-", 1)[-1], "kind": attachment_kind(p)} for p in getattr(args, "attach", None) or []]
+    if (not text and not files) or not args.to:
         die("post needs --to ADDR:ROLE and a message")
+    if any(not inside(f["path"], ATTACHMENTS) or not os.path.isfile(f["path"]) for f in files):
+        die("an attachment is missing; attach it again")
     if getattr(args, "raw", False):
         return post_raw(args, text, [t.split(":", 1) if ":" in t else (t, t) for t in args.to])
     targets = [t.split(":", 1) if ":" in t else (t, t) for t in args.to]
@@ -1703,7 +1798,7 @@ def post(args):
             failed.append({"role": role, "why": "Recipient is disconnected or at a shell; use Resume or Queue next."})
             continue
         # Just a tag: how to answer is in every agent's system prompt (roles/protocol.md).
-        note = f"[desk chat] Kabeer{f' (to {names})' if len(targets) > 1 else ''}: {text}"
+        note = f"[desk chat] Kabeer{f' (to {names})' if len(targets) > 1 else ''}: {text}{attachment_note(files)}"
         if role == "cto":
             note += digest_for(args.task, addr)
         if not expect_reply(addr, "chat"):
@@ -1716,7 +1811,8 @@ def post(args):
         else:
             delivered.append(role); delivered_to.append(addr)
     rec = chat_append(args.task, {"from": "kabeer", "kind": "say", "to": [r for _, r in targets], "text": text,
-                                  "delivered": delivered, "delivered_to": delivered_to, "failed": failed})
+                                  "delivered": delivered, "delivered_to": delivered_to, "failed": failed,
+                                  **({"attachments": files} if files else {})})
     print(json.dumps(rec))
 
 
@@ -1900,13 +1996,15 @@ def branch_files(cwd):
     """Files this branch changed since it left the default branch, or None if that can't be read."""
     if not cwd:
         return None
-    default = (git_out(cwd, "symbolic-ref", "--short", "refs/remotes/origin/HEAD") or "").strip()
-    for ref in filter(None, (default, "main", "master")):
-        base = git_out(cwd, "merge-base", "HEAD", ref)
-        if base:
-            names = git_out(cwd, "diff", "--name-only", base.strip(), "HEAD")
-            return (names or "").split()
-    return None
+    def out(*args):
+        got = git_out(cwd, *args)
+        return got.strip() if got is not None else None
+    branch = out("rev-parse", "--abbrev-ref", "HEAD")
+    ref = nearest_base(out, branch)
+    base = ref and out("merge-base", "HEAD", ref)
+    if not base:
+        return None
+    return (git_out(cwd, "diff", "--name-only", base, "HEAD") or "").split()
 
 
 def session_usage(rec):
@@ -2584,7 +2682,11 @@ def main():
     q.add_argument("--to", action="append", default=[])
     q.add_argument("--raw", action="store_true", help="type the text exactly as given (a slash command); logged as a command")
     q.add_argument("--mode", choices=["action", "info", "interactive"], help="with --raw: what to do after typing it (default action)")
+    q.add_argument("--attach", action="append", default=[], help="a path from team attach")
     q.add_argument("text", nargs="+")
+    at = sub.add_parser("attach")
+    at.add_argument("--task", required=True); at.add_argument("--clipboard", action="store_true"); at.add_argument("--pick", action="store_true")
+    at.add_argument("paths", nargs="*")
     fi = sub.add_parser("finish")
     fi.add_argument("--address"); fi.add_argument("--keep-open", action="store_true")
     fi.add_argument("--keep-worktree", action="store_true", help="close the agent once nothing is uncommitted; keep its branch")
@@ -2650,6 +2752,8 @@ def main():
         hook(args)
     elif args.cmd == "permit":
         permit(args)
+    elif args.cmd == "attach":
+        attach(args)
     elif args.cmd == "choose":
         choose(args)
     elif args.cmd == "approve":

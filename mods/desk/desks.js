@@ -1,13 +1,13 @@
 import { div, svg } from "gpui-kit";
 import { h_flex, v_flex, TextareaState, Textarea, InputState, Input, TextView } from "gpui-base";
 import { terminals, agents, panes, spaces, exec, home, appHome, readTextFile, watchFolder, notify, run, shared, setShared, hc, playSound, pickFolder, settings, window as appWindow } from "herdr";
-import { button, empty, icon, statusMark, shownStatus } from "./ui.js";
+import { button, empty, icon, iconButton, statusMark, shownStatus } from "./ui.js";
 import { Roles, roleTile, team, folderOf, findBriefs, startBrief, fileBrief, agentIcon, agentCli } from "./roles.js";
 import { WorkflowControls, runtimeData, runTeam, refreshRuntime, openDesk } from "./workflows.js";
 import { ReviewView } from "./review.js";
 import { ThreadViewport } from "./thread.js";
 import { buildRows, windowStart, WINDOW, splitPoll, summarizeSteps, statusLines, rowOffsets, activePrompt, kTokens, parseTranscript, buildRouteRows, currentQuestion, togglePick } from "./model.js";
-import { COLUMN, measured, messageRow, liveRows, statusLineRows, headerStrip, approvalCard, questionCard, liveState } from "./timeline.js";
+import { COLUMN, measured, messageRow, liveRows, statusLineRows, headerStrip, approvalCard, questionCard, attachmentList, liveState } from "./timeline.js";
 import { routeKey, routeHeader, routeRow, routeEmpty, commandMenu } from "./route.js";
 import { commandsFor, slashQuery, matchCommands, resolveCommand, menuKey, mentionQuery, mentionItems } from "./commands.js";
 import { minimap } from "./minimap.js";
@@ -144,6 +144,7 @@ export class Desks {
     this.input = this.teamInput;
     for (const state of [this.teamInput, this.routeInput]) {
       state.set_auto_grow(2, 6);
+      state.on("paste_other", (_e, cx) => this.attachFrom(["--clipboard"], cx));
       state.on("change", (_e, cx) => { if (state === this.teamInput) this.trackMention(); this.trackSlash(); cx.notify(); });
       state.on("submit", (e, cx) => {
         if (e.shift) return;
@@ -172,6 +173,7 @@ export class Desks {
     // Polled only for blocked members of the open desk; the answer's refusal stays on its card.
     this.prompts = {}; this.approveErr = {}; this.enterCard = null;
     this.questionAnswers = {}; this.questionPicks = {}; this.openQuestion = null;
+    this.attached = {};  // desk slug or route address -> files waiting in its composer
     cx.timer.every(1500, (cx) => this.pollPrompts(cx));
     this.seenRows = {};          // thread key -> rows seen while following (the jump pill counts past it)
     this.pendingAdd = new Set(); // roles the @ menu's Bring in is adding (sends wait for them)
@@ -609,6 +611,20 @@ export class Desks {
       this.approveErr[c.address] = e?.code === "no_prompt" ? null : (e?.error ?? (r.stderr.trim().slice(0, 200) || "Couldn't answer it from here"));
     }, cx);
   }
+  // Files for the composer: pasted, picked or dropped. team attach copies them next to the chat.
+  attachKey() { return this.route?.address ?? this.desk()?.slug ?? null; }
+  attachFrom(args, cx) {
+    const d = this.desk(), key = this.attachKey();
+    if (!d || !key) return;
+    cx.spawn(async (cx) => {
+      try {
+        const got = await runTeam(["attach", "--task", d.slug, ...args]);
+        if (got.files?.length) this.attached[key] = [...(this.attached[key] ?? []), ...got.files];
+        if (got.errors?.length) notify({ title: "Not attached", body: got.errors.join("\n").slice(0, 200), level: "warning", timeout: 6000 });
+        cx.notify();
+      } catch (e) { notify({ title: "Not attached", body: String(e.message ?? e).slice(0, 200), level: "warning", timeout: 6000 }); }
+    });
+  }
   // A question card's answer: stored until every question has one, then sent to the waiting hook.
   answerQuestion(m, text, cx) {
     const q = currentQuestion(m.questions, this.questionAnswers[m.id]);
@@ -822,23 +838,29 @@ export class Desks {
 
   send(cx) {
     const d = this.desk(), members = this.members(), text = this.input.content().text.trim();
-    if (!d || !text || this.acting) return;
+    const key = this.attachKey(), files = this.attached[key] ?? [];
+    if (!d || (!text && !files.length) || this.acting) return;
+    const attach = files.flatMap((f) => ["--attach", f.path]);
+    // A queued message is plain text, so its files go in as paths.
+    const withPaths = files.length ? [text, `Attached files:\n${files.map((f) => `- ${f.path}`).join("\n")}`].filter(Boolean).join("\n\n") : text;
+    const restore = () => { this.attached[key] = files; };
     if (/^\/[\w:-]/.test(text)) { this.input.set_value(""); this.slashQ = null; return this.runSlash(text, cx); }
     const route = this.route;
     // An open question stops its agent, so a message to it is the answer.
     const asking = this.openQuestion;
-    if (asking && (route || this.recipients(members).roles.includes(asking.from))) { this.input.set_value(""); return this.answerQuestion(asking, text, cx); }
+    if (asking && text && (route || this.recipients(members).roles.includes(asking.from))) { this.input.set_value(""); return this.answerQuestion(asking, text, cx); }
     if (route) {
       const queuedR = this.sendMode === "queue";
       this.thread.latest(routeKey(route.address));
-      this.input.set_value("");
+      this.input.set_value(""); delete this.attached[key];
       return this.busy("send", async (cx) => {
         try {
-          const rec = await runTeam([queuedR ? "queue" : "post", "--task", d.slug, "--to", `${route.address}:${route.role}`, "--", text]);
+          const rec = await runTeam(queuedR ? ["queue", "--task", d.slug, "--to", `${route.address}:${route.role}`, "--", withPaths]
+            : ["post", "--task", d.slug, "--to", `${route.address}:${route.role}`, ...attach, "--", text]);
           if (rec.failed?.length) notify({ title: "Not delivered", body: rec.failed.map((f) => f.why).join("\n"), level: "warning", timeout: 7000 });
           refreshRuntime(cx, true);
           cx.timer.after(1200, (cx) => this.pollRoute(cx, true));
-        } catch (e) { this.input.set_value(text); throw e; }
+        } catch (e) { this.input.set_value(text); restore(); throw e; }
       }, cx);
     }
     const { roles } = this.recipients(members);
@@ -850,13 +872,13 @@ export class Desks {
     const to = targets.flatMap((m) => ["--to", `${m.address}:${m.role}`]);
     const queued = this.sendMode === "queue";
     this.thread.latest(d.slug);
-    this.input.set_value(""); this.mention = null;
+    this.input.set_value(""); this.mention = null; delete this.attached[key];
     this.busy("send", async (cx) => {
       try {
-        const rec = await runTeam([queued ? "queue" : "post", "--task", d.slug, ...to, "--", text]);
+        const rec = await runTeam(queued ? ["queue", "--task", d.slug, ...to, "--", withPaths] : ["post", "--task", d.slug, ...to, ...attach, "--", text]);
         if (rec.failed?.length) notify({ title: "Not delivered to everyone", body: rec.failed.map((f) => `${this.roles.byId(f.role)?.name ?? f.role}: ${f.why}`).join("\n"), level: "warning", timeout: 7000 });
         refreshRuntime(cx, true);
-      } catch (e) { this.input.set_value(text); throw e; }
+      } catch (e) { this.input.set_value(text); restore(); throw e; }
     }, cx);
   }
 
@@ -1339,7 +1361,8 @@ export class Desks {
     const menu = this.slashItems();
     const text = this.input.value().trim();
     const toList = route ? [route.role] : to;
-    const canSend = Boolean(text) && toList.length > 0 && !this.acting;
+    const files = this.attached[this.attachKey()] ?? [];
+    const canSend = (Boolean(text) || files.length > 0) && toList.length > 0 && !this.acting;
     const toChip = (r) => {
       const role = this.roles.byId(r), at = route ? route.address : members.find((m) => m.role === r)?.address;
       return h_flex().flex_none().h(22).pl(2).pr(8).gap(5).items_center().rounded(11).bg(t.raised).text_color(t.foreground)
@@ -1358,6 +1381,8 @@ export class Desks {
         .on_action("desk_slash_tab", (_e, cx) => this.slashKey({ key: "tab" }, cx))
         .on_action("desk_slash_escape", (_e, cx) => this.slashKey({ key: "escape" }, cx))
         .on_key_down((e, cx) => this.slashKey(e, cx))
+        .when(files.length > 0, (el) => el.child(div().px(14).pt(12).child(attachmentList(t, "composer-files", files, {
+          remove: (f, cx) => { this.attached[this.attachKey()] = files.filter((x) => x !== f); cx.notify(); } }))))
         .child(Textarea.new(this.input).w_full().px(14).pt(12).pb(4).text_size(this.wide ? 14 : 13).text_color(t.foreground)
           .token((ctx) => {
             const role = this.roles.byId(ctx.token.id);
@@ -1371,6 +1396,7 @@ export class Desks {
               .when(route !== null, (el) => el.child(div().min_w(0).truncate().child("· directly")))
               .when(!route && implicit, (el) => el.child(div().min_w(0).truncate().child(this.directTarget && this.directTask === d.slug ? `· ${this.directTarget}` : "· @ to mention"))))
             .when(!toList.length, (el) => el.child(div().truncate().child("Nobody here yet: add someone above"))))
+          .child(iconButton(t, "desk-attach", "paperclip", "Attach files · or paste a screenshot, or drop files here", (_e, cx) => this.attachFrom(["--pick"], cx), { size: 28 }))
           .child(h_flex().id("send-mode").h(28).px(8).gap(5).items_center().rounded(8).flex_none()
             .text_size(11.5).text_color(this.sendMode === "queue" ? t.accent : t.dim).cursor_pointer()
             .hover(style => style.bg(t.hover).text_color(t.foreground))
@@ -1393,6 +1419,7 @@ export class Desks {
     // centred in what's left.
     const inset = this.wide ? Math.max(0, Number(shared("desk.cardInset")?.right) || 0) : 0;
     return v_flex().size_full().min_h(0).when(inset > 0, (el) => el.pr(inset))
+      .on_drop((e, cx) => this.attachFrom(["--", ...e.paths], cx))
       // As the main view, the desk's controls live in the right panel (card.js), not up here.
       .when(!this.wide, (el) => el.child(header))
       .when(!this.wide && Boolean(route), (el) => el.child(h_flex().px(8).py(4).border_b(1).border_color(t.border).child(strip)))

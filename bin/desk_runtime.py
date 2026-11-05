@@ -1289,6 +1289,22 @@ def codex_input(lines):
     return None
 
 
+def nearest_base(out, branch):
+    """The base this branch left: of the default branch and the usual integration branches, the one
+    it's fewest commits ahead of. A branch cut from dev is 1 commit ahead of dev and 106 ahead of
+    main, and comparing with main shows everything dev hasn't released. Ties go to the default.
+    `out` runs git and gives its stdout, or None on failure."""
+    head = out("symbolic-ref", "--quiet", "--short", "refs/remotes/origin/HEAD")
+    names = [b for b in BASE_BRANCHES if b != branch]
+    refs = ([head] if head and head.split("/")[-1] != branch else []) + [f"origin/{b}" for b in names] + names
+    best = None
+    for ref in dict.fromkeys(refs):
+        ahead = out("rev-list", "--count", f"{ref}..HEAD")
+        if ahead is not None and ahead.isdigit() and (best is None or int(ahead) < best[0]):
+            best = (int(ahead), ref)
+    return best and best[1]
+
+
 def screen_state(screen, cli="claude"):
     """What an agent's visible screen shows: {"state": "prompt"|"dialog"|"unknown", "input": the
     text sitting in its input box (prompt only), "why": what gave a dialog away}. "unknown" (still
@@ -1504,6 +1520,7 @@ def task_line(task, brief_text=None, width=120):
 
 
 BASES = ("main", "master", "trunk")
+BASE_BRANCHES = ("dev", "develop", "main", "master", "trunk")
 
 
 def diff_stat(cwd, run=None):
@@ -1524,9 +1541,7 @@ def diff_stat(cwd, run=None):
     branch = out("rev-parse", "--abbrev-ref", "HEAD")
     if not branch or branch == "HEAD" or branch in BASES:
         return None
-    head = out("symbolic-ref", "--quiet", "--short", "refs/remotes/origin/HEAD")
-    candidates = ([head] if head else []) + list(BASES) + [f"origin/{b}" for b in BASES]
-    base = next((c for c in candidates if c and c.split("/")[-1] != branch and out("rev-parse", "--verify", "--quiet", c)), None)
+    base = nearest_base(out, branch)
     fork = base and out("merge-base", "HEAD", base)
     if not fork:
         return None

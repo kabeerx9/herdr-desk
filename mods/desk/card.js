@@ -22,7 +22,13 @@ const EDGE = 12, FRAME_Y = 5, CLEAR = 12;
 const GIT = `cd "$1" 2>/dev/null || exit 0
 g() { git --no-optional-locks -c core.fsmonitor=false "$@"; }
 b=$(g symbolic-ref --short -q HEAD || g rev-parse --short HEAD) || exit 0
-base=$(g rev-parse --abbrev-ref -q origin/HEAD 2>/dev/null)
+# The base it left: fewest commits ahead of (dev before main, or a dev branch shows all of dev).
+base=$(g rev-parse --abbrev-ref -q origin/HEAD 2>/dev/null); best=$([ -n "$base" ] && g rev-list --count "$base"..HEAD 2>/dev/null)
+for c in origin/dev origin/develop origin/main origin/master; do
+  [ "$c" = "origin/$b" ] && continue
+  n=$(g rev-list --count "$c"..HEAD 2>/dev/null) || continue
+  if [ -z "$best" ] || [ "$n" -lt "$best" ]; then base=$c; best=$n; fi
+done
 mb=""; [ -n "$base" ] && mb=$(g merge-base HEAD "$base" 2>/dev/null)
 ahead=0; [ -n "$mb" ] && ahead=$(g rev-list --count "$mb"..HEAD)
 dirty=$(g status --porcelain | wc -l | tr -d ' ')

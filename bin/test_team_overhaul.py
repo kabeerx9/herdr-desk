@@ -530,6 +530,74 @@ class TurnSnapshotHookTests(Base):
         self.assertIn('claude-prompt', settings['hooks']['UserPromptSubmit'][0]['hooks'][0]['command'])
 
 
+class Attachments(unittest.TestCase):
+    """Files from the Desk's composer: kept beside the chat, sent to agents as paths."""
+    def setUp(self):
+        d = tempfile.TemporaryDirectory(); self.addCleanup(d.cleanup)
+        self.dir = d.name
+        p = patch.object(team, 'ATTACHMENTS', os.path.join(d.name, 'att')); p.start(); self.addCleanup(p.stop)
+
+    def source(self, name, size=4):
+        path = os.path.join(self.dir, name)
+        with open(path, 'wb') as f:
+            f.write(b'x' * size)
+        return path
+
+    def test_keeps_a_copy_and_names_its_kind(self):
+        png, pdf = team.keep_attachment('Desk 1', self.source('a.PNG')), team.keep_attachment('Desk 1', self.source('b c.pdf'))
+        self.assertEqual(('image', 'file'), (png['kind'], pdf['kind']))
+        self.assertEqual('b c.pdf', pdf['name'])
+        self.assertTrue(team.inside(pdf['path'], team.ATTACHMENTS) and os.path.isfile(pdf['path']))
+
+    def test_refuses_a_folder_a_missing_file_and_a_huge_one(self):
+        self.assertIsInstance(team.keep_attachment('d', self.dir), str)
+        self.assertIsInstance(team.keep_attachment('d', self.dir + '/nope'), str)
+        with patch.object(team, 'ATTACH_MAX', 2):
+            self.assertIn('over', team.keep_attachment('d', self.source('big.bin')))
+
+    def test_a_name_cant_leave_the_desk_folder(self):
+        kept = team.keep_attachment('../../x', self.source('a.txt'), name='../../evil.txt')
+        self.assertTrue(team.inside(kept['path'], team.ATTACHMENTS))
+        self.assertNotIn('/', kept['name'])
+
+    def test_note_lists_paths_and_empty_adds_nothing(self):
+        self.assertEqual('', team.attachment_note([]))
+        self.assertIn('- /a/b.png', team.attachment_note([{'path': '/a/b.png'}]))
+
+    def test_post_refuses_a_path_outside_the_attachments_folder(self):
+        args = types.SimpleNamespace(task='s', to=['t1:cto'], text=['hi'], attach=['/etc/passwd'], raw=False)
+        with self.assertRaises(SystemExit):
+            team.post(args)
+
+    def test_claude_launch_can_read_attachments_and_the_task_stays_positional(self):
+        argv = team.argv_for({'cli': 'claude', 'promptText': ''}, 'do it')
+        i = argv.index('--add-dir')
+        self.assertTrue(argv[i + 2].startswith('--'))
+        self.assertEqual('do it', argv[-1])
+
+
+class NearestBase(unittest.TestCase):
+    def out(self, counts):
+        def run(*args):
+            if args[0] == 'symbolic-ref':
+                return 'origin/main'
+            return counts.get(args[-1].split('..')[0])
+        return run
+
+    def test_a_branch_cut_from_dev_compares_with_dev(self):
+        self.assertEqual('origin/dev', rt.nearest_base(self.out({'origin/main': '106', 'origin/dev': '1'}), 'team/x'))
+
+    def test_a_tie_goes_to_the_default_branch(self):
+        self.assertEqual('origin/main', rt.nearest_base(self.out({'origin/main': '2', 'origin/dev': '2'}), 'team/x'))
+
+    def test_a_missing_ref_is_skipped_and_nothing_gives_none(self):
+        self.assertEqual('origin/main', rt.nearest_base(self.out({'origin/main': '3'}), 'team/x'))
+        self.assertIsNone(rt.nearest_base(self.out({}), 'team/x'))
+
+    def test_dev_is_not_its_own_base(self):
+        self.assertEqual('origin/main', rt.nearest_base(self.out({'origin/main': '5', 'origin/dev': '0'}), 'dev'))
+
+
 class QuestionCards(unittest.TestCase):
     """AskUserQuestion in the desk chat: the hook's card, team choose, and how a wait ends."""
     QUESTION = {'question': 'Which?', 'header': 'Pick', 'multiSelect': False, 'options': [{'label': 'Red', 'description': 'r'}, {'label': 'Blue', 'description': 'b'}]}

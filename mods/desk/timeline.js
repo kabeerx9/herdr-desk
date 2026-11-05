@@ -1,4 +1,5 @@
-import { div, svg } from "gpui-kit";
+import { div, svg, image } from "gpui-kit";
+import { exec } from "herdr";
 import { renderBlocks } from "./blocks.js";
 import { h_flex, v_flex, TextView } from "gpui-base";
 import { button, icon, statusMark, shownStatus } from "./ui.js";
@@ -87,12 +88,28 @@ function copyButton(o, t, id, text) {
 }
 
 // Your message: a raised bubble on the right; who it went to and when show on hover.
-export function mineBubble(o, t, id, text, meta, { ok = false, failed = null, open = null } = {}) {
+// Attached files: a thumbnail per image, a name chip per anything else. Click opens it; in the
+// composer `remove` adds a ×.
+export function attachmentList(t, id, files, { remove = null, thumb = 64, end = false } = {}) {
+  const shut = (f, i) => remove ? h_flex().id(`${id}-x${i}`).absolute().top(-5).right(-5).size(18).items_center().justify_center().rounded(9)
+    .bg(t.popover).border_1().border_color(t.border).text_color(t.muted).cursor_pointer().hover((s) => s.text_color(t.foreground))
+    .tooltip("Remove").on_click((_e, cx) => { cx.stop_propagation(); remove(f, cx); }).child(svg("mods/workspace-chrome/x.svg").size(10)) : null;
+  const open = (f) => () => exec("open", [f.path]);
+  return h_flex().id(id).gap(8).flex_wrap().items_center().when(end, (el) => el.justify_end()).children(files.map((f, i) => (f.kind === "image"
+    ? div().id(`${id}-${i}`).relative().size(thumb).flex_none().rounded(10).border_1().border_color(t.border).cursor_pointer().tooltip(f.name).on_click(open(f))
+      .child(image(f.path).size_full().rounded(10)).child(shut(f, i))
+    : h_flex().id(`${id}-${i}`).relative().h(40).max_w(240).px(10).gap(8).flex_none().items_center().rounded(10).border_1().border_color(t.border)
+      .bg(t.raised).text_color(t.muted).cursor_pointer().tooltip(f.name).on_click(open(f))
+      .child(icon("pages", 14)).child(div().min_w(0).truncate().text_size(12).text_color(t.foreground).child(f.name)).child(shut(f, i)))));
+}
+
+export function mineBubble(o, t, id, text, meta, { ok = false, failed = null, open = null, attachments = null } = {}) {
   const hovered = o.hoverMsg === id, size = o.wide ? 14 : 13;
   return v_flex().id(id).items_end().gap(4).pt(gapTop(o))
     .on_hover((h, cx) => o.hoverOn(id, h, cx))
-    .child(div().max_w_4_5().px(14).py(9).rounded(18).bg(t.raised).border_1().border_color(t.border)
-      .text_size(size).line_height(1.55).text_color(t.foreground).child(text))
+    .when(Boolean(attachments?.length), (el) => el.child(div().max_w_4_5().child(attachmentList(t, `${id}-files`, attachments, { thumb: 128, end: true }))))
+    .when(Boolean(text), (el) => el.child(div().max_w_4_5().px(14).py(9).rounded(18).bg(t.raised).border_1().border_color(t.border)
+      .text_size(size).line_height(1.55).text_color(t.foreground).child(text)))
     .child(h_flex().h(22).gap(6).items_center().text_size(11).text_color(t.dim).when(!hovered, (el) => el.opacity(0))
       .child(copyButton(o, t, id, text))
       .child(meta)
@@ -194,7 +211,7 @@ export function messageRow(o, t, slug, row, ctx) {
     const to = (m.to ?? []).map((r) => nameOf(o, r)).join(", ");
     const ok = Boolean(m.delivered?.length && !m.failed?.length);
     const dialog = (m.failed ?? []).find((f) => f.dialog && f.address);
-    const opts = { ok, failed: m.failed?.length ? m.failed.map((f) => `${nameOf(o, f.role)} (${f.why})`).join("; ") : null,
+    const opts = { ok, attachments: m.attachments ?? null, failed: m.failed?.length ? m.failed.map((f) => `${nameOf(o, f.role)} (${f.why})`).join("; ") : null,
       open: dialog ? () => o.openTerminal(dialog.address) : null };
     return row.type === "command" ? commandChip(o, t, id, m.text ?? "", `To ${to} · ${clock(m.at)}`, opts)
       : mineBubble(o, t, id, m.text ?? "", `To ${to} · ${clock(m.at)}`, opts);
