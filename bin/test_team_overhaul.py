@@ -382,11 +382,17 @@ class ParallelWorkerTests(unittest.TestCase):
         self.assertNotIn('--dangerously-bypass-approvals-and-sandbox', argv)
         self.assertNotIn('--approve-for-me', team.argv_for({'cli': 'codex', 'promptText': ''}, ''))
 
-    def test_every_claude_role_launches_with_skills(self):
-        claude_roles = [r for r in team.load_roles() if r.get('cli') == 'claude']
-        self.assertEqual({'cto', 'frontend', 'backend', 'worker', 'qa'}, {r['id'] for r in claude_roles})
-        for role in claude_roles:
+    def test_every_claude_engineer_launches_with_skills(self):
+        roles = [r for r in team.load_roles() if r.get('cli') == 'claude' and r['id'] != 'cto']
+        self.assertEqual({'frontend', 'backend', 'worker', 'qa'}, {r['id'] for r in roles})
+        for role in roles:
             self.assertIn('Skill', team.argv_for({**role, 'promptText': ''}, '')[2].split(','), role['id'])
+
+    def test_cto_launches_as_a_full_claude_code_session(self):
+        cto = next(r for r in team.load_roles() if r['id'] == 'cto')
+        argv = team.argv_for({**cto, 'promptText': ''}, '')
+        self.assertNotIn('--tools', argv)
+        self.assertNotIn('--strict-mcp-config', argv)
 
     def test_claude_roles_run_commands_in_bash(self):
         argv = team.argv_for({'cli': 'claude', 'promptText': ''}, '')

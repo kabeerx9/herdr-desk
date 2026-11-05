@@ -158,6 +158,7 @@ def argv_for(role, task):
         # --tools first: it takes several values, so a value-less flag must follow it, never the task.
         # Fewer tools and no MCP servers keep every call's prompt small (measured 41k -> 17k tokens).
         # A role without Skill in its list gets no skills. With it, the skill list adds about 11k tokens.
+        # A role with no tools list and mcp true (the CTO) launches as a full Claude Code session.
         base = ["claude"] + (["--tools", ",".join(role["tools"])] if role.get("tools") else [])
         base += [] if role.get("mcp") else ["--strict-mcp-config"]
         base += ["--model", role["model"]] if role.get("model") else []
