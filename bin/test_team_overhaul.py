@@ -400,6 +400,10 @@ class GateCommandTests(Base):
         team.chat_append('desk', {'from': 'reviewer', 'address': 'r1', 'kind': 'done', 'head': head, 'blocking': 0, 'text': 'clean'})
         code, out = self.call(team.runtime_gate, address='t1')
         self.assertEqual((0, 'pass', head), (code, out['verdict'], out['head']))
+        self.call(team.runtime_gate, address='t1')
+        gates = [c['text'] for c in team.chat_read('desk') if c.get('kind') == 'gate']
+        self.assertEqual(2, len(gates), 'one line per result, none for a repeat')
+        self.assertIn('passed', gates[-1])
         (repo / 'a.txt').write_text('edited\n')
         code, out = self.call(team.runtime_gate, address='t1')
         self.assertEqual(1, code)
