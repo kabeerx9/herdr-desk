@@ -170,7 +170,10 @@ def argv_for(role, task):
         # SessionStart after a compaction (asked for or Claude's own): its new size.
         # PermissionRequest: what it would ask in its terminal, asked in the desk chat (team permit answers).
         # bash: in zsh, a bare `echo ====` is a failed =cmd lookup that stops the rest of the command.
-        base += ["--settings", json.dumps({"env": {"CLAUDE_CODE_SHELL": "/bin/bash"}, "hooks": {
+        # Prompt suggestions: Claude's grey guess at the next message sits in the input box, and the
+        # screen text can't tell it from typing, so the Desk reads it as unsent text. Nobody types
+        # there anyway, and each guess is a model call.
+        base += ["--settings", json.dumps({"env": {"CLAUDE_CODE_SHELL": "/bin/bash", "CLAUDE_CODE_ENABLE_PROMPT_SUGGESTION": "false"}, "hooks": {
             "Stop": [{"hooks": [{"type": "command", "command": f"{SELF} hook claude", "timeout": 20}]}],
             "PreToolUse": [{"matcher": "*", "hooks": [{"type": "command", "command": f"{SELF} hook claude-tool", "timeout": 10}]}],
             # UserPromptSubmit: the turn starts; snapshot the worktree for the Last turn review.

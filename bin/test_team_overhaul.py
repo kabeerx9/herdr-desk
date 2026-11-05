@@ -388,6 +388,11 @@ class ParallelWorkerTests(unittest.TestCase):
         for role in roles:
             self.assertIn('Skill', team.argv_for({**role, 'promptText': ''}, '')[2].split(','), role['id'])
 
+    def test_claude_roles_launch_without_prompt_suggestions(self):
+        argv = team.argv_for({'cli': 'claude', 'promptText': ''}, '')
+        settings = json.loads(argv[argv.index('--settings') + 1])
+        self.assertEqual('false', settings['env']['CLAUDE_CODE_ENABLE_PROMPT_SUGGESTION'])
+
     def test_cto_launches_as_a_full_claude_code_session(self):
         cto = next(r for r in team.load_roles() if r['id'] == 'cto')
         argv = team.argv_for({**cto, 'promptText': ''}, '')
