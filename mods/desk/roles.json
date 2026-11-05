@@ -19,7 +19,8 @@
         "Grep",
         "WebFetch",
         "WebSearch",
-        "TodoWrite"
+        "TodoWrite",
+        "Skill"
       ],
       "prompt": "roles/cto.md",
       "color": "ansi5",
@@ -46,7 +47,8 @@
         "Grep",
         "WebFetch",
         "WebSearch",
-        "TodoWrite"
+        "TodoWrite",
+        "Skill"
       ],
       "prompt": "roles/frontend.md",
       "color": "ansi4",
@@ -73,7 +75,8 @@
         "Grep",
         "WebFetch",
         "WebSearch",
-        "TodoWrite"
+        "TodoWrite",
+        "Skill"
       ],
       "prompt": "roles/backend.md",
       "color": "ansi2",
@@ -100,7 +103,8 @@
         "Grep",
         "WebFetch",
         "WebSearch",
-        "TodoWrite"
+        "TodoWrite",
+        "Skill"
       ],
       "prompt": "roles/worker.md",
       "color": "ansi4",
@@ -142,7 +146,8 @@
         "Grep",
         "WebFetch",
         "WebSearch",
-        "TodoWrite"
+        "TodoWrite",
+        "Skill"
       ],
       "prompt": "roles/qa.md",
       "color": "ansi6",
