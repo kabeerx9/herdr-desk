@@ -6,8 +6,8 @@ import { Roles, roleTile, team, folderOf, findBriefs, startBrief, fileBrief, age
 import { WorkflowControls, runtimeData, runTeam, refreshRuntime, openDesk } from "./workflows.js";
 import { ReviewView } from "./review.js";
 import { ThreadViewport } from "./thread.js";
-import { buildRows, windowStart, WINDOW, splitPoll, summarizeSteps, statusLines, rowOffsets, activePrompt, kTokens, parseTranscript, buildRouteRows } from "./model.js";
-import { COLUMN, measured, messageRow, liveRows, statusLineRows, headerStrip, approvalCard, liveState } from "./timeline.js";
+import { buildRows, windowStart, WINDOW, splitPoll, summarizeSteps, statusLines, rowOffsets, activePrompt, kTokens, parseTranscript, buildRouteRows, currentQuestion, togglePick } from "./model.js";
+import { COLUMN, measured, messageRow, liveRows, statusLineRows, headerStrip, approvalCard, questionCard, liveState } from "./timeline.js";
 import { routeKey, routeHeader, routeRow, routeEmpty, commandMenu } from "./route.js";
 import { commandsFor, slashQuery, matchCommands, resolveCommand, menuKey, mentionQuery, mentionItems } from "./commands.js";
 import { minimap } from "./minimap.js";
@@ -23,6 +23,7 @@ const TEAM = () => `${appHome()}/bin/team`;
 const STATUS = { blocked: "needs you", done: "done", working: "working", idle: "idle" };
 // How long bin/team waits on a permission request before Claude asks in its terminal instead.
 const PERMIT_WAIT = 540000;
+const QUESTION_WAIT = 3540000;
 const RANK = { blocked: 0, done: 1, working: 2, idle: 3 };
 // One exec per working agent per wake: its step tail, then (if supported) its timeline.
 const POLL = `tail -n 60 "$1" 2>/dev/null; printf '\\n\\036\\n'; [ "$3" = 1 ] && "$2" timeline --address "$4" 2>/dev/null; exit 0`;
@@ -170,6 +171,7 @@ export class Desks {
     // Permission prompts on members' screens (team approve --peek): address -> { at, dialog, why }.
     // Polled only for blocked members of the open desk; the answer's refusal stays on its card.
     this.prompts = {}; this.approveErr = {}; this.enterCard = null;
+    this.questionAnswers = {}; this.questionPicks = {}; this.openQuestion = null;
     cx.timer.every(1500, (cx) => this.pollPrompts(cx));
     this.seenRows = {};          // thread key -> rows seen while following (the jump pill counts past it)
     this.pendingAdd = new Set(); // roles the @ menu's Bring in is adding (sends wait for them)
@@ -327,7 +329,12 @@ export class Desks {
         const looking = d.slug === this.view && this.onScreen();
         for (const m of parse(await readTextFile(`${DIR()}/${d.slug}.jsonl`)).slice(before)) {
           // A permission request rings even when you're looking: an agent is stopped until you answer.
-          if (m.kind === "permission" && looking) { playSound("blocked"); continue; }
+          if ((m.kind === "permission" || m.kind === "question") && looking) { playSound("blocked"); continue; }
+          if (m.kind === "question") {
+            playSound("blocked");
+            notify({ title: `${this.roles.byId(m.from)?.name ?? m.from} asks you · ${d.name}`, body: `${(m.questions?.[0]?.question ?? "").slice(0, 140)}\nClick to answer in the chat`,
+              level: "warning", timeout: 15000, action: { name: `desk.open-${d.slug}` } });
+          }
           if (m.kind === "permission") {
             playSound("blocked");
             notify({ title: `${this.roles.byId(m.from)?.name ?? m.from} asks to use ${m.tool} · ${d.name}`, body: `${(m.detail ?? "").slice(0, 140)}\nClick to answer in the chat`,
@@ -602,6 +609,25 @@ export class Desks {
       this.approveErr[c.address] = e?.code === "no_prompt" ? null : (e?.error ?? (r.stderr.trim().slice(0, 200) || "Couldn't answer it from here"));
     }, cx);
   }
+  // A question card's answer: stored until every question has one, then sent to the waiting hook.
+  answerQuestion(m, text, cx) {
+    const q = currentQuestion(m.questions, this.questionAnswers[m.id]);
+    if (!q || !text.trim() || this.acting) return;
+    const answers = { ...this.questionAnswers[m.id], [q.question]: text.trim() };
+    this.questionAnswers[m.id] = answers;
+    delete this.questionPicks[m.id];
+    if (currentQuestion(m.questions, answers)) return cx.notify();
+    this.busy(`qa-${m.id}`, async () => {
+      const r = await exec(TEAM(), ["choose", "--task", this.desk().slug, m.id, "--answers", JSON.stringify(answers)]);
+      if (r.code === 0) return;
+      delete this.questionAnswers[m.id];   // ask again rather than sit on "Sending"
+      notify({ title: "Answer not sent", body: r.stderr.trim().slice(0, 200), level: "warning", timeout: 7000 });
+    }, cx);
+  }
+  toggleQuestionPick(m, label, cx) {
+    this.questionPicks[m.id] = togglePick(this.questionPicks[m.id] ?? [], label);
+    cx.notify();
+  }
   pollPrompts(cx) {
     const d = this.view !== "list" && this.view !== "new" ? this.desk(this.view) : null;
     if (!d || this.peeking || Date.now() - (this.drawnAt ?? 0) > 15000) return;
@@ -799,6 +825,9 @@ export class Desks {
     if (!d || !text || this.acting) return;
     if (/^\/[\w:-]/.test(text)) { this.input.set_value(""); this.slashQ = null; return this.runSlash(text, cx); }
     const route = this.route;
+    // An open question stops its agent, so a message to it is the answer.
+    const asking = this.openQuestion;
+    if (asking && (route || this.recipients(members).roles.includes(asking.from))) { this.input.set_value(""); return this.answerQuestion(asking, text, cx); }
     if (route) {
       const queuedR = this.sendMode === "queue";
       this.thread.latest(routeKey(route.address));
@@ -1224,7 +1253,10 @@ export class Desks {
     const live = new Set(members.map((m) => m.address));
     const waiting = model.rows.filter((r) => r.type === "permission" && !model.permitDone.has(r.m.id) && live.has(r.m.address) && now - r.m.at < PERMIT_WAIT
       && (!route || r.m.address === route.address)).map((r) => r.m);
-    this.waitingFor = new Set(waiting.map((m) => m.address));
+    const questions = model.rows.filter((r) => r.type === "question" && !model.permitDone.has(r.m.id) && live.has(r.m.address) && now - r.m.at < QUESTION_WAIT
+      && (!route || r.m.address === route.address)).map((r) => r.m);
+    this.openQuestion = questions[0] ?? null;
+    this.waitingFor = new Set([...waiting, ...questions].map((m) => m.address));
     const from = windowStart(rowsSrc.length, { following: s.following, from: this.windowFrom[key] });
     this.windowFrom[key] = from;
     const col = (el) => (this.wide ? div().w_full().max_w(COLUMN).child(el) : el);
@@ -1264,9 +1296,10 @@ export class Desks {
     if (!queued) this.queueShown = false;
     const scope = route ? [route] : members;
     // Permission prompts answered right here: a card per member at one, the newest one Enter's.
-    const cards = this.approvals(scope, waiting), carded = new Set(cards.map((c) => c.address));
+    const asked = new Set(questions.map((m) => m.address));
+    const cards = this.approvals(scope.filter((m) => !asked.has(m.address)), waiting), carded = new Set(cards.map((c) => c.address));
     this.enterCard = cards.at(-1) ?? null;
-    const cardRows = cards.map((c) => approvalCard(this, t, c, { enter: false }));
+    const cardRows = [...questions.map((m) => questionCard(this, t, m)), ...cards.map((c) => approvalCard(this, t, c, { enter: false }))];
     const lines = statusLines({ waiting: waiting.filter((m) => !carded.has(m.address)),
       blocked: scope.filter((m) => m.status === "blocked" && !this.waitingFor.has(m.address) && !carded.has(m.address)),
       disconnected: lost, handingOff: scope.filter((m) => m.handingOff && m.status !== "working"), queued, queueOpen: this.queueShown,

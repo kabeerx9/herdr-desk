@@ -2,7 +2,7 @@ import { div, svg } from "gpui-kit";
 import { renderBlocks } from "./blocks.js";
 import { h_flex, v_flex, TextView } from "gpui-base";
 import { button, icon, statusMark, shownStatus } from "./ui.js";
-import { KIND, span, summarizeSteps, thoughtLine, subagentHeader, subStatus, subElapsed, snapshotFor, contextMeter, stepKind } from "./model.js";
+import { KIND, span, summarizeSteps, thoughtLine, subagentHeader, subStatus, subElapsed, snapshotFor, contextMeter, stepKind, currentQuestion, questionLine } from "./model.js";
 
 // The desk chat's thread, drawn from rows model.js derived on reload. Everything here reads
 // state; nothing here fetches or derives (desks.js owns both). `o` is the Desks owner.
@@ -173,6 +173,10 @@ export function messageRow(o, t, slug, row, ctx) {
       : end === "deny" ? "you denied it" : "answered in its terminal";
     return quietLine(id, t, `${nameOf(o, m.from)} asked to use ${m.tool}: ${(m.detail ?? "").split("\n")[0].slice(0, 80)} · ${how} · ${clock(m.at)}`, m.detail ?? "");
   }
+  if (row.type === "question") {
+    const { asked, how } = questionLine(m, o.model.permitDone.get(m.id), o.model.answered.get(m.id));
+    return quietLine(id, t, `${nameOf(o, m.from)} asked: ${asked} · ${how} · ${clock(m.at)}`, (m.questions ?? []).map((q) => q.question).join("\n"));
+  }
   if (row.type === "event") {
     const who = nameOf(o, m.from);
     if (m.kind === "compact") return quietLine(id, t, `${who} ${m.text}${m.trigger === "auto" ? " (Claude did it on its own)" : ""} · ${clock(m.at)}`);
@@ -340,6 +344,36 @@ export function approvalCard(o, t, c, { enter = false } = {}) {
         .child(button(t, `${id}-deny`, "Deny", (_e, cx) => o.approve(c, "deny", cx), { variant: "ghost", disabled: Boolean(o.acting) }))
         .child(div().flex_1())
         .child(button(t, `${id}-term`, "Open terminal", () => o.openTerminal(c.address), { variant: "ghost", tip: "Look at it in its terminal first" }))));
+}
+
+// A question the CTO asked with AskUserQuestion, answered right here. One question at a time:
+// click an option, or type your own answer in the message box.
+export function questionCard(o, t, m) {
+  const id = `qa-${m.id}`, answers = o.questionAnswers[m.id] ?? {}, q = currentQuestion(m.questions, answers);
+  const total = m.questions?.length ?? 0, at = total - Object.keys(answers).length, picks = o.questionPicks[m.id] ?? [];
+  const sending = !q || o.acting === id;
+  return v_flex().id(id).pt(gapTop(o))
+    .child(v_flex().w_full().px(12).py(12).gap(10).rounded(12).border_1().border_color(t.border)
+      .child(h_flex().gap(10).items_center()
+        .child(o.face(t, m.from, m.address, FACE))
+        .child(div().min_w(0).flex_1().truncate().text_size(12.5).font_semibold().text_color(t.foreground)
+          .child(`${nameOf(o, m.from)} asks you${q?.header ? ` · ${q.header}` : ""}${total > 1 ? ` · ${total - at + 1} of ${total}` : ""}`))
+        .child(statusMark(t, "blocked", 12)))
+      .when(sending, (el) => el.child(div().text_size(13).text_color(t.muted).child("Sending your answer…")))
+      .when(!sending, (el) => el
+        .child(div().text_size(14).line_height(1.45).text_color(t.foreground).child(q.question))
+        .child(v_flex().gap(6).children(q.options.map((opt, i) => {
+          const on = q.multiSelect && picks.includes(opt.label);
+          return v_flex().id(`${id}-o${total - at}-${i}`).px(10).py(8).gap(2).rounded(8).border_1().border_color(on ? t.foreground : t.border)
+            .cursor_pointer().hover((s) => s.bg(t.hover))
+            .on_click((_e, cx) => (q.multiSelect ? o.toggleQuestionPick(m, opt.label, cx) : o.answerQuestion(m, opt.label, cx)))
+            .child(div().text_size(13).font_semibold().text_color(t.foreground).child(`${on ? "✓ " : ""}${opt.label}`))
+            .when(Boolean(opt.description), (x) => x.child(div().text_size(12).line_height(1.4).text_color(t.muted).child(opt.description)));
+        })))
+        .child(h_flex().gap(6).items_center()
+          .when(q.multiSelect, (x) => x.child(button(t, `${id}-next`, "Answer", (_e, cx) => o.answerQuestion(m, picks.join(", "), cx), { primary: true, disabled: !picks.length || Boolean(o.acting) })))
+          .child(div().min_w(0).flex_1().text_size(12).text_color(t.dim).child("Or type your own answer in the message box."))
+          .child(button(t, `${id}-term`, "Open terminal", () => o.openTerminal(m.address), { variant: "ghost" })))));
 }
 
 // Steps as a quiet list in a hairline box. While live, the newest row eases in once.

@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { buildRows, windowStart, summarizeSteps, summarizeCounts, thoughtLine, parseTimeline, splitPoll, SPLIT, subagentHeader,
+import { currentQuestion, togglePick, questionLine, buildRows, windowStart, summarizeSteps, summarizeCounts, thoughtLine, parseTimeline, splitPoll, SPLIT, subagentHeader,
   contextMeter, snapshotFor, statusLines, rowOffsets, activePrompt, span } from './model.js';
 
 const thread = [
@@ -214,4 +214,35 @@ test('route replies in a row share one face', () => {
     { who: 'kabeer', text: 'more', at: 4 }, { who: 'agent', text: 'three', at: 5 },
   ]);
   assert.deepEqual(rows.map((r) => [r.type, Boolean(r.grouped)]), [['mine', false], ['reply', false], ['reply', true], ['mine', false], ['reply', false]]);
+});
+
+test('a question row is an event that opens no turn, and its end carries the answers', () => {
+  const m = buildRows([
+    { kind: 'question', id: 'aaaa0000', from: 'cto', at: 1, questions: [{ question: 'Which?', options: [] }] },
+    { kind: 'permission-done', re: 'aaaa0000', decision: 'answered', answers: { 'Which?': 'Blue' }, at: 2 },
+  ]);
+  assert.equal(m.rows[0].type, 'question');
+  assert.equal(m.permitDone.get('aaaa0000'), 'answered');
+  assert.deepEqual(m.answered.get('aaaa0000'), { 'Which?': 'Blue' });
+  assert.equal(m.said, false);
+});
+
+test('a question card walks its questions one at a time', () => {
+  const qs = [{ question: 'A' }, { question: 'B' }];
+  assert.equal(currentQuestion(qs, {}).question, 'A');
+  assert.equal(currentQuestion(qs, { A: 'x' }).question, 'B');
+  assert.equal(currentQuestion(qs, { A: 'x', B: 'y' }), null);
+});
+
+test('a multi-select pick toggles', () => {
+  assert.deepEqual(togglePick(['a'], 'b'), ['a', 'b']);
+  assert.deepEqual(togglePick(['a', 'b'], 'a'), ['b']);
+});
+
+test('a question history line says how it ended', () => {
+  const m = { questions: [{ question: 'Which?' }, { question: 'Why?' }] };
+  assert.deepEqual(questionLine(m, null), { asked: 'Which? (+1 more)', how: 'waiting for you' });
+  assert.equal(questionLine(m, 'answered', { a: 'Blue', b: 'Cheap' }).how, 'you chose Blue; Cheap');
+  assert.equal(questionLine(m, 'expired').how, 'no answer in time');
+  assert.equal(questionLine(m, 'terminal').how, 'answered in its terminal');
 });

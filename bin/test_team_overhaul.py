@@ -525,5 +525,64 @@ class TurnSnapshotHookTests(Base):
         self.assertIn('claude-prompt', settings['hooks']['UserPromptSubmit'][0]['hooks'][0]['command'])
 
 
+class QuestionCards(unittest.TestCase):
+    """AskUserQuestion in the desk chat: the hook's card, team choose, and how a wait ends."""
+    QUESTION = {'question': 'Which?', 'header': 'Pick', 'multiSelect': False, 'options': [{'label': 'Red', 'description': 'r'}, {'label': 'Blue', 'description': 'b'}]}
+
+    def setUp(self):
+        d = tempfile.TemporaryDirectory(); self.addCleanup(d.cleanup)
+        for p in (patch.object(team, 'CHAT', d.name), patch.object(team, 'PERMITS', os.path.join(d.name, '.permits')),
+                  patch.object(team, 'ME', 't1'), patch.object(team, 'watch_permit', lambda *a: None),
+                  patch.object(team, 'terminal', lambda t: {'status': {'state': 'blocked'}})):
+            p.start(); self.addCleanup(p.stop)
+        os.makedirs(team.PERMITS)
+
+    def asked(self, wait=2, answer=None):
+        payload = {'tool_name': 'AskUserQuestion', 'tool_input': {'questions': [self.QUESTION], 'metadata': {'source': 'x'}}}
+        def fake_write():
+            import threading
+            def go():
+                for _ in range(100):
+                    rec = next((r for r in team.chat_read('s') if r.get('kind') == 'question'), None)
+                    if rec:
+                        team.choose(types.SimpleNamespace(task='s', id=rec['id'], answers=json.dumps(answer))); return
+                    time.sleep(0.02)
+            threading.Thread(target=go, daemon=True).start()
+        if answer: fake_write()
+        out = io.StringIO()
+        with patch.object(team, 'QUESTION_WAIT', wait), contextlib.redirect_stdout(out):
+            team.ask_question(payload, 's', 'cto')
+        return json.loads(out.getvalue())['hookSpecificOutput']['decision']
+
+    def test_answer_goes_back_as_the_tools_own_input(self):
+        got = self.asked(answer={'Which?': 'Blue'})
+        self.assertEqual('allow', got['behavior'])
+        self.assertEqual({'Which?': 'Blue'}, got['updatedInput']['answers'])
+        self.assertEqual([self.QUESTION], got['updatedInput']['questions'])
+        self.assertEqual({'source': 'x'}, got['updatedInput']['metadata'])
+        done = [r for r in team.chat_read('s') if r.get('kind') == 'permission-done']
+        self.assertEqual(['answered'], [r['decision'] for r in done])
+
+    def test_no_answer_in_time_denies_instead_of_stalling_in_the_terminal(self):
+        got = self.asked(wait=0.1)
+        self.assertEqual('deny', got['behavior'])
+        self.assertEqual('expired', team.chat_read('s')[-1]['decision'])
+
+    def test_choose_refuses_a_partial_answer_and_a_finished_question(self):
+        team.chat_append('s', {'kind': 'question', 'id': 'aaaa0000', 'questions': [self.QUESTION]})
+        for bad in ('{}', '{"Which?":" "}', '{"Which?":"Red","Other?":"x"}', 'nope'):
+            with self.assertRaises(SystemExit):
+                team.choose(types.SimpleNamespace(task='s', id='aaaa0000', answers=bad))
+        self.assertEqual([], os.listdir(team.PERMITS))
+        team.chat_append('s', {'kind': 'permission-done', 're': 'aaaa0000', 'decision': 'expired'})
+        with self.assertRaises(SystemExit):
+            team.choose(types.SimpleNamespace(task='s', id='aaaa0000', answers='{"Which?":"Red"}'))
+
+    def test_only_the_cto_can_call_the_tool(self):
+        for role in team.load_roles():
+            if role.get('cli') == 'claude' and role['id'] != 'cto':
+                self.assertNotIn('AskUserQuestion', role['tools'])
+
+
 if __name__ == '__main__':
     unittest.main()

@@ -2,7 +2,7 @@
 // desks.js calls these when data arrives (a thread reload, a step/timeline poll); the
 // timeline only reads what they return.
 
-export const EVENTS = ["desk", "start", "fresh", "compact", "permission", "permission-done"];
+export const EVENTS = ["desk", "start", "fresh", "compact", "permission", "permission-done", "question"];
 // Report kinds: the word after the name, and the status mark that goes with it (if any).
 export const KIND = {
   done: { word: "done", mark: "done" }, blocked: { word: "blocked", mark: "blocked" }, update: { word: "update" },
@@ -35,14 +35,14 @@ export const rowKey = (m, i) => String(m.id ?? `${m.at}-${m.from ?? ""}-${i}`);
 // agent since its last reply); runs by one author share a name row. `cache` (a Map) keeps
 // row objects whose inputs didn't change, so finished rows are the same objects every time.
 export function buildRows(messages, cache = new Map()) {
-  const permitDone = new Map();
+  const permitDone = new Map(), answered = new Map();
   // What each member last reported (address -> kind), for the team card once it has left.
   const reports = new Map();
   const merged = [];
   const joined = (m) => ({ role: m.role, address: m.address ?? null, task_line: m.task_line ?? null, branch: m.branch ?? null });
   for (const m of messages ?? []) {
     if (!m || typeof m !== "object") continue;
-    if (m.kind === "permission-done") { permitDone.set(m.re, m.decision); continue; }
+    if (m.kind === "permission-done") { permitDone.set(m.re, m.decision); if (m.answers) answered.set(m.re, m.answers); continue; }
     if (m.address && (m.kind === "done" || m.kind === "blocked" || m.kind === "finish")) reports.set(m.address, m.kind);
     const last = merged.at(-1);
     if (m.kind === "start" && last?.kind === "start" && last.from === m.from && m.at - last.at < 600000) {
@@ -63,7 +63,7 @@ export function buildRows(messages, cache = new Map()) {
       }
       if (m.from !== "kabeer" && started.has(m.from)) { turnStart = started.get(m.from); worked = m.at - turnStart; started.delete(m.from); }
     }
-    const type = m.kind === "permission" ? "permission" : event ? "event" : m.kind === "command" ? "command"
+    const type = m.kind === "permission" ? "permission" : m.kind === "question" ? "question" : event ? "event" : m.kind === "command" ? "command"
       : m.kind === "command-result" ? "result" : m.kind === "command-note" ? "note" : m.from === "kabeer" ? "mine" : "agent";
     const aside = type === "agent" && ASIDE.includes(m.kind);
     const grouped = type === "agent" && !aside && !KIND[m.kind] && Boolean(prev) && prev.m.from === m.from && prev.type === "agent"
@@ -82,7 +82,22 @@ export function buildRows(messages, cache = new Map()) {
   });
   // Turns still open: someone was asked and hasn't replied yet (role -> when).
   const open = Object.fromEntries(started);
-  return { rows, prompts, permitDone, reports, lastReply, open, said: rows.some((r) => r.type !== "event" && r.type !== "permission") };
+  return { rows, prompts, permitDone, answered, reports, lastReply, open, said: rows.some((r) => r.type !== "event" && r.type !== "permission" && r.type !== "question") };
+}
+
+// A question card, one question at a time: the first without an answer, or null when all have one.
+export const currentQuestion = (questions, answers = {}) => (questions ?? []).find((q) => !(q.question in answers)) ?? null;
+
+// A multi-select pick: on, or off again if it was on.
+export const togglePick = (picks, label) => (picks.includes(label) ? picks.filter((p) => p !== label) : [...picks, label]);
+
+// The history line for a question: what was asked, and how it ended.
+export function questionLine(m, end, answers) {
+  const first = m.questions?.[0]?.question ?? "a question", more = (m.questions?.length ?? 1) - 1;
+  const asked = `${first.split("\n")[0].slice(0, 80)}${more > 0 ? ` (+${more} more)` : ""}`;
+  const how = !end ? "waiting for you" : end === "answered" ? `you chose ${Object.values(answers ?? {}).join("; ").slice(0, 80)}`
+    : end === "expired" ? "no answer in time" : "answered in its terminal";
+  return { asked, how };
 }
 
 // Which rows to draw: the newest `limit`, but while the reader is scrolled up the start stays

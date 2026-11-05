@@ -13,7 +13,8 @@
   team post --raw --task SLUG --to ADDR:ROLE "/cmd"     (the Desk) typed exactly as is, e.g. a CLI slash command
   team finish [--address T] [--keep-worktree]  wrap up: flag leftovers, or remove the team worktree and close
   team hook claude|codex                    (the CLIs' end-of-turn hook) posts a reply the chat is waiting for
-  team hook claude-permission               (Claude's PermissionRequest hook) asks in the desk chat, waits for Allow/Deny
+  team hook claude-permission               (Claude's PermissionRequest hook) asks in the desk chat, waits for Allow/Deny or a question's answers
+  team choose --task <slug> <id> --answers <json>   (the Desk) answers a question card
   team permit --task SLUG <id> allow|always|deny [--message TEXT]   (the Desk's buttons) answer a pending permission request
   team approve --address T --choice allow|always|deny [--expect TEXT]   (the Desk) answer the permission prompt on its screen
   team approve --address T --peek           (the Desk) the permission prompt its screen shows, as JSON (exit 2: none)
@@ -175,7 +176,7 @@ def argv_for(role, task):
             # UserPromptSubmit: the turn starts; snapshot the worktree for the Last turn review.
             "UserPromptSubmit": [{"hooks": [{"type": "command", "command": f"{SELF} hook claude-prompt", "timeout": 15}]}],
             "SessionStart": [{"matcher": "startup|resume|clear", "hooks": [{"type": "command", "command": f"{SELF} hook session", "timeout": 10}]}, {"matcher": "compact", "hooks": [{"type": "command", "command": f"{SELF} hook claude-compact", "timeout": 20}]}],
-            "PermissionRequest": [{"matcher": "*", "hooks": [{"type": "command", "command": f"{SELF} hook claude-permission", "timeout": PERMIT_TIMEOUT}]}]}})]
+            "PermissionRequest": [{"matcher": "*", "hooks": [{"type": "command", "command": f"{SELF} hook claude-permission", "timeout": QUESTION_TIMEOUT}]}]}})]
         base += ["--append-system-prompt", prompt] if prompt else []
     return base + extra + ([task] if task else [])
 
@@ -298,6 +299,10 @@ def clear_activity(addr):
             pass
 PERMIT_TIMEOUT = 600  # the hook's timeout in Claude's settings, seconds
 PERMIT_WAIT = float(os.environ.get("TEAM_PERMIT_WAIT", PERMIT_TIMEOUT - 60))  # give up well before Claude kills it
+# A question gets longer than a permission: it's a decision, and Kabeer may be away. Claude's hook
+# timeout covers both, so it's this one; each wait below gives up on its own clock.
+QUESTION_TIMEOUT = 3600
+QUESTION_WAIT = float(os.environ.get("TEAM_QUESTION_WAIT", QUESTION_TIMEOUT - 60))
 
 
 def chat_file(slug):
@@ -1042,6 +1047,88 @@ def rule_label(suggestions):
     return ", ".join(out)[:200] or None
 
 
+def write_permit(pid, data):
+    os.makedirs(PERMITS, exist_ok=True)
+    path = os.path.join(PERMITS, f"{pid}.json")
+    with open(path + ".tmp", "w") as f:
+        json.dump(data, f)
+    os.replace(path + ".tmp", path)  # whole or absent: the hook never reads half a file
+
+
+def await_permit(path, deadline, ready):
+    """What the Desk wrote to this request's answer file, or None: out of time, or answered in the
+    terminal. Claude shows the same prompt there meanwhile (Herdr: blocked); answered there, the
+    agent stops being blocked, and the request is over."""
+    seen_blocked = False
+    while time.time() < deadline:
+        try:
+            with open(path) as f:
+                got = json.load(f)
+            if isinstance(got, dict) and ready(got):
+                return got
+        except (OSError, ValueError):
+            pass
+        state = ((terminal(ME).get("status") or {}).get("state")) if ME else None
+        if state == "blocked":
+            seen_blocked = True
+        elif seen_blocked:
+            return None
+        time.sleep(0.5)
+    return None
+
+
+def watch_permit(slug, pid):
+    """Claude kills the hook outright (no signal to catch) when its prompt is answered in the
+    terminal. A detached watcher records that, so the Desk drops the card."""
+    env = {k: v for k, v in os.environ.items() if k != "HC_TERMINAL_ID"}
+    subprocess.Popen([SELF, "permit-watch", "--task", slug, "--id", pid, "--pid", str(os.getpid()), "--address", ME], env=env,
+                     stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, start_new_session=True)
+
+
+def question_list(inp):
+    """AskUserQuestion's questions, kept to what the Desk draws."""
+    out = []
+    for q in (inp.get("questions") if isinstance(inp, dict) else None) or []:
+        if isinstance(q, dict) and q.get("question"):
+            out.append({"question": str(q["question"]), "header": str(q.get("header") or ""), "multiSelect": bool(q.get("multiSelect")),
+                        "options": [{"label": str(o.get("label") or ""), "description": str(o.get("description") or "")}
+                                    for o in q.get("options") or [] if isinstance(o, dict)]})
+    return out
+
+
+def ask_question(payload, slug, who):
+    """AskUserQuestion in the desk chat: a question card, then a wait for team choose. The answers
+    go back as the tool's own `answers` input, so the agent sees what a terminal answer gives it.
+    Unanswered in time, the tool is denied: a hidden terminal prompt would stall the desk."""
+    inp = payload.get("tool_input") or {}
+    questions = question_list(inp)
+    if not questions:
+        return
+    pid = secrets.token_hex(4)
+    path = os.path.join(PERMITS, f"{pid}.json")
+    chat_append(slug, {"from": who, "address": ME, "kind": "question", "id": pid, "questions": questions})
+    watch_permit(slug, pid)
+    deadline, got = time.time() + QUESTION_WAIT, None
+    try:
+        got = await_permit(path, deadline, lambda g: isinstance(g.get("answers"), dict))
+    finally:
+        try:
+            os.remove(path)
+        except OSError:
+            pass
+        expired = not got and time.time() >= deadline
+        chat_append(slug, {"from": "kabeer" if got else who, "address": ME, "kind": "permission-done", "re": pid,
+                           "decision": "answered" if got else "expired" if expired else "terminal",
+                           **({"answers": got["answers"]} if got else {})})
+    if got:
+        out = {"behavior": "allow", "updatedInput": {**inp, "answers": got["answers"]}}
+    elif expired:
+        out = {"behavior": "deny", "message": "Kabeer didn't answer in the desk chat in time. Carry on with work that doesn't depend on this, and put the question in your reply."}
+    else:
+        return
+    print(json.dumps({"hookSpecificOutput": {"hookEventName": "PermissionRequest", "decision": out}}))
+
+
 def permission_request():
     """Claude's PermissionRequest hook: the agent would ask in its terminal. A desk agent asks in the
     desk chat instead: a permission record, then a wait for team permit's answer file. No answer in
@@ -1057,36 +1144,19 @@ def permission_request():
     slug, who = labels.get("task"), labels.get("role")
     if not slug or not who:
         return
+    if payload.get("tool_name") == "AskUserQuestion":
+        return ask_question(payload, slug, who)
     suggestions = payload.get("permission_suggestions") or []
     pid = secrets.token_hex(4)
     path = os.path.join(PERMITS, f"{pid}.json")
     chat_append(slug, {"from": who, "address": ME, "kind": "permission", "id": pid, "tool": payload.get("tool_name") or "a tool",
                        "detail": permission_detail(payload.get("tool_input")), "always": rule_label(suggestions) if suggestions else None})
-    decision, why, deadline, seen_blocked = None, "", time.time() + PERMIT_WAIT, False
-    # Claude shows its terminal prompt while this waits, and answered there it kills this hook
-    # outright (no signal to catch). A detached watcher records that, so the Desk drops the card.
-    env = {k: v for k, v in os.environ.items() if k != "HC_TERMINAL_ID"}
-    subprocess.Popen([SELF, "permit-watch", "--task", slug, "--id", pid, "--pid", str(os.getpid()), "--address", ME], env=env,
-                     stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, start_new_session=True)
+    decision, why = None, ""
+    watch_permit(slug, pid)
     try:
-        while time.time() < deadline:
-            try:
-                with open(path) as f:
-                    got = json.load(f)
-                decision, why = got.get("decision"), str(got.get("message") or "")[:2000]
-            except (OSError, ValueError, AttributeError):
-                decision = None
-            if decision in ("allow", "always", "deny"):
-                break
-            decision = None
-            # Claude shows the same prompt in its terminal meanwhile (Herdr: blocked). Answered there,
-            # the agent stops being blocked, and this request is over.
-            state = ((terminal(ME).get("status") or {}).get("state")) if ME else None
-            if state == "blocked":
-                seen_blocked = True
-            elif seen_blocked:
-                break
-            time.sleep(0.5)
+        got = await_permit(path, time.time() + PERMIT_WAIT, lambda g: g.get("decision") in ("allow", "always", "deny"))
+        if got:
+            decision, why = got["decision"], str(got.get("message") or "")[:2000]
     finally:
         try:
             os.remove(path)
@@ -1109,7 +1179,7 @@ def permission_request():
 def permit_watch(args):
     """Detached from a permission hook: once that hook is gone, if it never recorded an end
     (Claude killed it when the prompt was answered in its terminal), record it now."""
-    stop = time.time() + PERMIT_TIMEOUT + 60
+    stop = time.time() + QUESTION_TIMEOUT + 60
     while time.time() < stop:
         try:
             os.kill(args.pid, 0)
@@ -1141,11 +1211,28 @@ def permit(args):
         die("that request isn't waiting any more (answered, or it asked in its terminal)")
     if args.decision == "always" and not asked.get("always"):
         die("Claude offered no rule to remember for this one: use allow")
-    os.makedirs(PERMITS, exist_ok=True)
-    path = os.path.join(PERMITS, f"{args.id}.json")
-    with open(path + ".tmp", "w") as f:
-        json.dump({"decision": args.decision, **({"message": args.message} if args.message else {})}, f)
-    os.replace(path + ".tmp", path)  # whole or absent: the hook never reads half a file
+    write_permit(args.id, {"decision": args.decision, **({"message": args.message} if args.message else {})})
+
+
+def choose(args):
+    """The Desk's answer to a question card: {question text: answer} for every question it asked."""
+    if not re.fullmatch(r"[0-9a-f]{8}", args.id):
+        die(f"not a question id: {args.id}")
+    recs = chat_read(args.task)
+    asked = next((r for r in recs if r.get("kind") == "question" and r.get("id") == args.id), None)
+    if not asked:
+        die(f"no question {args.id} in {args.task}")
+    if any(r.get("kind") == "permission-done" and r.get("re") == args.id for r in recs):
+        die("that question isn't waiting any more (answered, or out of time)")
+    try:
+        answers = json.loads(args.answers)
+    except ValueError:
+        die("--answers isn't JSON")
+    wanted = [q["question"] for q in asked["questions"]]
+    if not isinstance(answers, dict) or sorted(answers) != sorted(wanted) \
+            or not all(isinstance(v, str) and v.strip() for v in answers.values()):
+        die("answer every question it asked, and nothing else")
+    write_permit(args.id, {"answers": answers})
 
 
 def compacted():
@@ -2474,6 +2561,8 @@ def main():
     pm = sub.add_parser("permit")
     pm.add_argument("--task", required=True); pm.add_argument("id"); pm.add_argument("decision", choices=["allow", "always", "deny"])
     pm.add_argument("--message", help="with deny: tell it what to do instead")
+    cq = sub.add_parser("choose")
+    cq.add_argument("--task", required=True); cq.add_argument("id"); cq.add_argument("--answers", required=True, help='JSON: {"question text":"answer"}')
     ap = sub.add_parser("approve")
     ap.add_argument("--address", required=True); ap.add_argument("--choice", choices=["allow", "always", "deny"])
     ap.add_argument("--expect", help="the command or file the Desk showed; refuse if the prompt asks about anything else")
@@ -2558,6 +2647,8 @@ def main():
         hook(args)
     elif args.cmd == "permit":
         permit(args)
+    elif args.cmd == "choose":
+        choose(args)
     elif args.cmd == "approve":
         if not args.peek and not args.choice:
             die("approve needs --choice allow|always|deny (or --peek)")
