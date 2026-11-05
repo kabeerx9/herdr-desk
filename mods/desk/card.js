@@ -448,13 +448,13 @@ export class DeskCard {
       .children(parts.flatMap((p, i) => (i ? [div().h(1).flex_none().mx(14).my(4).bg(t.border), p] : [p])))
       .when(!parts.length, (el) => el.child(this.note(t, "Every section is hidden. Right-click to show some.")));
 
-    // Wrap up while anyone's running; once they're all closed, Delete (click twice).
-    const acting = this.desks.acting, deleting = Date.now() < this.desks.confirmDelete;
+    // Wrap up while anyone's running; once they're all closed, Delete (asks in a dialog).
+    const acting = this.desks.acting;
     const footer = h_flex().h(FOOT).flex_none().px(12).gap(8).items_center().border_t(1).border_color(t.border)
       .child(div().flex_1().min_w(0).truncate().text_size(11).text_color(t.dim).child(acting && acting !== "wrap" ? "Working…" : ""))
       .when(members.length > 0, (el) => el.child(button(t, "card-wrap", acting === "wrap" ? "Wrapping up…" : "Wrap up", (_e, cx) => this.desks.wrapUp(d, cx),
         { disabled: Boolean(acting), tip: "Each agent flags anything left locally, or cleans up its worktree and closes" })))
-      .when(!members.length, (el) => el.child(button(t, "card-del", deleting ? "Click again to delete" : "Delete desk", (_e, cx) => this.desks.deleteDesk(d, cx),
+      .when(!members.length, (el) => el.child(button(t, "card-del", "Delete desk", () => this.desks.askDelete(d),
         { iconName: "trash", disabled: Boolean(acting), tip: "Nobody's running. Kept in ~/.herdr/team/.deleted, so it can be put back" })));
 
     return root

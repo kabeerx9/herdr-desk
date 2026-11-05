@@ -10,6 +10,7 @@ import { startRole } from "./roles.js";
 import { Desks } from "./desks.js";
 import { DeskCard } from "./card.js";
 import { UsagePopover } from "./usage.js";
+import { DeleteDialog } from "./delete-dialog.js";
 
 const ME = "kabeerx9";
 // Lessons, explainers and Throughline reviews: newest first, as "mtime\tpath\ttitle".
@@ -61,7 +62,7 @@ const store = {
 export default class Desk extends View {
   init(_props, cx) {
     const p = props();
-    this.part = p?.popover ? new UsagePopover() : p?.rail ? new Rail() : p?.chat ? new ChatPane()
+    this.part = p?.deleteDesk ? new DeleteDialog() : p?.popover ? new UsagePopover() : p?.rail ? new Rail() : p?.chat ? new ChatPane()
       : p?.main ? new MainChat() : p?.card ? new DeskCard() : new Panel();
     this.part.init(p, cx);
     // Only the rail is always shown, so it takes the key commands.

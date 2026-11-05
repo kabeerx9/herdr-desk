@@ -1,6 +1,6 @@
 import { div, svg } from "gpui-kit";
 import { h_flex, v_flex, TextareaState, Textarea, InputState, Input, TextView } from "gpui-base";
-import { terminals, agents, panes, spaces, exec, home, appHome, readTextFile, watchFolder, notify, run, shared, setShared, hc, playSound, pickFolder, settings, window as appWindow } from "herdr";
+import { terminals, agents, panes, spaces, exec, home, appHome, readTextFile, watchFolder, notify, run, shared, setShared, hc, playSound, pickFolder, settings, openOverlay, window as appWindow } from "herdr";
 import { button, empty, icon, iconButton, statusMark, shownStatus } from "./ui.js";
 import { Roles, roleTile, team, folderOf, findBriefs, startBrief, fileBrief, agentIcon, agentCli } from "./roles.js";
 import { WorkflowControls, runtimeData, runTeam, refreshRuntime, openDesk } from "./workflows.js";
@@ -11,6 +11,7 @@ import { COLUMN, measured, messageRow, liveRows, statusLineRows, headerStrip, ap
 import { routeKey, routeHeader, routeRow, routeEmpty, commandMenu } from "./route.js";
 import { commandsFor, slashQuery, matchCommands, resolveCommand, menuKey, mentionQuery, mentionItems } from "./commands.js";
 import { minimap } from "./minimap.js";
+import { DIALOG } from "./delete-dialog.js";
 
 // Desks: each one an independent team (its own agents, thread and worktrees) that
 // bin/team keeps in ~/.herdr/team/<desk>.jsonl and on its agents' task=<desk> labels.
@@ -114,7 +115,7 @@ export class Desks {
     this.acting = null;
     this.addOpen = false;
     this.detailsOpen = false;
-    this.confirmDelete = 0;
+    this.deleteAsked = null;  // the slug this copy opened the delete dialog for
     this.mention = null;       // { start, q } while typing @…
     this.hoverMsg = null;      // the message under the pointer (its copy button shows)
     this.copied = null;        // the message just copied (its check shows for 2s)
@@ -234,6 +235,13 @@ export class Desks {
         this.reviewAt = review.at; this.reviewOpen = true;
         this.review.open({ ...review, messages: this.messages }, cx);
       }
+      // The delete dialog answered. Only the copy that asked acts on it, so it runs once.
+      const del = shared("desk.delete");
+      if (del && del.slug === this.deleteAsked && !this.acting) {
+        this.deleteAsked = null; setShared("desk.delete", null);
+        const d = this.desk(del.slug);
+        if (d) this.deleteDesk(d, cx);
+      }
       // A route belongs to its desk: another desk shown (the sidebar sets desk.view) clears it.
       // Only when desk.view changes: a sidebar member click writes desk.view, then desk.route.
       const route = shared("desk.route");
@@ -282,7 +290,7 @@ export class Desks {
   go(view, cx) {
     setShared("desk.view", view);
     if (shared("desk.route")) setShared("desk.route", null);
-    this.addOpen = false; this.detailsOpen = false; this.confirmDelete = 0; this.mention = null;
+    this.addOpen = false; this.detailsOpen = false; this.mention = null;
     this.syncDraft(view);
     if (view !== "list" && view !== "new") this.markRead(view);
     this.reload(cx);
@@ -502,9 +510,17 @@ export class Desks {
 
   overLimit(m) { return Boolean(m.ctx) && m.ctx >= this.roles.freshAt(m.role); }
 
+  wrapFirst() { notify({ title: "Wrap up first", body: "This desk still has agents running.", level: "warning", timeout: 4000 }); }
+
+  // Asks in a dialog over the whole app; its answer comes back through shared "desk.delete".
+  askDelete(d) {
+    if (this.members(d.slug).length) return this.wrapFirst();
+    this.deleteAsked = d.slug;
+    openOverlay({ mod: "desk", props: { deleteDesk: { slug: d.slug, name: d.name } }, ...DIALOG });
+  }
+
   deleteDesk(d, cx) {
-    if (this.members(d.slug).length) return notify({ title: "Wrap up first", body: "This desk still has agents running.", level: "warning", timeout: 4000 });
-    if (Date.now() > this.confirmDelete) { this.confirmDelete = Date.now() + 4000; cx.notify(); cx.timer.after(4100, (cx) => cx.notify()); return; }
+    if (this.members(d.slug).length) return this.wrapFirst();  // someone may have joined while the dialog was open
     this.busy("delete", async () => {
       // Kept in .deleted/ (outside the list), so a deleted desk can be put back by moving it.
       const r = await exec("sh", ["-c", 'mkdir -p "$1/.deleted" && mv "$1/$2.jsonl" "$1/.deleted/$2-$3.jsonl" && rm -f "$1/$2.cursors.json" "$1/$2.lock"', "del", DIR(), d.slug, String(Date.now())]);
@@ -1211,7 +1227,6 @@ export class Desks {
     this.syncDraft(d.slug);
     const members = this.members(d.slug), present = new Set(members.map((m) => m.role));
     const { roles: to, implicit } = this.recipients(members);
-    const deleting = Date.now() < this.confirmDelete;
 
     const header = v_flex().px(12).pt(10).pb(8).gap(8).border_b(1).border_color(t.border)
       .child(h_flex().gap(6).items_center()
@@ -1222,8 +1237,8 @@ export class Desks {
         .when(!this.fixed && !this.wide, (el) => el.child(button(t, "desk-pane", null, () => run("pane.split", { direction: "right", mod: "desk", props: { chat: true, task: d.slug } }), { iconName: "pane", tip: "Open beside your terminals" })))
         .when(members.length > 0, (el) => el.child(button(t, "desk-wrap", this.acting === "wrap" ? "Wrapping up…" : "Wrap up", (_e, cx) => this.wrapUp(d, cx),
           { disabled: Boolean(this.acting), tip: "Each agent: flags anything left locally, or cleans up its worktree and closes" })))
-        .when(!members.length, (el) => el.child(button(t, "desk-del", deleting ? "Delete?" : null, (_e, cx) => this.deleteDesk(d, cx),
-          { iconName: "trash", tip: deleting ? "Click again to delete (kept in ~/.herdr/team/.deleted)" : "Delete this desk" }))))
+        .when(!members.length, (el) => el.child(button(t, "desk-del", null, () => this.askDelete(d),
+          { iconName: "trash", tip: "Delete this desk" }))))
       // Who's here: click to jump to them; + to bring someone in.
       .child(h_flex().gap(5).flex_wrap().items_center()
         .children(members.map((m) => {
