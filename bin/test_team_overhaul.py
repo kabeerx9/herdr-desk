@@ -328,6 +328,12 @@ class GateTests(unittest.TestCase):
     def verdict(self, sessions, chats, head='h2', dirty=False):
         return rt.gate_verdict(self.ENG, [self.ENG] + sessions, chats, head, dirty)
 
+    def test_rounds_restart_after_a_clean_review(self):
+        chats = [self.done(head='a', blocking=3, at=1), self.done(head='b', blocking=0, at=2),
+                 self.done(head='c', blocking=2, at=3), self.done(head='d', blocking=1, at=4)]
+        v = self.verdict([self.reviewer()], chats, head='e')
+        self.assertEqual(('fail', 2), (v['verdict'], v['rounds']))
+
     def test_no_review_fails(self):
         v = self.verdict([], [])
         self.assertEqual(('fail', 0), (v['verdict'], v['rounds']))

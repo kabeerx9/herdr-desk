@@ -390,6 +390,9 @@ def gate_verdict(engineer, sessions, chats, head, dirty=False, max_rounds=MAX_RE
         reasons.append("couldn't read the branch's HEAD")
     if dirty:
         reasons.append("the worktree has uncommitted changes; commit them so the review covers them")
+    # Rounds run from the last clean review: new work after a pass starts a new count.
+    clean = max((i for i, r in enumerate(reviews) if r["blocking"] == 0), default=-1)
+    rounds = len(reviews) - clean - 1
     fit = [r for r in reviews if r["head"] and head and r["head"] == head and r["cli"] != eng_cli]
     chosen = fit[-1] if fit else (reviews[-1] if reviews else None)
     if not reviews:
@@ -404,10 +407,10 @@ def gate_verdict(engineer, sessions, chats, head, dirty=False, max_rounds=MAX_RE
         elif chosen["blocking"] > 0:
             reasons.append("the review has %d blocking finding%s" % (chosen["blocking"], "" if chosen["blocking"] == 1 else "s"))
     verdict = "pass" if not reasons else "fail"
-    if verdict == "fail" and len(reviews) >= max_rounds:
+    if verdict == "fail" and rounds >= max_rounds:
         verdict = "escalate"
-        reasons.append("%d review rounds without a clean review: stop and ask Kabeer" % len(reviews))
-    return {"verdict": verdict, "head": head, "engineer_cli": eng_cli, "rounds": len(reviews), "max_rounds": max_rounds,
+        reasons.append("%d review rounds without a clean review: stop and ask Kabeer" % rounds)
+    return {"verdict": verdict, "head": head, "engineer_cli": eng_cli, "rounds": rounds, "max_rounds": max_rounds,
             "review": chosen, "reasons": reasons}
 
 
@@ -624,6 +627,24 @@ def gate_line(name, verdict):
         return "Gate passed for %s at `%s`: %s." % (name, head, how)
     word = "needs you" if verdict["verdict"] == "escalate" else "not passed"
     return "Gate %s for %s at `%s`: %s." % (word, name, head, "; ".join(verdict.get("reasons") or []))
+
+
+def turn_started(path):
+    """When this turn began: the last line a person or agent sent, not a tool's result. None if unknown."""
+    try:
+        lines, _ = read_tail(path)
+    except OSError:
+        return None
+    for line in reversed(lines):
+        try:
+            entry = json.loads(line)
+        except ValueError:
+            continue
+        content = (entry.get("message") or {}).get("content") if isinstance(entry, dict) else None
+        if entry.get("type") == "user" and not entry.get("isMeta") and not (
+                isinstance(content, list) and any(isinstance(b, dict) and b.get("type") == "tool_result" for b in content)):
+            return ts_ms(entry.get("timestamp"))
+    return None
 
 
 # ── Leftover processes ───────────────────────────────────────────────────────

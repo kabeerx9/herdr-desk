@@ -98,6 +98,20 @@ class ReportsForKabeer(unittest.TestCase):
         self.assertIn('needs you', rt.gate_line('Frontend', {'verdict': 'escalate', 'head': None, 'reasons': []}))
 
 
+class TurnStart(unittest.TestCase):
+    def test_tool_results_and_meta_lines_do_not_start_a_turn(self):
+        rows = [{'type': 'user', 'timestamp': '2026-11-05T01:00:00.000Z', 'message': {'content': 'old'}},
+                {'type': 'user', 'timestamp': '2026-11-05T02:00:00.000Z', 'message': {'content': 'report arrived'}},
+                {'type': 'assistant', 'timestamp': '2026-11-05T02:00:05.000Z', 'message': {'content': []}},
+                {'type': 'user', 'timestamp': '2026-11-05T02:00:06.000Z', 'message': {'content': [{'type': 'tool_result'}]}},
+                {'type': 'user', 'isMeta': True, 'timestamp': '2026-11-05T02:00:07.000Z', 'message': {'content': 'meta'}}]
+        with tempfile.NamedTemporaryFile('w', suffix='.jsonl') as f:
+            f.write('\n'.join(json.dumps(r) for r in rows) + '\n')
+            f.flush()
+            self.assertEqual(rt.ts_ms('2026-11-05T02:00:00.000Z'), rt.turn_started(f.name))
+        self.assertIsNone(rt.turn_started('/nope.jsonl'))
+
+
 class LeftoverTests(unittest.TestCase):
     TABLE = {1: (0, 'launchd'), 10: (1, 'codex --no-daemon -m gpt'), 20: (10, 'npm exec jest --watchman=false features'),
              21: (20, 'node /wt/node_modules/.bin/jest --watchman=false'), 30: (10, '/bin/zsh -lc team report done'),

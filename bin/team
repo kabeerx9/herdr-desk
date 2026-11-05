@@ -39,7 +39,7 @@ from desk_runtime import Store as RuntimeStore, RuntimeError as DeskRuntimeError
 from desk_runtime import attention as runtime_attention
 from desk_runtime import find_queue as runtime_find_queue, queue_item as runtime_queue_item
 from desk_runtime import foreground_agent, recover_interrupted_claims, reorder as runtime_reorder, session_view as runtime_session_view, upsert_session
-from desk_runtime import (classify_launch_failure, findings_listed, gate_line, leftover_tests, codex_turns, codex_usage, find_codex_rollout, find_transcript, gate_verdict, light_gate_verdict, transcript_usage, parse_contract, parse_criteria, runner_variants,
+from desk_runtime import (classify_launch_failure, turn_started, findings_listed, gate_line, leftover_tests, codex_turns, codex_usage, find_codex_rollout, find_transcript, gate_verdict, light_gate_verdict, transcript_usage, parse_contract, parse_criteria, runner_variants,
                           session_cli, step_text, transcript_timeline, transcript_title, transcript_turns, triage_apply, triage_clear)
 from desk_runtime import DIALOG_OPEN, NO_INPUT, cleared_transcript, command_result, screen_state
 from desk_runtime import diff_stat, dialog_matches, permission_dialog, pick_option, task_line
@@ -975,6 +975,13 @@ def hook(args):
     # never shows "replying" for a reply that isn't coming.
     if awaiting:
         sh(["hc", "label", ME, "awaiting="])
+    if not awaiting and who == "cto" and slug and msg.strip():
+        # A turn that a report or a finished task started, not a chat message. Kabeer talks to the
+        # CTO, so what it concludes reaches the chat too, unless it already posted this turn.
+        since = turn_started((payload or {}).get("transcript_path")) or 0
+        if not any(r.get("address") == ME and r.get("kind") in ("say", "answer") and r.get("at", 0) >= since for r in chat_read(slug)[-30:]):
+            chat_append(slug, {"from": who, "address": ME, "kind": "say", "text": msg.strip(), "auto": True})
+        return
     if not awaiting or not slug or not who:
         return
     what, _, since = awaiting.rpartition(":")
