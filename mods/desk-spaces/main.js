@@ -13,6 +13,7 @@
 
 import { View, div, svg, image } from "gpui-kit";
 import { v_flex, h_flex } from "gpui-base";
+import { withKept, removeBlockers } from "./kept.js";
 import { spaces, machines, panes, run, openOverlay, closeOverlay, props, pickFolder, exec, hc, theme, shared, setShared, watchFolder, window, layout, agents, terminals, setAgentOrder, readTextFile, appHome, home, notify, settings } from "herdr";
 
 function find(node, id) {
@@ -153,6 +154,8 @@ const DESKS_SH = `cd "$1" 2>/dev/null || exit 0
 for f in *.jsonl; do [ -f "$f" ] || continue
   printf '%s\\t%s\\t%s\\n' "\${f%.jsonl}" "$(stat -f %m "$f")" "$(head -n1 "$f")"
 done`;
+const SEED_SH = `cd "$1/.deleted" 2>/dev/null || exit 0
+for f in *.jsonl; do [ -f "$f" ] && head -n1 "$f"; done`;
 // "shotgun · Nov 4 18:02": the name a desk gets when nobody named it.
 const AUTO_NAME = /^(.*) · [A-Z][a-z]{2} \d{1,2} \d{1,2}:\d{2}$/;
 
@@ -190,7 +193,32 @@ class SpaceMenu {
       .child(menuItem(t, "sm-more", dk("chevron"), "More…", () => {
         closeOverlay(overlay);
         openOverlay({ mod: "menu", kind: "popup", width: 200, height: 260, props: { tab: "space", target: { id: space } } });
-      }));
+      }))
+      .when(Boolean(props().folder), (el) => el.child(removeItem(this, t, overlay, props().folder)));
+  }
+}
+
+// Removing closes the project's terminals, so it takes a second click. The list that owns the
+// projects does the work: a popup is another copy of this mod.
+function removeItem(menu, t, overlay, folder) {
+  return menuItem(t, "sm-remove", wc("x", 13), menu.sure ? "Click again to remove" : "Remove from sidebar", (_e, cx) => {
+    if (!menu.sure) { menu.sure = true; cx.notify(); return; }
+    setShared("spaces.remove", { folder, at: Date.now() });
+    closeOverlay(overlay);
+  });
+}
+
+// Right-click on a kept project with no space: start in it, or take it off the list.
+class FolderMenu {
+  render() {
+    const t = theme(), { overlay, folder } = props();
+    return v_flex().id("folder-menu").w_full().p(4).gap(1).bg(t.popover)
+      .child(menuItem(t, "fm-desk", wc("square-pen"), "New desk here", () => {
+        closeOverlay(overlay);
+        setShared("desk.start", { folder, at: Date.now() }); setShared("desk.route", null); showTerminals(false);
+      }))
+      .child(div().h(1).mx(6).my(3).bg(t.border))
+      .child(removeItem(this, t, overlay, folder));
   }
 }
 
@@ -244,6 +272,7 @@ class Top {
 export default class Spaces extends View {
   init(_props, cx) {
     if (props()?.spaceMenu) { this.part = new SpaceMenu(); return; }
+    if (props()?.folderMenu) { this.part = new FolderMenu(); return; }
     if (props()?.joinMenu) { this.part = new JoinMenu(); return; }
     if (props()?.top) { this.part = new Top(); return; }
     this.hoverRow = null;
@@ -267,6 +296,10 @@ export default class Spaces extends View {
     this.folded = new Set(JSON.parse(localStorage.getItem("machines.folded") ?? "[]"));
     this.closed = new Set(JSON.parse(localStorage.getItem("spaces.folded") ?? "[]")); // spaces folded shut
     this.deskOpen = new Set(JSON.parse(localStorage.getItem("desks.open") ?? "[]")); // desks showing their members
+    // Projects that stay listed with no terminals. Null until the first look seeds it from the desks.
+    this.kept = JSON.parse(localStorage.getItem("projects.kept") ?? "null");
+    this.closing = new Set(); // spaces being removed: not kept again on their way out
+    this.removeAt = shared("spaces.remove")?.at ?? 0;
     // Done-and-unread: when each agent was last seen done-new (doneAt) and when Kabeer last looked at it
     // (seenAt). Herdr's own "done" lasts until the next turn and counts as seen only when the terminal is
     // focused, which the Desk chat never does, so the sidebar keeps its own read state.
@@ -315,13 +348,53 @@ export default class Spaces extends View {
         }
         const changed = [...next].some(([k, v]) => { const o = this.deskInfo.get(k); return !o || o.name !== v.name || o.at !== v.at || o.folder !== v.folder; });
         this.deskInfo = next;
+        if (!this.kept) await this.seedKept(cx);
         if (changed) cx.notify();
       } catch {} finally { this.loadingDesks = false; }
     });
   }
 
+  // The first look: every folder a desk ever ran in, deleted desks too.
+  async seedKept(cx) {
+    const r = await exec("sh", ["-c", SEED_SH, "seed", TEAM()]);
+    let kept = [];
+    for (const d of this.deskInfo.values()) kept = withKept(kept, d.folder, home());
+    for (const line of r.stdout.split("\n").filter(Boolean)) {
+      try { kept = withKept(kept, JSON.parse(line).folder, home()); } catch {}
+    }
+    this.saveKept(kept);
+    cx.notify();
+  }
+
+  saveKept(kept) {
+    if (kept === this.kept) return;
+    this.kept = kept;
+    localStorage.setItem("projects.kept", JSON.stringify(kept));
+  }
+
+  // Remember every local project on screen.
+  keepSeen(rows, synth) {
+    if (!this.kept) return;
+    let kept = this.kept;
+    for (const r of rows) if (!r.w.machine && !r.tree && !r.g?.linked && !this.closing.has(r.w.id)) kept = withKept(kept, r.w.folder, home());
+    for (const s of synth) kept = withKept(kept, s.folder, home());
+    this.saveKept(kept);
+  }
+
+  // "Remove from sidebar": close the project's spaces and forget it. Its folder and desks stay.
+  removeProject(folder, cx) {
+    const ps = panes(), mine = spaces().filter((s) => !s.machine && (s.folder === folder || place(s, ps) === folder));
+    const running = removeBlockers(folder, mine, agents(), terminals(), (slug) => this.deskInfo.get(slug)?.folder ?? null);
+    if (running.length) return notify({ title: "Wrap up first", body: "This project still has agents running.", level: "warning", timeout: 4000 });
+    for (const s of mine) { this.closing.add(s.id); run("space.close", { id: s.id }); }
+    this.saveKept((this.kept ?? []).filter((f) => f !== folder));
+    cx.notify();
+  }
+
   checkNew(cx) {
     const now = Date.now();
+    const remove = shared("spaces.remove");
+    if (remove?.at && remove.at !== this.removeAt) { this.removeAt = remove.at; this.removeProject(remove.folder, cx); }
     const sp = spaces();
     for (const s of sp) if (!this.shown.has(s.id)) this.born[s.id] ??= now;
     const due = this.due(now, sp, panes());
@@ -557,7 +630,7 @@ export default class Spaces extends View {
 
   menu(w) {
     // A popup is as tall as its items; height is only the most.
-    openOverlay({ mod: "desk-spaces", kind: "popup", width: 200, height: 150, props: { spaceMenu: true, space: w.id } });
+    openOverlay({ mod: "desk-spaces", kind: "popup", width: 200, height: 190, props: { spaceMenu: true, space: w.id, folder: w.machine ? null : w.folder } });
   }
 
   joinMenu(a, name, desk) {
@@ -861,6 +934,8 @@ export default class Spaces extends View {
       d.open = this.deskOpen.has(d.slug);
     }
     for (const s of synth.values()) s.kids = s.desks.flatMap((d) => d.members);
+    // Kept projects with nothing running: their header stays, ready for a new desk.
+    for (const f of this.kept ?? []) if (!homeOf.has(f) && !synth.has(f)) synth.set(f, { folder: f, desks: [], outside: [], kids: [] });
     return { bySpace, synth: [...synth.values()] };
   }
 
@@ -876,6 +951,7 @@ export default class Spaces extends View {
     const all = agents(), labels = new Map(terminals().map((x) => [x.address, x.labels ?? {}])), ps = panes();
     const order = [];
     const plan = collapsed ? null : this.plan(rows, all, labels, ps);
+    if (plan) this.keepSeen(rows, plan.synth);
     // The same project name for two folders: each header says which (its parent folder, dim).
     const titles = new Map();
     const titleOf = (r) => r.synth ? this.folderName(r.folder) : r.tree ? null : r.g?.name ?? (r.w.name === "~" ? "Home" : r.w.name);
@@ -1022,7 +1098,9 @@ export default class Spaces extends View {
       () => this.toggleSpace(r.key), false, 20);
     const start = () => { setShared("desk.start", { folder: r.folder, at: Date.now() }); setShared("desk.route", null); showTerminals(false); };
     return this.rowBase(t, id, { pl: 10, h: FOLDER_H, tip: r.folder }).pr(4).gap(8)
-      .on_click(() => desks[0] ? this.openDesk(desks[0].space, desks[0].slug) : start())
+      // Starting an agent spends tokens, so an empty project's row does nothing; its "+" starts one.
+      .on_click(() => { if (desks[0]) this.openDesk(desks[0].space, desks[0].slug); })
+      .on_mouse_down("right", () => openOverlay({ mod: "desk-spaces", kind: "popup", width: 200, height: 110, props: { folderMenu: true, folder: r.folder } }))
       .child(wc("folder", 14).text_color(t.muted))
       .child(this.headerTail(t, id, { title: this.folderName(r.folder), hint, dot: shut ? DOT[status] : null, shut, count, hovered, fold,
         onNew: start, newTip: "New desk here" }));

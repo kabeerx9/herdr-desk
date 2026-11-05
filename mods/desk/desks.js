@@ -913,8 +913,10 @@ export class Desks {
           .when(Boolean(d.project), (el) => el.child(div().flex_none().text_size(11).text_color(t.dim).child(d.project))))
         .child(div().text_size(11.5).line_height(1.4).text_color(t.muted).max_h(34).overflow_hidden().child(last.slice(0, 180)));
     });
+    // The floating card sits over the top right: "New desk" keeps clear of it.
+    const inset = this.wide ? Math.max(0, Number(shared("desk.cardInset")?.right) || 0) : 0;
     return v_flex().id("desks-list").size_full().min_h(0).overflow_y_scrollbar().pb(10)
-      .child(h_flex().px(14).pt(12).pb(10).items_center()
+      .child(h_flex().pl(14).pr(14 + inset).pt(12).pb(10).items_center()
         .child(v_flex().gap(2)
           .child(div().text_size(15).font_semibold().text_color(t.foreground).child("Desks"))
           .child(div().text_size(11.5).text_color(t.dim).child("Each desk is its own team: agents, chat and worktrees.")))
