@@ -225,7 +225,7 @@ export function messageRow(o, t, slug, row, ctx) {
   const long = row.long && !o.expanded.has(id);
   const face = aside ? 20 : FACE;
   const link = m.address && ctx.members.some((x) => x.address === m.address) ? m.address : null;
-  const copy = copyButton(o, t, id, m.text);
+  const copy = () => copyButton(o, t, id, m.text);  // an element is single-use: one per place it shows
 
   // The finished turn: "Worked for 2m 13s · read 4 files, ran 2 commands", folded.
   const snap = row.worked && !aside ? snapshotFor(row, o.snapshots) : null;
@@ -263,7 +263,7 @@ export function messageRow(o, t, slug, row, ctx) {
     .when(Boolean(m.evidence), (el) => el.child(evidenceLabel(t, `${id}-ev`, m.evidence)))
     .child(div().flex_none().text_size(11.5).text_color(t.dim).child(clock(m.at)))
     .child(div().flex_1())
-    .when(!latest, (el) => el.child(div().when(!hovered, (x) => x.opacity(0)).child(copy)));
+    .when(!latest, (el) => el.child(div().when(!hovered, (x) => x.opacity(0)).child(copy())));
 
   const column = v_flex().min_w(0).flex_1().gap(6)
     .when(!row.grouped, (el) => el.child(nameRow))
@@ -273,7 +273,7 @@ export function messageRow(o, t, slug, row, ctx) {
       .when(Boolean(snap.subagents?.length), (x) => x.child(subagents(o, t, `${id}-subs`, snap.subagents, ctx.now, link)))))
     .child(report)
     .when(latest, (el) => el.child(h_flex().ml(-5).gap(2)
-      .child(copy)
+      .child(copy())
       .when(Boolean(live), (el) => el.child(tool(t, `${id}-term`, "terminal", `Open ${role?.name ?? m.from}'s terminal`, () => o.openTerminal(live.address))))))
     .when(Boolean(offer), (el) => el.child(h_flex().pt(2).gap(6)
       .child(button(t, `${id}-compact`, o.acting === `compact-${offer.address}` ? "Compacting…" : "Compact", (_e, cx) => o.compact(offer, cx),
@@ -286,7 +286,7 @@ export function messageRow(o, t, slug, row, ctx) {
     .child(h_flex().w_full().items_start().gap(10)
       .child(row.grouped ? div().w(face).flex_none() : who(o, t, `${id}-face`, link, o.face(t, m.from, m.address, face)))
       .child(column))
-    .when(row.grouped && !latest, (el) => el.child(div().absolute().top(4).right(0).when(!hovered, (x) => x.opacity(0)).child(copy)));
+    .when(row.grouped && !latest, (el) => el.child(div().absolute().top(4).right(0).when(!hovered, (x) => x.opacity(0)).child(copy())));
 }
 
 const EVIDENCE_COLOR = { verified: "done", reported: "muted", asserted: "dim" };
