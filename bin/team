@@ -39,7 +39,7 @@ from desk_runtime import Store as RuntimeStore, RuntimeError as DeskRuntimeError
 from desk_runtime import attention as runtime_attention
 from desk_runtime import find_queue as runtime_find_queue, queue_item as runtime_queue_item
 from desk_runtime import foreground_agent, recover_interrupted_claims, reorder as runtime_reorder, session_view as runtime_session_view, upsert_session
-from desk_runtime import (classify_launch_failure, codex_turns, codex_usage, find_codex_rollout, find_transcript, gate_verdict, light_gate_verdict, transcript_usage, parse_contract, parse_criteria, runner_variants,
+from desk_runtime import (classify_launch_failure, leftover_tests, codex_turns, codex_usage, find_codex_rollout, find_transcript, gate_verdict, light_gate_verdict, transcript_usage, parse_contract, parse_criteria, runner_variants,
                           session_cli, step_text, transcript_timeline, transcript_title, transcript_turns, triage_apply, triage_clear)
 from desk_runtime import DIALOG_OPEN, NO_INPUT, cleared_transcript, command_result, screen_state
 from desk_runtime import diff_stat, dialog_matches, permission_dialog, pick_option, task_line
@@ -746,6 +746,23 @@ def need_core():
         die(f"{SANDBOX_HINT} ({(r.stderr or r.stdout).strip()[:160]})", 3)
 
 
+def stop_leftover_tests():
+    """Stops test runs this agent left going; a report never fails because of it."""
+    try:
+        rows = subprocess.run(["ps", "-axo", "pid=,ppid=,command="], capture_output=True, text=True, timeout=5).stdout
+        table = {}
+        for row in rows.splitlines():
+            pid, ppid, command = (row.split(None, 2) + [""])[:3]
+            table[int(pid)] = (int(ppid), command)
+        found = leftover_tests(table, os.getpid())
+        for pid in found:
+            with contextlib.suppress(OSError):
+                os.kill(pid, 15)
+        return found
+    except (OSError, ValueError, subprocess.SubprocessError):
+        return []
+
+
 def report(args):
     if not ME:
         die("team report runs inside an hc terminal ($HC_TERMINAL_ID is unset)")
@@ -777,6 +794,8 @@ def report(args):
         die("a review's done report says how many findings block the merge: --blocking N (0 when none)", 2)
     cwd = (me.get("foreground") or {}).get("cwd") or me.get("cwd")
     head = getattr(args, "head", None) or (git_out(cwd, "rev-parse", "HEAD") if cwd and args.kind == "done" else None)
+    if args.kind == "done":
+        stop_leftover_tests()
     lr = sh(["hc", "label", ME, f"phase={args.kind}", f"note={text[:240]}"])
     if lr.returncode != 0:
         die(f"couldn't record the report: {(lr.stderr or lr.stdout).strip()[:200]}", 3)

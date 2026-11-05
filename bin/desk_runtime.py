@@ -611,6 +611,35 @@ def codex_turns(path, limit=None, tail=None):
     return {"supported": True, "turns": turns[-limit:] if limit else turns, "partial": bool(cut or len(turns) > limit)}
 
 
+# ── Leftover processes ───────────────────────────────────────────────────────
+
+TEST_RUNNER = re.compile(r"(^|[\s/])(jest|vitest)(\s|$)")
+AGENT_CLI = re.compile(r"^(\S*/)?(codex|claude)(\s|$)")
+
+
+def leftover_tests(table, me):
+    """Test runs still alive under this agent. table: {pid: (ppid, command)}. `team report done` is
+    the agent saying it has finished, so a test run still going is one that never exited. Only test
+    runners count: a dev server or a simulator can be left up on purpose."""
+    chain, pid = [], me
+    while pid in table and pid not in chain:
+        chain.append(pid)
+        pid = table[pid][0]
+    agent = next((p for p in chain if AGENT_CLI.search(table[p][1])), None)
+    if agent is None:
+        return []
+    children = {}
+    for child, (parent, _) in table.items():
+        children.setdefault(parent, []).append(child)
+    found, todo = [], list(children.get(agent, []))
+    while todo:
+        pid = todo.pop()
+        todo.extend(children.get(pid, []))
+        if pid not in chain and TEST_RUNNER.search(table[pid][1]):
+            found.append(pid)
+    return sorted(found)
+
+
 # ── Runner fallback ──────────────────────────────────────────────────────────
 
 def runner_variants(role):

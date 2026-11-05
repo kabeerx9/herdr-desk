@@ -82,6 +82,24 @@ class Cost(unittest.TestCase):
         self.assertIsNone(rt.codex_usage(['{}']))
 
 
+class LeftoverTests(unittest.TestCase):
+    TABLE = {1: (0, 'launchd'), 10: (1, 'codex --no-daemon -m gpt'), 20: (10, 'npm exec jest --watchman=false features'),
+             21: (20, 'node /wt/node_modules/.bin/jest --watchman=false'), 30: (10, '/bin/zsh -lc team report done'),
+             31: (30, 'python3 /x/bin/team report done jest passed'), 40: (10, 'node /wt/node_modules/.bin/expo start'),
+             50: (1, 'node /other/node_modules/.bin/jest'), 60: (10, 'grep jester notes.txt')}
+
+    def test_finds_this_agents_test_runs_only(self):
+        self.assertEqual([20, 21], rt.leftover_tests(self.TABLE, 31))
+
+    def test_claude_agents_and_vitest_count_too(self):
+        table = {2: (1, '/opt/bin/claude --model x'), 3: (2, 'bash -c team'), 4: (2, 'node vitest run'), 1: (0, 'launchd')}
+        self.assertEqual([4], rt.leftover_tests(table, 3))
+
+    def test_outside_an_agent_nothing_is_touched(self):
+        self.assertEqual([], rt.leftover_tests({5: (1, 'zsh'), 6: (5, 'jest'), 1: (0, 'launchd')}, 5))
+        self.assertEqual([], rt.leftover_tests({}, 9))
+
+
 def rollout_line(kind, at='2026-11-05T05:00:00.000Z', **item):
     return json.dumps({'timestamp': at, 'type': 'event_msg', 'payload': {'type': 'item_completed', 'item': {'type': kind, **item}}})
 
