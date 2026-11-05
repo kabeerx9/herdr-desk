@@ -370,6 +370,11 @@ class GateTests(unittest.TestCase):
 
 
 class ParallelWorkerTests(unittest.TestCase):
+    def test_claude_roles_run_commands_in_bash(self):
+        argv = team.argv_for({'cli': 'claude', 'promptText': ''}, '')
+        settings = json.loads(argv[argv.index('--settings') + 1])
+        self.assertEqual('/bin/bash', settings['env']['CLAUDE_CODE_SHELL'])
+
     def test_two_copies_of_a_role_started_in_one_second_get_different_branches(self):
         with mock.patch.object(team, 'sh'), mock.patch.object(team.time, 'strftime', return_value='1105-101010'):
             first = team.add_worktree({'name': 'r', 'top': '/r'}, {'id': 'worker'})

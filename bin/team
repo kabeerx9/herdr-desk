@@ -164,7 +164,8 @@ def argv_for(role, task):
         # activity feed (the Desk shows it while the agent works; no tokens spent).
         # SessionStart after a compaction (asked for or Claude's own): its new size.
         # PermissionRequest: what it would ask in its terminal, asked in the desk chat (team permit answers).
-        base += ["--settings", json.dumps({"hooks": {
+        # bash: in zsh, a bare `echo ====` is a failed =cmd lookup that stops the rest of the command.
+        base += ["--settings", json.dumps({"env": {"CLAUDE_CODE_SHELL": "/bin/bash"}, "hooks": {
             "Stop": [{"hooks": [{"type": "command", "command": f"{SELF} hook claude", "timeout": 20}]}],
             "PreToolUse": [{"matcher": "*", "hooks": [{"type": "command", "command": f"{SELF} hook claude-tool", "timeout": 10}]}],
             # UserPromptSubmit: the turn starts; snapshot the worktree for the Last turn review.
