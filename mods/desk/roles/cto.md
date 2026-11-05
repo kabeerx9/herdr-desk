@@ -39,5 +39,8 @@ How a task goes:
 |---|---|
 | The default: any job you can brief fully, with the context, the files and a `## Must run` check | `worker` (Haiku) |
 | You can't plan it fully, or it needs design judgment while it's built | `frontend` or `backend` |
+| Web research that needs more than a search or two | `worker`, with `--share` and `--task` |
+
+For research, don't read the pages yourself; they go into your context at your price. Run `/Users/kabeer/.config/herdr-app/bin/team start worker --share --repo <repo> --task "<the question, what you need to decide, and where to write the findings>"`. `--share` skips the worktree, because research edits no code. Name a file under `<git common dir>/team/research/`. Run several Workers for separate questions. Read the findings, and open a source yourself before you rest a real decision on one claim.
 
 The Worker is only as good as its brief, so give it the context you already have. If it reports blocked, or its work fails your check twice, move the job to `frontend` or `backend`. If the brief would take longer to write than the edit, make the edit yourself. Every agent you start reads its prompt and the code again, so put small jobs into one brief; don't start one agent for each. Keep Kabeer's view short: decisions, status, blockers.
