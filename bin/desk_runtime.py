@@ -611,6 +611,21 @@ def codex_turns(path, limit=None, tail=None):
     return {"supported": True, "turns": turns[-limit:] if limit else turns, "partial": bool(cut or len(turns) > limit)}
 
 
+def findings_listed(text):
+    """How many list lines a review report holds: one for each finding."""
+    return sum(1 for line in str(text or "").splitlines() if re.match(r"\s*([-*]|\d+[.)])\s+\S", line))
+
+
+def gate_line(name, verdict):
+    """The gate's result as one line for Kabeer's chat."""
+    head = (verdict.get("head") or "")[:8]
+    if verdict["verdict"] == "pass":
+        how = "the CTO read the diff, no Reviewer" if (verdict.get("review") or {}).get("kind") == "cto" else "review is clean"
+        return "Gate passed for %s at `%s`: %s." % (name, head, how)
+    word = "needs you" if verdict["verdict"] == "escalate" else "not passed"
+    return "Gate %s for %s at `%s`: %s." % (word, name, head, "; ".join(verdict.get("reasons") or []))
+
+
 # ── Leftover processes ───────────────────────────────────────────────────────
 
 TEST_RUNNER = re.compile(r"(^|[\s/])(jest|vitest)(\s|$)")

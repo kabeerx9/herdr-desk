@@ -7,7 +7,7 @@ export const EVENTS = ["desk", "start", "fresh", "compact", "permission", "permi
 export const KIND = {
   done: { word: "done", mark: "done" }, blocked: { word: "blocked", mark: "blocked" }, update: { word: "update" },
   flag: { word: "left locally", mark: "failed" }, finish: { word: "wrapped up" }, ask: { word: "asks" },
-  answer: { word: "answers" }, route: { word: "passes on" }, context: { word: "long context" },
+  answer: { word: "answers" }, route: { word: "passes on" }, context: { word: "long context" }, gate: { word: "merge gate" },
 };
 export const ASIDE = ["ask", "answer", "route"];
 const SIDE = ["ask", "answer", "route", "done", "blocked", "update", "flag"];

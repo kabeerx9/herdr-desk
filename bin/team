@@ -39,7 +39,7 @@ from desk_runtime import Store as RuntimeStore, RuntimeError as DeskRuntimeError
 from desk_runtime import attention as runtime_attention
 from desk_runtime import find_queue as runtime_find_queue, queue_item as runtime_queue_item
 from desk_runtime import foreground_agent, recover_interrupted_claims, reorder as runtime_reorder, session_view as runtime_session_view, upsert_session
-from desk_runtime import (classify_launch_failure, leftover_tests, codex_turns, codex_usage, find_codex_rollout, find_transcript, gate_verdict, light_gate_verdict, transcript_usage, parse_contract, parse_criteria, runner_variants,
+from desk_runtime import (classify_launch_failure, findings_listed, gate_line, leftover_tests, codex_turns, codex_usage, find_codex_rollout, find_transcript, gate_verdict, light_gate_verdict, transcript_usage, parse_contract, parse_criteria, runner_variants,
                           session_cli, step_text, transcript_timeline, transcript_title, transcript_turns, triage_apply, triage_clear)
 from desk_runtime import DIALOG_OPEN, NO_INPUT, cleared_transcript, command_result, screen_state
 from desk_runtime import diff_stat, dialog_matches, permission_dialog, pick_option, task_line
@@ -792,6 +792,9 @@ def report(args):
         die("--blocking is a count of blocking findings (0 or more)", 2)
     if args.kind == "done" and labels.get("role") == "reviewer" and blocking is None:
         die("a review's done report says how many findings block the merge: --blocking N (0 when none)", 2)
+    if args.kind == "done" and labels.get("role") == "reviewer" and (blocking or 0) > findings_listed(text):
+        die("Kabeer reads this report in the chat: list each finding as its own \"- \" line in the text (%d blocking, %d listed)"
+            % (blocking, findings_listed(text)), 2)
     cwd = (me.get("foreground") or {}).get("cwd") or me.get("cwd")
     head = getattr(args, "head", None) or (git_out(cwd, "rev-parse", "HEAD") if cwd and args.kind == "done" else None)
     if args.kind == "done":
@@ -1856,10 +1859,13 @@ def runtime_gate(args):
     if light is not None:
         role = next((r for r in load_roles() if r["id"] == eng.get("role")), {})
         verdict = light_gate_verdict(eng, head, dirty, branch_files(cwd), light, bool(role.get("light_review")))
-        if verdict["verdict"] == "pass":
-            chat_append(eng.get("task"), {"from": "cto", "kind": "say", "text": "Skipped the Reviewer for %s: %s" % (role.get("name", eng.get("role")), light.strip())})
     else:
         verdict = gate_verdict(eng, data["sessions"], chats, head, dirty)
+    # Kabeer sees each result once, whoever asked; a repeat of the same result says nothing new.
+    name = next((r["name"] for r in load_roles() if r["id"] == eng.get("role")), eng.get("role"))
+    line = gate_line(name, verdict) + (" Checked: %s" % light.strip() if light and verdict["verdict"] == "pass" else "")
+    if not any(c.get("kind") == "gate" and c.get("text") == line for c in chats):
+        chat_append(eng.get("task"), {"from": "cto", "kind": "gate", "text": line})
     print(json.dumps({"address": args.address, "role": eng.get("role"), "cwd": cwd,
                       "branch": git_out(cwd, "rev-parse", "--abbrev-ref", "HEAD") if head else None, **verdict}))
     if verdict["verdict"] != "pass":

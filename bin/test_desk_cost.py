@@ -82,6 +82,22 @@ class Cost(unittest.TestCase):
         self.assertIsNone(rt.codex_usage(['{}']))
 
 
+class ReportsForKabeer(unittest.TestCase):
+    def test_list_lines_count_as_findings(self):
+        self.assertEqual(3, rt.findings_listed('/x.md: 2 blocking\n- one\n* two\n  1. three\n-not a list\n- '))
+        self.assertEqual(0, rt.findings_listed('/x.md: 3 blocking findings: a, b, c'))
+        self.assertEqual(0, rt.findings_listed(None))
+
+    def test_the_gate_line_says_what_happened(self):
+        passed = rt.gate_line('Frontend', {'verdict': 'pass', 'head': 'abcdef1234', 'review': {'blocking': 0}})
+        self.assertEqual('Gate passed for Frontend at `abcdef12`: review is clean.', passed)
+        light = rt.gate_line('Worker', {'verdict': 'pass', 'head': 'h', 'review': {'kind': 'cto'}})
+        self.assertIn('no Reviewer', light)
+        failed = rt.gate_line('Frontend', {'verdict': 'fail', 'head': 'h', 'reasons': ['a', 'b']})
+        self.assertEqual('Gate not passed for Frontend at `h`: a; b.', failed)
+        self.assertIn('needs you', rt.gate_line('Frontend', {'verdict': 'escalate', 'head': None, 'reasons': []}))
+
+
 class LeftoverTests(unittest.TestCase):
     TABLE = {1: (0, 'launchd'), 10: (1, 'codex --no-daemon -m gpt'), 20: (10, 'npm exec jest --watchman=false features'),
              21: (20, 'node /wt/node_modules/.bin/jest --watchman=false'), 30: (10, '/bin/zsh -lc team report done'),
