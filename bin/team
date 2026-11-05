@@ -505,7 +505,8 @@ def accept_trust(name, cli):
 
 def add_worktree(repo, role):
     stamp = time.strftime("%m%d-%H%M%S")
-    branch = f"team/{role['id']}-{stamp}"
+    # The random part: two copies of a role can start in the same second.
+    branch = f"team/{role['id']}-{stamp}-{secrets.token_hex(2)}"
     path = os.path.join(WORKTREES, repo["name"], re.sub(r"[^A-Za-z0-9._-]+", "-", branch))
     sh(["git", "worktree", "add", "-b", branch, path, "HEAD"], cwd=repo["top"], check=True)
     return path, branch

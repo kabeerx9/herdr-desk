@@ -13,6 +13,7 @@ import tempfile
 import time
 import types
 import unittest
+from unittest import mock
 from pathlib import Path
 from unittest.mock import patch
 
@@ -365,6 +366,16 @@ class GateTests(unittest.TestCase):
         eng = {**self.ENG, 'role_config': {'cli': 'codex'}}
         v = rt.gate_verdict(eng, [eng, self.reviewer()], [self.done()], 'h2')
         self.assertIn("engineer's own CLI", ' '.join(v['reasons']))
+
+
+
+class ParallelWorkerTests(unittest.TestCase):
+    def test_two_copies_of_a_role_started_in_one_second_get_different_branches(self):
+        with mock.patch.object(team, 'sh'), mock.patch.object(team.time, 'strftime', return_value='1105-101010'):
+            first = team.add_worktree({'name': 'r', 'top': '/r'}, {'id': 'worker'})
+            second = team.add_worktree({'name': 'r', 'top': '/r'}, {'id': 'worker'})
+        self.assertNotEqual(first, second)
+        self.assertTrue(first[1].startswith('team/worker-1105-101010-'))
 
 
 class GateCommandTests(Base):

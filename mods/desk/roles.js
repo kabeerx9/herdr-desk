@@ -115,7 +115,8 @@ export async function findBriefs(folders) {
     const [common, path, mtime, title] = line.split("\t");
     const main = common.endsWith("/.git") ? common.slice(0, -5) : common;
     const parts = path.split("/"), desk = parts.at(-2) === "briefs" ? null : parts.at(-2);
-    return { role: parts.at(-1).replace(/\.md$/, ""), desk, path, common, main, repo: main.split("/").pop(),
+    // worker-2.md is a second brief for the worker role.
+    return { role: parts.at(-1).replace(/\.md$/, "").replace(/-\d+$/, ""), desk, path, common, main, repo: main.split("/").pop(),
       title: title || "(empty brief)", at: Number(mtime) * 1000 };
   }).sort((a, b) => b.at - a.at);
 }
@@ -123,7 +124,7 @@ export async function findBriefs(folders) {
 // Moves a brief out of the queue (team/sent/ or team/dismissed/) and returns where it went.
 export async function fileBrief(brief, to) {
   const dir = `${brief.common}/team/${to}`;
-  const dest = `${dir}/${brief.role}-${Date.now()}.md`;
+  const dest = `${dir}/${brief.path.split("/").pop().replace(/\.md$/, "")}-${Date.now()}.md`;
   const r = await exec("sh", ["-c", 'mkdir -p "$1" && mv "$2" "$3"', "file", dir, brief.path, dest]);
   if (r.code !== 0) throw new Error(r.stderr.trim() || "couldn't move the brief");
   return dest;
