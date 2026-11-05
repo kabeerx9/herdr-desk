@@ -1,5 +1,5 @@
 {
-  "_help": "Team roles for the Desk. cli: claude | codex (or give a full argv). model: what that CLI's --model / -m takes. effort: claude --effort / codex model_reasoning_effort (low, medium, high). tools: Claude's built-in tools for the role (fewer tools = a smaller prompt on every call); omit for the default set. Claude roles skip MCP servers unless mcp is true. prompt: a file in roles/ added to the agent's system prompt. icon: an svg in icons/, without .svg; avatar: a png. worktree: true for roles that edit code; each gets its own git worktree. on_request: true for roles that start only when Kabeer asks (team start needs --requested; the Desk's buttons pass it). bin/team starts every role; roles/protocol.md is added to every role's prompt. light_review: true lets the CTO pass the merge gate on its own diff read (team gate --light), never for risky paths. fresh_at: context size in tokens past which the Desk suggests a fresh start (a role can set its own). runners: optional [{cli, model, effort}, ...] tried in order; team start moves to the next only when one fails to launch for a usage limit or sign-in, and pins the one that ran to the session (resume keeps it). Without runners a role launches its own cli/model/effort as before.",
+  "_help": "Team roles for the Desk. cli: claude | codex (or give a full argv). model: what that CLI's --model / -m takes. effort: claude --effort / codex model_reasoning_effort (low, medium, high). tools: Claude's built-in tools for the role (fewer tools = a smaller prompt on every call); omit for the default set. Claude roles skip MCP servers unless mcp is true. prompt: a file in roles/ added to the agent's system prompt. icon: an svg in icons/, without .svg; avatar: a png. worktree: true for roles that edit code; each gets its own git worktree. on_request: true for roles that start only when Kabeer asks (team start needs --requested; the Desk's buttons pass it). bin/team starts every role; roles/protocol.md is added to every role's prompt. light_review: true lets the CTO pass the merge gate on its own diff read (team gate --light), never for risky paths. permission_mode: auto is Claude's auto mode, or Codex's --approve-for-me. fresh_at: context size in tokens past which the Desk suggests a fresh start (a role can set its own). runners: optional [{cli, model, effort}, ...] tried in order; team start moves to the next only when one fails to launch for a usage limit or sign-in, and pins the one that ran to the session (resume keeps it). Without runners a role launches its own cli/model/effort as before.",
   "fresh_at": 250000,
   "roles": [
     {
@@ -123,7 +123,8 @@
       "icon": "roles/reviewer",
       "avatar": "avatars/reviewer.png",
       "worktree": false,
-      "on_request": true
+      "on_request": true,
+      "permission_mode": "auto"
     },
     {
       "id": "qa",

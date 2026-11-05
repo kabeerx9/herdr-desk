@@ -370,6 +370,12 @@ class GateTests(unittest.TestCase):
 
 
 class ParallelWorkerTests(unittest.TestCase):
+    def test_codex_auto_mode_keeps_the_sandbox(self):
+        argv = team.argv_for({'cli': 'codex', 'promptText': '', 'permission_mode': 'auto'}, '')
+        self.assertIn('--approve-for-me', argv)
+        self.assertNotIn('--dangerously-bypass-approvals-and-sandbox', argv)
+        self.assertNotIn('--approve-for-me', team.argv_for({'cli': 'codex', 'promptText': ''}, ''))
+
     def test_claude_roles_run_commands_in_bash(self):
         argv = team.argv_for({'cli': 'claude', 'promptText': ''}, '')
         settings = json.loads(argv[argv.index('--settings') + 1])

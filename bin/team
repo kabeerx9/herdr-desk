@@ -150,6 +150,8 @@ def argv_for(role, task):
         # a JSON string is a valid TOML basic string, and a JSON list a TOML array.
         base = ["codex", "--no-daemon"] + (["-m", role["model"]] if role.get("model") else [])
         base += ["-c", f'model_reasoning_effort="{effort}"'] if effort else []
+        # Codex's auto mode: the sandbox stays on, and a reviewer model answers its approval requests.
+        base += ["--approve-for-me"] if role.get("permission_mode") == "auto" else []
         base += ["-c", "notify=" + json.dumps([SELF, "hook", "codex"])]
         base += ["-c", "developer_instructions=" + json.dumps(prompt)] if prompt else []
     else:
