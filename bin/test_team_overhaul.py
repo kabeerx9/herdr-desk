@@ -2,6 +2,7 @@
 turn snapshots. Real CLI functions, temp state dirs and fixture repos; no live terminal is touched."""
 import contextlib
 import copy
+from datetime import datetime, timezone
 import importlib.machinery
 import importlib.util
 import io
@@ -501,6 +502,49 @@ class RunnerTests(Base):
         code, out, launches, killed = self.launch({'t2': 'usage limit reached', 't3': 'Please run /login'})
         self.assertEqual((2, 't3'), (len(launches), out['address']))
         self.assertIn('every runner failed (auth)', out['note'])
+
+
+class FinalReplyHookTests(unittest.TestCase):
+    """A hand post stands in for the final message only when nothing happened after it."""
+    START = 1_793_990_000_000
+
+    def iso(self, ms):
+        return datetime.fromtimestamp(ms / 1000, timezone.utc).strftime('%Y-%m-%dT%H:%M:%S.%f')[:-3] + 'Z'
+
+    def stop(self, posts, tools, awaiting='chat', transcript=True):
+        """Run the Stop hook for a CTO turn. Times are ms after the turn began. Returns what it posted."""
+        lines = [{'type': 'user', 'timestamp': self.iso(self.START), 'message': {'content': 'go'}}]
+        lines += [{'type': 'assistant', 'timestamp': self.iso(self.START + at),
+                   'message': {'content': [{'type': 'tool_use', 'name': 'Bash', 'input': {}}]}} for at in tools]
+        rows = [{'address': 't1', 'kind': 'say', 'at': self.START + at} for at in posts]
+        info = {'labels': {'task': 'desk', 'role': 'cto', 'awaiting': f'{awaiting}:{self.START}' if awaiting else ''}}
+        with tempfile.NamedTemporaryFile('w', suffix='.jsonl') as f:
+            f.write('\n'.join(json.dumps(x) for x in lines))
+            f.flush()
+            payload = {'last_assistant_message': 'The answer.', **({'transcript_path': f.name} if transcript else {})}
+            with patch.object(team, 'ME', 't1'), patch.object(team, 'terminal', return_value=info), \
+                    patch.object(team, 'sh'), patch.object(team, 'wake_queue'), patch.object(team, 'clear_activity'), \
+                    patch.object(team, 'runtime_record'), patch.object(team.subprocess, 'Popen'), \
+                    patch.object(team, 'chat_read', return_value=rows), patch.object(team, 'chat_append') as append, \
+                    patch.object(team.sys, 'stdin', io.StringIO(json.dumps(payload))):
+                team.hook(types.SimpleNamespace(cli='claude', payload=[]))
+        return [c.args[1]['text'] for c in append.call_args_list]
+
+    def test_a_plan_posted_before_the_work_does_not_swallow_the_answer(self):
+        self.assertEqual(['The answer.'], self.stop(posts=[2000], tools=[1000, 5000, 9000]))
+
+    def test_the_same_holds_for_a_turn_a_report_started(self):
+        self.assertEqual(['The answer.'], self.stop(posts=[2000], tools=[1000, 5000], awaiting=None))
+
+    def test_a_report_posted_as_the_last_step_is_not_repeated(self):
+        self.assertEqual([], self.stop(posts=[2000, 9500], tools=[1000, 9000]))
+        self.assertEqual([], self.stop(posts=[9500], tools=[9000], awaiting=None))
+
+    def test_a_turn_with_no_hand_post_still_posts(self):
+        self.assertEqual(['The answer.'], self.stop(posts=[], tools=[1000]))
+
+    def test_without_a_transcript_any_hand_post_counts(self):
+        self.assertEqual([], self.stop(posts=[2000], tools=[], transcript=False))
 
 
 class TurnSnapshotHookTests(Base):

@@ -637,6 +637,24 @@ def gate_line(name, verdict):
     return "Gate %s for %s at `%s`: %s." % (word, name, head, "; ".join(verdict.get("reasons") or []))
 
 
+def last_tool_at(path):
+    """When the turn's newest tool call was made. None if the transcript shows none."""
+    try:
+        lines, _ = read_tail(path)
+    except (OSError, TypeError):
+        return None
+    for line in reversed(lines):
+        try:
+            entry = json.loads(line)
+        except ValueError:
+            continue
+        content = (entry.get("message") or {}).get("content") if isinstance(entry, dict) else None
+        if entry.get("type") == "assistant" and isinstance(content, list) and any(
+                isinstance(b, dict) and b.get("type") == "tool_use" for b in content):
+            return ts_ms(entry.get("timestamp"))
+    return None
+
+
 def turn_started(path):
     """When this turn began: the last line a person or agent sent, not a tool's result. None if unknown."""
     try:

@@ -42,7 +42,7 @@ from desk_runtime import JOB_TAIL, nearest_base, read_tail, transcript_jobs
 from desk_runtime import attention as runtime_attention
 from desk_runtime import find_queue as runtime_find_queue, queue_item as runtime_queue_item
 from desk_runtime import foreground_agent, recover_interrupted_claims, reorder as runtime_reorder, session_view as runtime_session_view, upsert_session
-from desk_runtime import (classify_launch_failure, turn_started, findings_listed, gate_line, leftover_tests, codex_turns, codex_usage, find_codex_rollout, find_transcript, gate_verdict, light_gate_verdict, transcript_usage, parse_contract, parse_criteria, runner_variants,
+from desk_runtime import (classify_launch_failure, last_tool_at, turn_started, findings_listed, gate_line, leftover_tests, codex_turns, codex_usage, find_codex_rollout, find_transcript, gate_verdict, light_gate_verdict, transcript_usage, parse_contract, parse_criteria, runner_variants,
                           session_cli, step_text, transcript_timeline, transcript_title, transcript_turns, triage_apply, triage_clear)
 from desk_runtime import DIALOG_OPEN, NO_INPUT, cleared_transcript, command_result, screen_state
 from desk_runtime import diff_stat, dialog_matches, permission_dialog, pick_option, task_line
@@ -1103,7 +1103,7 @@ def hook(args):
         # A turn that a report or a finished task started, not a chat message. Kabeer talks to the
         # CTO, so what it concludes reaches the chat too, unless it already posted this turn.
         since = turn_started((payload or {}).get("transcript_path")) or 0
-        if not any(r.get("address") == ME and r.get("kind") in ("say", "answer") and r.get("at", 0) >= since for r in chat_read(slug)[-30:]):
+        if not closed_by_hand(slug, since, (payload or {}).get("transcript_path")):
             chat_append(slug, {"from": who, "address": ME, "kind": "say", "text": msg.strip(), "auto": True})
         return
     if not awaiting or not slug or not who:
@@ -1119,8 +1119,7 @@ def hook(args):
     if not msg:
         return
     # It posted by hand this turn after all: don't post twice.
-    if any(r.get("address") == ME and r.get("kind") in ("say", "answer") and r.get("at", 0) >= int(since or 0)
-           for r in chat_read(slug)[-30:]):
+    if closed_by_hand(slug, int(since or 0), (payload or {}).get("transcript_path")):
         return
     if what.startswith("ask-"):
         qid = what[4:]
@@ -1136,6 +1135,17 @@ def hook(args):
                            **({"delivered_to": [asker]} if asker and not why else {})})
     else:
         chat_append(slug, {"from": who, "address": ME, "kind": "say", "text": msg, "auto": True})
+
+
+def closed_by_hand(slug, since, transcript):
+    """Did this turn's own post close it? A plan posted before the work isn't the answer, so a post
+    counts only when no tool ran after it. Without a transcript (Codex), any post counts."""
+    posts = [r.get("at", 0) for r in chat_read(slug)[-30:]
+             if r.get("address") == ME and r.get("kind") in ("say", "answer") and r.get("at", 0) >= since]
+    if not posts:
+        return False
+    last_tool = last_tool_at(transcript)
+    return last_tool is None or max(posts) >= last_tool
 
 
 def permission_detail(inp):
