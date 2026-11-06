@@ -246,3 +246,20 @@ test('a question history line says how it ended', () => {
   assert.equal(questionLine(m, 'expired').how, 'no answer in time');
   assert.equal(questionLine(m, 'terminal').how, 'answered in its terminal');
 });
+
+test('finished members group by role, newest first, and skip the live and other desks', async () => {
+  const { finishedRoles } = await import('./model.js');
+  const sessions = [
+    { task: 'a', role: 'frontend', address: 't1', state: 'finished', at: 10, title: 'Tabs' },
+    { task: 'a', role: 'frontend', address: 't2', state: 'finished', at: 30, title: 'Pills' },
+    { task: 'a', role: 'worker', address: 't3', state: 'finished', at: 20 },
+    { task: 'a', role: 'qa', address: 't4', state: 'disconnected', at: 40 },
+    { task: 'a', role: 'backend', address: 't5', state: 'finished', at: 50 },
+    { task: 'b', role: 'reviewer', address: 't6', state: 'finished', at: 60 },
+  ];
+  assert.deepEqual(finishedRoles(sessions, 'a', new Set(['t5'])), [
+    { role: 'frontend', address: 't2', count: 2, at: 30, titles: ['Pills', 'Tabs'] },
+    { role: 'worker', address: 't3', count: 1, at: 20, titles: [] },
+  ]);
+  assert.deepEqual(finishedRoles(undefined, 'a', new Set()), []);
+});

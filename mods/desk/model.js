@@ -108,6 +108,20 @@ export function windowStart(total, { limit = WINDOW, following = true, from = nu
   return Math.max(0, Math.min(from, newest));
 }
 
+// Who finished work on a desk, one entry per role, newest first. Closed agents leave the live
+// team, so this is what still says who worked here. `live` holds the addresses still running.
+export function finishedRoles(sessions, task, live) {
+  const byRole = new Map();
+  const done = (sessions ?? []).filter((s) => s.task === task && s.state === "finished" && !live.has(s.address));
+  for (const s of [...done].sort((a, b) => (b.at ?? 0) - (a.at ?? 0))) {
+    const row = byRole.get(s.role) ?? { role: s.role, address: s.address, count: 0, at: s.at ?? 0, titles: [] };
+    row.count += 1;
+    if (s.title) row.titles.push(s.title);
+    byRole.set(s.role, row);
+  }
+  return [...byRole.values()];
+}
+
 // ── steps, tools and thoughts ────────────────────────────────────────────────
 
 const STEP_KIND = { Read: "read", Glob: "search", Grep: "search", Bash: "command", Edit: "edit", MultiEdit: "edit", Write: "edit",

@@ -5,6 +5,7 @@ import { icon, button, statusMark, shownStatus, iconButton, offMain, mostUrgent,
 import { agentIcon, agentCli } from "./roles.js";
 import { runtimeData, openDesk, sessionOf, refreshRuntime } from "./workflows.js";
 import { Desks, deskMembers, showTerminals, openTerminal } from "./desks.js";
+import { finishedRoles } from "./model.js";
 
 // The desk card: a floating block at the chat's top right (layouts/desk-chat.json, "desk-card"),
 // T3 Code's top-right block. Open, it shows Team, Lineage, Changes and PRs under a 44px header,
@@ -317,6 +318,13 @@ export class DeskCard {
       }),
     ];
     const alone = members.every((m) => m.role === "cto") && members.length <= 1;
+    // Closed agents leave the list above; keep who finished work here, one line per role.
+    const finished = finishedRoles(runtimeData().sessions, d.slug, new Set(members.map((m) => m.address)));
+    const finishedRows = finished.map((f) => {
+      const role = this.roles.byId(f.role), name = role?.name ?? f.role;
+      return this.row(t, `done-${f.role}`, { lead: this.face(t, { address: f.address, role: f.role }, role), muted: true,
+        name: f.count > 1 ? `${name} ×${f.count}` : name, mark: statusMark(t, "done", 12), tip: f.titles.join(" · ") || `${name} finished here` });
+    });
     const add = iconButton(t, "card-add", this.adding ? "minus" : "plus", this.adding ? "Cancel" : "Add a member",
       (_e, cx) => { this.adding = !this.adding; cx.notify(); });
     const n = (k) => members.filter((m) => m.status === k).length;
@@ -325,6 +333,8 @@ export class DeskCard {
     return v_flex().child(this.head(t, "team", "Team", meta, add))
       .when(this.adding, (el) => el.child(this.adder(t, d, members)))
       .children(rows.length ? rows : [this.note(t, "Nobody running.")])
+      .when(finishedRows.length > 0, (el) => el.child(this.note(t, "Finished here")).children(finishedRows))
+      .when(alone && !subs.length && !finishedRows.length && !this.adding, (el) => el.child(this.note(t, "Nobody else has worked on this desk.")))
       .when(alone && !this.adding, (el) => el.child(this.bringRow(t)));
   }
 
