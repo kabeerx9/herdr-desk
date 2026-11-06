@@ -1184,8 +1184,8 @@ def write_permit(pid, data):
 
 def await_permit(path, deadline, ready):
     """What the Desk wrote to this request's answer file, or None: out of time, or answered in the
-    terminal. Claude shows the same prompt there meanwhile (Herdr: blocked); answered there, the
-    agent stops being blocked, and the request is over."""
+    terminal. Older Claudes show the same prompt there meanwhile (Herdr: blocked); answered there,
+    the agent stops being blocked, and the request is over. Claude 2.1.319 waits for the hook first."""
     seen_blocked = False
     while time.time() < deadline:
         try:
@@ -1564,6 +1564,18 @@ def _same_prompt(a, b):
         and [o["label"] for o in a["options"]] == [o["label"] for o in b["options"]]
 
 
+def answer_hook(args, hook, name):
+    """Answer a request whose hook is waiting with no prompt on screen, under the same checks."""
+    if args.choice not in ("allow", "always", "deny"):
+        refuse("bad_choice", "choose allow, always or deny")
+    if args.expect and args.expect != hook.get("detail"):
+        refuse("different", f"{name} is asking about something else now", showing=str(hook.get("detail"))[:400], open_terminal=True)
+    if args.choice == "always" and not hook.get("always"):
+        refuse("no_option", "Claude offered no rule to remember for this one: use Allow", open_terminal=False)
+    write_permit(hook["id"], {"decision": args.choice})
+    print(json.dumps({"ok": True, "address": args.address, "choice": args.choice, "via": "hook", "subject": str(hook.get("detail"))[:400]}))
+
+
 def approve(args):
     """Answer the Claude permission prompt an agent's screen shows, from the Desk. It refuses unless
     a Claude permission prompt is showing and (with --expect) asks about exactly that command or
@@ -1582,7 +1594,11 @@ def approve(args):
         refuse("unsupported", f"{name} runs {cli}: answer its prompt in its terminal", open_terminal=True)
     dialog = permission_dialog(screen_of(addr), "claude")
     if not dialog:
-        refuse("no_prompt", f"{name} isn't showing a permission prompt any more", open_terminal=False)
+        # Claude runs the PermissionRequest hook first and draws its prompt only if the hook gives up.
+        waiting = None if getattr(args, "peek", False) else pending_permit(labels.get("task"), addr)
+        if not waiting:
+            refuse("no_prompt", f"{name} isn't showing a permission prompt any more", open_terminal=False)
+        return answer_hook(args, waiting, name)
     if getattr(args, "peek", False):
         hook = pending_permit(labels.get("task"), addr)
         print(json.dumps({"address": addr, "cli": cli, **dialog,

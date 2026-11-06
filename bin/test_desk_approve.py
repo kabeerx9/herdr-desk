@@ -161,6 +161,32 @@ class ApproveTests(Base):
         self.assertEqual([], self.term.keys())
         self.assertEqual(1, len(self.chat("permission")))  # the hook's own record, not a second one
 
+    def hook_alone(self, always=None):
+        """Claude runs the hook first: it draws no prompt while the hook waits on the Desk."""
+        self.term.screen = PROMPT
+        team.chat_append("desk", {"from": "cto", "address": "t1", "kind": "permission", "id": "ab12cd34", "tool": "Bash", "detail": CMD,
+                                  "always": always})
+        return Path(team.PERMITS) / "ab12cd34.json"
+
+    def test_a_waiting_hook_is_answered_with_no_prompt_on_screen(self):
+        permit = self.hook_alone()
+        code, out = self.approve("allow", CMD)
+        self.assertEqual((0, "hook"), (code, out["via"]))
+        self.assertEqual({"decision": "allow"}, json.loads(permit.read_text()))
+        self.assertEqual([], self.term.keys())
+
+    def test_a_click_for_another_command_never_answers_the_waiting_hook(self):
+        permit = self.hook_alone()
+        code, _ = self.approve("allow", "rm -rf /")
+        self.assertEqual((2, "different"), (code, self.error()["code"]))
+        self.assertFalse(permit.exists())
+
+    def test_always_needs_a_rule_from_claude(self):
+        permit = self.hook_alone()
+        code, _ = self.approve("always", CMD)
+        self.assertEqual((2, "no_option"), (code, self.error()["code"]))
+        self.assertFalse(permit.exists())
+
     def test_peek(self):
         code, out = self.approve(peek=True)
         self.assertEqual((0, "Bash command", 3), (code, out["title"], len(out["options"])))
