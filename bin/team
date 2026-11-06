@@ -2523,8 +2523,9 @@ def git_out(cwd, *args):
 
 
 def finish(args):
-    """Wraps up one agent. Anything left locally (uncommitted or untracked files, commits on no
-    remote and not merged into the main checkout's branch) is flagged and nothing is removed.
+    """Wraps up one agent. In a team worktree, anything left locally (uncommitted or untracked files,
+    commits on no remote and not merged into the main checkout's branch) is flagged and nothing is
+    removed. In the main checkout it's only noted: the agent closes and the files stay.
     Otherwise a team worktree (~/.herdr/worktrees, team/* branch) is removed with plain
     `git worktree remove` and `git branch -d`, which git itself refuses on unsaved work.
     The main checkout is never removed. Then the agent's terminal is ended."""
@@ -2540,7 +2541,8 @@ def finish(args):
     who = labels.get("role") or info.get("name") or target
     slug = labels.get("task")
     status = (info.get("status") or {}).get("state")
-    if status == "working" and not args.force:
+    # An agent running this on itself is always "working": its turn is what's asking.
+    if status == "working" and not args.force and target != ME:
         rec = chat_append(slug, {"from": who, "address": target, "kind": "flag",
                                  "text": "Still working, so not wrapped up. Wrap up again once it stops."})
         print(json.dumps({"finished": False, "why": "working", **rec}))
@@ -2565,10 +2567,10 @@ def finish(args):
                 left.append(f"{ahead} commit{'s' if ahead != '1' else ''} on {branch} not pushed or merged into {main_branch}")
         team_worktree = top != repo["main"] and inside(top, WORKTREES) and (branch or "").startswith("team/")
         where = f"{repo['name']}" + (f" ({branch})" if branch else "")
-        # A read-only role in the main checkout doesn't own what's there (likely Kabeer's own work).
-        role = next((r for r in load_roles() if r["id"] == labels.get("role")), None)
-        if left and top == repo["main"] and role and not role.get("worktree"):
-            notes.append(f"{where} has " + "; ".join(left) + " (not this agent's, left as is)")
+        # Nothing is removed from the main checkout, and what's there may be Kabeer's own work, so
+        # it's a note. Only a team worktree holds work that closing the agent could lose.
+        if left and top == repo["main"]:
+            notes.append(f"{where} has " + "; ".join(left) + " (left as is)")
             left = []
         if left:
             text = f"Left locally in {where}: " + "; ".join(left) + ". Nothing removed."

@@ -675,6 +675,32 @@ class Closing(Base):
         self.call(team.finish, address='t1', keep_open=False, keep_worktree=True, force=False)
         self.assertEqual([('kill', True)], self.order)
 
+    def wrap(self, status='idle', me=None):
+        repo = Path(self.tmp.name) / 'shared'
+        git_repo(repo)
+        (repo / 'a.txt').write_text('Kabeer was editing this\n')
+        self.info['t1'].update(cwd=str(repo), foreground={'cwd': str(repo)}, status={'state': status})
+        self.info['t1']['labels'] = {**self.info['t1']['labels'], 'role': 'worker'}
+        with patch.object(team, 'ME', me):
+            self.call(team.finish, address='t1', keep_open=False, keep_worktree=False, force=False)
+        return repo
+
+    def test_dirty_files_in_the_main_checkout_never_block_a_wrap_up(self):
+        repo = self.wrap()
+        self.assertEqual([('kill', True)], self.order)
+        self.assertEqual('finish', self.chat()[-1]['kind'])
+        self.assertIn('1 uncommitted or untracked file (left as is)', self.chat()[-1]['text'])
+        self.assertEqual('Kabeer was editing this\n', (repo / 'a.txt').read_text())
+
+    def test_an_agent_wrapping_itself_up_is_not_refused_for_working(self):
+        self.wrap(status='working', me='t1')
+        self.assertEqual([('kill', True)], self.order)
+
+    def test_the_desk_still_waits_for_a_working_agent(self):
+        self.wrap(status='working')
+        self.assertEqual([], self.order)
+        self.assertIn('Still working', self.chat()[-1]['text'])
+
     def test_state_sees_a_raw_kill_after_done(self):
         team.runtime_store().mutate(lambda d: team.session_by_address(d, 't1').update(evidence_at=5))
         del self.info['t1']
