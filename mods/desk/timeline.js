@@ -258,7 +258,7 @@ export function messageRow(o, t, slug, row, ctx) {
     .child(who(o, t, `${id}-who`, link, div().flex_none().text_size(aside ? 12 : 12.5).font_semibold().text_color(aside ? t.muted : t.foreground).child(role?.name ?? m.from)))
     .when(Boolean(to), (el) => el.child(div().flex_none().text_size(11.5).text_color(t.dim).child(`to ${to}`)))
     .when(Boolean(kind), (el) => el.child(h_flex().flex_none().gap(4).items_center().text_size(11.5).text_color(t.muted)
-      .when(Boolean(kind.mark), (x) => x.child(statusMark(t, kind.mark, 11))).child(kind.word)))
+      .when(Boolean(kind.mark), (x) => x.child(statusMark(t, kind.mark, 11, { still: true }))).child(kind.word)))
     // How "done" was established: checked by the agent itself, passed on, or only claimed.
     .when(Boolean(m.evidence), (el) => el.child(evidenceLabel(t, `${id}-ev`, m.evidence)))
     .child(div().flex_none().text_size(11.5).text_color(t.dim).child(clock(m.at)))

@@ -32,9 +32,12 @@ export const ago = (iso) => {
 // idle a hollow dot, queued a dashed ring, failed a cross, disconnected a broken ring.
 export const MARKS = ["working", "blocked", "done", "idle", "queued", "failed", "disconnected"];
 const MARK_COLOR = { working: "working", blocked: "blocked", done: "done", idle: "dim", queued: "muted", failed: "blocked", disconnected: "dim" };
-export function statusMark(t, status, size = 12) {
+// `still`: no animation, for marks in history. A looping element redraws its whole view on every
+// frame, even off screen, so a pulse is only for something happening now.
+export function statusMark(t, status, size = 12, { still = false } = {}) {
   const kind = MARKS.includes(status) ? status : "idle";
   const el = svg(`mods/desk/icons/marks/${kind}.svg`).size(size).flex_none().text_color(t[MARK_COLOR[kind]] ?? t.dim);
+  if (still) return el;
   if (kind === "working") return el.spin(900);
   if (kind === "blocked") return el.loop("opacity", { from: 0.45, to: 1, period: 1400 });
   return el;

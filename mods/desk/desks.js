@@ -6,7 +6,7 @@ import { Roles, roleTile, team, folderOf, findBriefs, startBrief, fileBrief, age
 import { WorkflowControls, runtimeData, runTeam, refreshRuntime, openDesk } from "./workflows.js";
 import { ReviewView } from "./review.js";
 import { ThreadViewport } from "./thread.js";
-import { buildRows, windowStart, WINDOW, splitPoll, summarizeSteps, statusLines, rowOffsets, activePrompt, kTokens, parseTranscript, buildRouteRows, currentQuestion, togglePick } from "./model.js";
+import { buildRows, windowStart, WINDOW, splitPoll, summarizeSteps, statusLines, rowOffsets, rowPlan, activePrompt, kTokens, parseTranscript, buildRouteRows, currentQuestion, togglePick } from "./model.js";
 import { COLUMN, measured, messageRow, liveRows, statusLineRows, headerStrip, approvalCard, questionCard, attachmentList, liveState } from "./timeline.js";
 import { routeKey, routeHeader, routeRow, routeEmpty, commandMenu } from "./route.js";
 import { commandsFor, slashQuery, matchCommands, resolveCommand, menuKey, mentionQuery, mentionItems } from "./commands.js";
@@ -129,11 +129,14 @@ export class Desks {
     this.drafts = {}; this.draftDesk = null;
     this.thread = new ThreadViewport(cx);
     this.thread.onMeasure = (key, cx) => this.trySeek(key, cx, true);
+    this.thread.onWidth = (key, width) => this.rowWidth(key, width);
     // Derived thread (model.js buildRows), rebuilt on reload; row objects cached by id + text.
     this.model = buildRows([]); this.rowCache = new Map(); this.cacheDesk = null;
     this.windowFrom = {};      // desk -> first drawn row (the window holds still while you read)
     this.rowH = new Map();     // "desk:row" -> measured height (window px), for the minimap
-    this.drawnKeys = {};       // desk -> keys of the rows drawn last frame, in order
+    this.drawnKeys = {};       // desk -> keys of the rows in the window, in order
+    this.rowSig = new Map();   // "desk:row" -> the row's content signature when it was measured
+    this.rowW = {};            // desk -> thread width its heights were measured at
     this.seekKey = null;       // { slug, key, tries } while a minimap jump waits for layout
     this.folds = new Set();    // finished turns opened to their steps
     this.toolsOpen = new Set(); this.subsOpen = new Set(); this.queueShown = false;
@@ -1135,6 +1138,22 @@ export class Desks {
     this.rowH.set(`${slug}:${key}`, height);
     if (this.seekKey?.slug === slug) this.trySeek(slug, cx, false);
   }
+  forgetHeights(slug) {
+    for (const k of this.rowH.keys()) if (k.startsWith(`${slug}:`)) this.rowH.delete(k);
+  }
+  // Text wraps differently at a new width, so every height is stale. Returns whether it changed.
+  rowWidth(slug, width) {
+    const was = this.rowW[slug];
+    this.rowW[slug] = width;
+    if (was === undefined || Math.abs(was - width) < .5) return false;
+    this.forgetHeights(slug);
+    return true;
+  }
+  // A row whose content changed off screen has a stale height: forget it, so it is drawn again.
+  checkRow(slug, row) {
+    const k = `${slug}:${row.key}`;
+    if (this.rowSig.get(k) !== row.sig) { this.rowSig.set(k, row.sig); this.rowH.delete(k); }
+  }
   offsets(slug) {
     const keys = this.drawnKeys[slug] ?? [], heights = new Map();
     for (const k of keys) { const h = this.rowH.get(`${slug}:${k}`); if (h !== undefined) heights.set(k, h); }
@@ -1299,34 +1318,41 @@ export class Desks {
     const from = windowStart(rowsSrc.length, { following: s.following, from: this.windowFrom[key] });
     this.windowFrom[key] = from;
     const col = (el) => (this.wide ? div().w_full().max_w(COLUMN).child(el) : el);
-    const keys = [], rows = [];
+    // Rows are built lazily: rowPlan below picks the ones near the viewport.
+    const keys = [], makers = new Map();
+    const add = (k, make) => { keys.push(k); makers.set(k, () => measured(this, key, k, make())); };
     if (from > 0) {
-      keys.push("__earlier");
-      rows.push(measured(this, key, "__earlier", h_flex().justify_center().pt(4).pb(8)
+      add("__earlier", () => h_flex().justify_center().pt(4).pb(8)
         .child(h_flex().id("thread-earlier").h(28).px(12).gap(6).items_center().rounded(14).border_1().border_color(t.border)
           .text_size(12).text_color(t.muted).cursor_pointer().hover((st) => st.bg(t.hover).text_color(t.foreground))
           .on_click((_e, cx) => this.showEarlier(key, cx))
-          .child(icon("up", 12)).child(`Show ${Math.min(from, WINDOW)} earlier`))));
+          .child(icon("up", 12)).child(`Show ${Math.min(from, WINDOW)} earlier`)));
     }
     const routeRole = route ? this.roles.byId(route.role) : null;
     if (route) {
       const state = this.routeData[route.address]?.data;
-      if (!rowsSrc.length) { keys.push("__empty"); rows.push(measured(this, key, "__empty", routeEmpty(t, routeRole?.name ?? route.role, state))); }
-      else if (state?.partial && from === 0) { keys.push("__partial"); rows.push(measured(this, key, "__partial", h_flex().justify_center().pt(4)
-        .child(div().text_size(11).text_color(t.dim).child("Earlier messages are in its terminal")))); }
+      if (!rowsSrc.length) add("__empty", () => routeEmpty(t, routeRole?.name ?? route.role, state));
+      else if (state?.partial && from === 0) add("__partial", () => h_flex().justify_center().pt(4)
+        .child(div().text_size(11).text_color(t.dim).child("Earlier messages are in its terminal")));
       rowsSrc.slice(from).forEach((row) => {
-        keys.push(row.key);
-        rows.push(measured(this, key, row.key, routeRow(this, t, key, row, { role: routeRole, now, member: route })));
+        this.checkRow(key, row);
+        add(row.key, () => routeRow(this, t, key, row, { role: routeRole, now, member: route }));
       });
     } else {
-      if (!model.said) { keys.push("__empty"); rows.push(measured(this, key, "__empty", this.emptyThread(t, members))); }
+      if (!model.said) add("__empty", () => this.emptyThread(t, members));
       const ctx = { members, now };
       model.rows.slice(from).forEach((row, j) => {
-        keys.push(row.key);
-        rows.push(measured(this, key, row.key, messageRow(this, t, d.slug, row, { ...ctx, index: from + j })));
+        this.checkRow(key, row);
+        add(row.key, () => messageRow(this, t, d.slug, row, { ...ctx, index: from + j }));
       });
     }
     this.drawnKeys[key] = keys;
+    const zoom = settings().zoom || 1;
+    if (this.rowZoom !== zoom) { this.rowZoom = zoom; this.rowH.clear(); }
+    const heights = new Map();
+    for (const k of keys) { const h = this.rowH.get(`${key}:${k}`); if (h !== undefined) heights.set(k, h); }
+    const rows = rowPlan(keys, heights, { offset: s.offset, viewport: s.viewport, overscan: s.viewport / 2, top: ThreadViewport.top(zoom) })
+      .map((p) => (p.gap ? div().w_full().flex_none().h(p.gap / zoom) : makers.get(p.key)()));
     // The end of the thread: who's working now, then what's waiting on you or pending.
     const runtime = runtimeData();
     const lost = (runtime.sessions ?? []).filter((x) => x.task === d.slug && ["disconnected", "recovering"].includes(x.state) && (!route || x.address === route.address));

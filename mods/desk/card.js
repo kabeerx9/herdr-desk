@@ -320,6 +320,8 @@ export class DeskCard {
     const alone = members.every((m) => m.role === "cto") && members.length <= 1;
     // Closed agents leave the list above; keep who finished work here, one line per role.
     const finished = finishedRoles(runtimeData().sessions, d.slug, new Set(members.map((m) => m.address)));
+    // The chat is the record: session data can be lost, so it alone can't say nobody else worked here.
+    const others = (this.desks.model?.rows ?? []).some((r) => r.m?.from && r.m.from !== "kabeer" && r.m.from !== "cto");
     const finishedRows = finished.map((f) => {
       const role = this.roles.byId(f.role), name = role?.name ?? f.role;
       return this.row(t, `done-${f.role}`, { lead: this.face(t, { address: f.address, role: f.role }, role), muted: true,
@@ -334,7 +336,7 @@ export class DeskCard {
       .when(this.adding, (el) => el.child(this.adder(t, d, members)))
       .children(rows.length ? rows : [this.note(t, "Nobody running.")])
       .when(finishedRows.length > 0, (el) => el.child(this.note(t, "Finished here")).children(finishedRows))
-      .when(alone && !subs.length && !finishedRows.length && !this.adding, (el) => el.child(this.note(t, "Nobody else has worked on this desk.")))
+      .when(alone && !subs.length && !finishedRows.length && !others && !this.adding, (el) => el.child(this.note(t, "Nobody else has worked on this desk.")))
       .when(alone && !this.adding, (el) => el.child(this.bringRow(t)));
   }
 

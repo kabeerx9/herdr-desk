@@ -263,3 +263,17 @@ test('finished members group by role, newest first, and skip the live and other 
   ]);
   assert.deepEqual(finishedRoles(undefined, 'a', new Set()), []);
 });
+
+test('rowPlan draws near the viewport, keeps total height in gaps, and always draws unmeasured rows', async () => {
+  const { rowPlan } = await import('./model.js');
+  const keys = ['a', 'b', 'c', 'd', 'e', 'f'];
+  const heights = new Map(keys.map((k) => [k, 100]));
+  const opts = { offset: 200, viewport: 100, overscan: 0 };
+  assert.deepEqual(rowPlan(keys, heights, opts), [{ gap: 100 }, { key: 'b' }, { key: 'c' }, { key: 'd' }, { gap: 200 }]);
+  const total = (plan) => plan.reduce((n, p) => n + (p.gap ?? heights.get(p.key)), 0);
+  assert.equal(total(rowPlan(keys, heights, opts)), 600);
+  assert.deepEqual(rowPlan(keys, heights, { ...opts, viewport: 0 }).map((p) => p.key), keys, 'no viewport yet: draw all');
+  heights.delete('f');
+  assert.ok(rowPlan(keys, heights, opts).some((p) => p.key === 'f'), 'an unmeasured row is drawn so it gets measured');
+  assert.deepEqual(rowPlan([], heights, opts), []);
+});

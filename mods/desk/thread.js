@@ -32,7 +32,7 @@ export class ThreadViewport {
     };
     return div().id(`thread-${key}`).relative().flex_1().min_h(0).w_full().overflow_hidden()
       .track_focus(this.focus)
-      .on_size_change((size, cx) => measure(size.height, s.content, cx))
+      .on_size_change((size, cx) => { if (this.onWidth?.(key, size.width)) cx.notify(); measure(size.height, s.content, cx); })
       .on_scroll_wheel((e, cx) => { s.wheel(e); cx.stop_propagation(); cx.notify(); })
       .on_mouse_down("left", () => this.focus.focus())
       .on_mouse_move(drag)

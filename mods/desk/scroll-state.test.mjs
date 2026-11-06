@@ -77,10 +77,17 @@ test('anchoring while following just keeps following', () => {
 
 test('the jump pill returns to the tail with a glide; reader input cancels it', () => {
   const s = new ScrollState();
-  s.measure(100, 1000); s.move(200);
+  s.measure(100, 1000); s.move(850);
   assert.equal(s.following, false);
   s.jump();
   assert.deepEqual([s.following, s.glide, s.offset], [true, true, 900]);
   s.wheel({ delta: { y: 10 } });
   assert.equal(s.glide, false);
+});
+
+test('jump glides only when the tail is within a screen', () => {
+  const near = new ScrollState(); near.measure(600, 5000); near.move(4200); near.jump();
+  assert.equal(near.glide, true); assert.equal(near.offset, 4400);
+  const far = new ScrollState(); far.measure(600, 5000); far.move(100); far.jump();
+  assert.equal(far.glide, false, 'rows between are not drawn'); assert.equal(far.offset, 4400); assert.equal(far.following, true);
 });

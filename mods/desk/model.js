@@ -244,6 +244,24 @@ export function statusLines({ waiting = [], blocked = [], disconnected = [], han
 
 // ── minimap ──────────────────────────────────────────────────────────────────
 
+// Which rows to build this frame. Layout costs per element, so a row far from the viewport is
+// replaced by a gap of its measured height. An unmeasured row is always drawn, so it gets measured.
+// Returns { key } and { gap } entries in order; `gap` is in the same pixels as `heights`.
+export function rowPlan(keys, heights, { offset, viewport, overscan, top = 0 }) {
+  if (viewport <= 0) return keys.map((key) => ({ key }));
+  const plan = [], from = offset - overscan, to = offset + viewport + overscan;
+  let y = top, gap = 0;
+  const draw = (key) => { if (gap) plan.push({ gap }); gap = 0; plan.push({ key }); };
+  for (const key of keys) {
+    const h = heights.get(key);
+    if (h === undefined) { draw(key); continue; }
+    if (y + h < from || y > to) gap += h; else draw(key);
+    y += h;
+  }
+  if (gap) plan.push({ gap });
+  return plan;
+}
+
 // Offsets of drawn rows from measured heights: top padding, then each row in order. A row
 // without a height yet stops the walk (later offsets would be wrong).
 export function rowOffsets(keys, heights, top = 0) {

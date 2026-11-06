@@ -20,7 +20,8 @@ export class ScrollState {
   }
   latest() { this.glide = false; this.anchor = null; this.following = true; this.offset = this.max; }
   // The jump pill: back to the tail with the follow spring (a glide), not a cut.
-  jump() { this.anchor = null; this.following = true; this.glide = true; this.offset = this.max; }
+  // A long way back cuts: rows between here and there aren't drawn, so a glide would cross blank.
+  jump() { this.anchor = null; this.following = true; this.glide = this.max - this.offset <= this.viewport; this.offset = this.max; }
   anchorBottom() { if (!this.following) this.anchor = this.max - this.offset; }
   wheel(event) {
     const delta = event.delta_lines ? event.delta_lines.y * 24 : event.delta.y;
