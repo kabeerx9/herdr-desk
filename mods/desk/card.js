@@ -297,9 +297,10 @@ export class DeskCard {
       const role = this.roles.byId(m.role), open = this.open === m.address, s = sessionOf(m.address), id = `ag-${m.address}`;
       const more = iconButton(t, `${id}-more`, open ? "chevron-down" : "chevron", open ? "Hide its actions" : "Its actions: compact, fresh start, review, QA, PR",
         (_e, cx) => { this.open = open ? null : m.address; cx.notify(); }, { color: open ? t.foreground : undefined });
+      const jobs = shared("desk.jobs")?.task === d.slug ? shared("desk.jobs").by?.[m.address]?.length ?? 0 : 0;
       const rows = [this.row(t, id, {
         indent: m.depth * 12, lead: this.face(t, m, role),
-        name: role?.name ?? m.role,
+        name: role?.name ?? m.role, meta: jobs ? `${jobs} job${jobs === 1 ? "" : "s"} running` : null,
         mark: statusMark(t, shownStatus(m.status ?? "idle", m.address), 12), actions: [more],
         // Its own conversation (a route of this desk); the terminal stays one click away in its actions.
         onClick: () => { showTerminals(false); setShared("desk.view", d.slug); setShared("desk.route", { task: d.slug, address: m.address }); },

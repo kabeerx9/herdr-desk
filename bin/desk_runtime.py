@@ -735,6 +735,7 @@ def classify_launch_failure(text, task=None):
 # ── Claude transcripts: timeline and title ──────────────────────────────────
 
 TAIL_BYTES = 512 * 1024
+JOB_TAIL = 16 * 1024 * 1024  # API blobs fill a transcript fast, and a job can outlive 512 KB by far
 SUBAGENT_TAIL = 64 * 1024
 CONTEXT_MAX, CONTEXT_MAX_1M = 200_000, 1_000_000
 CATEGORIES = ("read", "search", "command", "edit", "web", "agent", "other")
@@ -931,6 +932,43 @@ def _subagents(path, calls, results, metas=None):
                           "type": call["input"].get("subagent_type") or (meta or {}).get("agentType") or "general-purpose",
                           "status": status, "started_ms": call["at"], "ended_ms": ended_ms, "line": (line or None) and line[:140]})
     return subagents
+
+
+NOTIFICATION = re.compile(r"<task-notification>.*?<task-id>([^<]+)</task-id>.*?<status>([^<]+)</status>", re.S)
+OUTPUT_FILE = re.compile(r"written to: (\S+?)\.?(?:\s|$)")
+
+
+def transcript_jobs(lines):
+    """Background commands in a Claude transcript, oldest first: {id, title, status, started_ms, ended_ms, output}.
+    A command starts with a tool result carrying backgroundTaskId and ends with a <task-notification>."""
+    titles, jobs = {}, {}
+    for line in lines:
+        if not ("backgroundTaskId" in line or "<task-notification>" in line or '"tool_use"' in line):
+            continue
+        try:
+            entry = json.loads(line)
+        except ValueError:
+            continue
+        if not isinstance(entry, dict) or entry.get("isSidechain"):
+            continue
+        kind, at = entry.get("type"), ts_ms(entry.get("timestamp"))
+        if kind == "assistant":
+            for block in _content(entry):
+                if isinstance(block, dict) and block.get("type") == "tool_use":
+                    tool = block.get("input") or {}
+                    titles[block.get("id")] = str(tool.get("description") or tool.get("command") or block.get("name") or "")
+        elif kind == "user" and isinstance(entry.get("toolUseResult"), dict) and entry["toolUseResult"].get("backgroundTaskId"):
+            block = next((b for b in _content(entry) if isinstance(b, dict) and b.get("type") == "tool_result"), {})
+            found = OUTPUT_FILE.search(str(block.get("content") or ""))
+            job = entry["toolUseResult"]["backgroundTaskId"]
+            jobs[job] = {"id": job, "title": titles.get(block.get("tool_use_id")) or "Background command", "status": "running",
+                         "started_ms": at, "ended_ms": None, "output": found.group(1) if found else None}
+        if kind in ("user", "queue-operation"):
+            text = entry.get("content") if kind == "queue-operation" else (entry.get("message") or {}).get("content")
+            for job, status in NOTIFICATION.findall(text if isinstance(text, str) else ""):
+                if job in jobs and jobs[job]["status"] == "running":
+                    jobs[job].update(status="done" if status == "completed" else "failed", ended_ms=at)
+    return list(jobs.values())
 
 
 def transcript_timeline(path, since_ms=None, limit=TAIL_BYTES):

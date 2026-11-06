@@ -38,7 +38,7 @@ Children always outlive their parent, so closing the CTO doesn't end its workers
 """
 import contextlib, fcntl, glob, io, json, os, re, secrets, shutil, subprocess, sys, time, shlex, uuid
 from desk_runtime import Store as RuntimeStore, RuntimeError as DeskRuntimeError, adapter as runtime_adapter
-from desk_runtime import nearest_base
+from desk_runtime import JOB_TAIL, nearest_base, read_tail, transcript_jobs
 from desk_runtime import attention as runtime_attention
 from desk_runtime import find_queue as runtime_find_queue, queue_item as runtime_queue_item
 from desk_runtime import foreground_agent, recover_interrupted_claims, reorder as runtime_reorder, session_view as runtime_session_view, upsert_session
@@ -1934,12 +1934,28 @@ def runtime_triage(args):
     print(json.dumps(runtime_store().mutate(change)))
 
 
+def job_alive(job):
+    """A background command holds its output file open. A job can die with no notification
+    (its agent was killed), so the transcript alone can't say it still runs."""
+    if not job.get("output"):
+        return True
+    try:
+        return bool(subprocess.run(["lsof", "-t", job["output"]], capture_output=True, text=True, timeout=5).stdout.strip())
+    except (OSError, subprocess.SubprocessError):
+        return True
+
+
+def running_jobs(path):
+    jobs = [j for j in transcript_jobs(read_tail(path, JOB_TAIL)[0]) if j["status"] == "running" and job_alive(j)]
+    return [{k: j[k] for k in ("id", "title", "status", "started_ms", "ended_ms")} for j in jobs]
+
+
 def runtime_timeline(args):
     rec = session_by_address(runtime_store().load(), args.address)
     if not rec:
         die("No saved session has address %s" % args.address)
     empty = {"address": args.address, "supported": False, "turn": None, "thought": None, "tools": None,
-             "subagents": None, "context": None, "title": None}
+             "subagents": None, "context": None, "title": None, "jobs": []}
     if session_cli(rec) != "claude":
         print(json.dumps({**empty, "reason": "%s doesn't write a transcript the Desk can read" % session_cli(rec)})); return
     path = find_transcript(rec.get("conversation"))
@@ -1951,6 +1967,7 @@ def runtime_timeline(args):
         die("Couldn't read the transcript: %s" % exc)
     if out["title"] is None:
         out["title"] = transcript_title(path, TITLES())
+    out["jobs"] = running_jobs(path)
     # The transcript can end on prompts with no reply (a message that arrived while it was
     # stopping): Herdr's own status for the terminal decides whether the turn is still going.
     live = ((terminal(args.address).get("status") or {}).get("state"))

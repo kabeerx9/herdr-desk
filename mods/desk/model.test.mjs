@@ -277,3 +277,15 @@ test('rowPlan draws near the viewport, keeps total height in gaps, and always dr
   assert.ok(rowPlan(keys, heights, opts).some((p) => p.key === 'f'), 'an unmeasured row is drawn so it gets measured');
   assert.deepEqual(rowPlan([], heights, opts), []);
 });
+
+test('running jobs parse from the timeline and show as a static line with a terminal action', async () => {
+  const { parseTimeline, statusLines } = await import('./model.js');
+  const out = parseTimeline(JSON.stringify({ turn: null, jobs: [{ id: 'b1', title: 'Watch rows', status: 'running', started_ms: 5 }, { id: 'b2', status: 'done' }, null] }));
+  assert.deepEqual(out.jobs, [{ id: 'b1', title: 'Watch rows', started_ms: 5 }]);
+  assert.deepEqual(parseTimeline('{"turn":null}').jobs, [], 'a CLI without jobs has none');
+  const [line] = statusLines({ jobs: [{ ...out.jobs[0], address: 't1', role: 'cto' }], name: (r) => r.toUpperCase(), clock: () => '10:53' });
+  assert.equal(line.title, 'CTO is running a background job');
+  assert.equal(line.detail, 'Watch rows · since 10:53');
+  assert.equal(line.mark, 'queued', 'never an animated mark');
+  assert.deepEqual(line.action, { label: 'Open terminal', kind: 'terminal', arg: 't1' });
+});

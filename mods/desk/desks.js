@@ -6,7 +6,7 @@ import { Roles, roleTile, team, folderOf, findBriefs, startBrief, fileBrief, age
 import { WorkflowControls, runtimeData, runTeam, refreshRuntime, openDesk } from "./workflows.js";
 import { ReviewView } from "./review.js";
 import { ThreadViewport } from "./thread.js";
-import { buildRows, windowStart, WINDOW, splitPoll, summarizeSteps, statusLines, rowOffsets, rowPlan, activePrompt, kTokens, parseTranscript, buildRouteRows, currentQuestion, togglePick } from "./model.js";
+import { buildRows, windowStart, WINDOW, splitPoll, summarizeSteps, statusLines, rowOffsets, rowPlan, activePrompt, parseTimeline, kTokens, parseTranscript, buildRouteRows, currentQuestion, togglePick } from "./model.js";
 import { COLUMN, measured, messageRow, liveRows, statusLineRows, headerStrip, approvalCard, questionCard, attachmentList, liveState } from "./timeline.js";
 import { routeKey, routeHeader, routeRow, routeEmpty, commandMenu } from "./route.js";
 import { commandsFor, slashQuery, matchCommands, resolveCommand, menuKey, mentionQuery, mentionItems } from "./commands.js";
@@ -196,6 +196,7 @@ export class Desks {
     this.stepsSeen = {};                               // address -> ms the newest row was first drawn (for its fade-in)
     this.timelines = {};                               // address -> parsed `team timeline` (kept after the turn for context)
     this.timelineSig = {}; this.noTimeline = {};       // last JSON seen; when it last failed (retry after a minute)
+    this.jobs = {}; this.jobsAt = 0; this.jobsDesk = null;  // address -> running background jobs of the shown desk
     this.snapshots = store.get("desks.turns", {});     // address -> [{ first, ended, steps, summary, subagents }] of finished turns
     // One shared clock for every elapsed label: only the primary copy ticks, only while a desk
     // agent works and the window is in front. setShared redraws every copy.
@@ -205,7 +206,7 @@ export class Desks {
       if (agents().some((a) => a.status === "working" && desk.has(a.address))) setShared("desk.tick", Math.floor(Date.now() / 1000));
     });
     // Woken by the hook's writes; the slow timer only clears feeds of agents that stopped.
-    cx.timer.every(4000, (cx) => { this.pollSteps(cx); this.pollRoute(cx); });
+    cx.timer.every(4000, (cx) => { this.pollSteps(cx); this.pollJobs(cx); this.pollRoute(cx); });
     cx.spawn(async (cx) => {
       await exec("mkdir", ["-p", `${DIR()}/.activity`]);
       for (;;) { await watchFolder(`${DIR()}/.activity`); this.pollSteps(cx); this.pollRoute(cx); }
@@ -1101,11 +1102,49 @@ export class Desks {
           if (!timeline) { this.noTimeline[a] = Date.now(); continue; }
           const sig = JSON.stringify(timeline);
           if (sig !== this.timelineSig[a]) { this.timelineSig[a] = sig; this.timelines[a] = timeline; changed = true; }
+          if (this.setJobs(d.slug, a, timeline.jobs)) changed = true;
         }
       } finally { this.polling = false; }
       if (changed) { cx.notify(); cx.timer.after(40, (cx) => cx.notify()); }  // the second frame lets a new step ease in
     });
   }
+
+  // Background jobs outlive the turn that started them, so agents that aren't working need a
+  // check too. It stays apart from the turn state above: an idle agent has no turn to end.
+  // Every 4s while a job runs, so its row leaves promptly; otherwise every 15s.
+  pollJobs(cx) {
+    const d = this.view !== "list" && this.view !== "new" ? this.desk(this.view) : null;
+    if (!d || this.polling || this.pollingJobs || Date.now() - (this.drawnAt ?? 0) > 15000) return;
+    if (this.jobsDesk !== d.slug) { this.jobsDesk = d.slug; this.jobs = {}; this.jobsAt = 0; this.publishJobs(d.slug); }
+    const running = Object.values(this.jobs).some((list) => list.length);
+    if (!running && Date.now() - this.jobsAt < 15000) return;
+    this.jobsAt = Date.now();
+    const members = this.members(d.slug), idle = members.filter((m) => m.status !== "working" && Date.now() - (this.noTimeline[m.address] ?? 0) > 60000);
+    for (const a of Object.keys(this.jobs)) if (!members.some((m) => m.address === a)) this.setJobs(d.slug, a, []);
+    if (!idle.length) return;
+    this.pollingJobs = true;
+    cx.spawn(async (cx) => {
+      let changed = false;
+      try {
+        for (const m of idle) {
+          let out = "";
+          try { out = (await exec(TEAM(), ["timeline", "--address", m.address])).stdout; } catch {}
+          const timeline = parseTimeline(out);
+          if (!timeline) { this.noTimeline[m.address] = Date.now(); continue; }
+          if (this.setJobs(d.slug, m.address, timeline.jobs)) changed = true;
+        }
+      } finally { this.pollingJobs = false; }
+      if (changed) cx.notify();
+    });
+  }
+  setJobs(slug, address, jobs = []) {
+    if (JSON.stringify(this.jobs[address] ?? []) === JSON.stringify(jobs)) return false;
+    this.jobs[address] = jobs;
+    this.publishJobs(slug);
+    return true;
+  }
+  // The card and the sidebar are other copies; only the shown desk is polled, so it names its desk.
+  publishJobs(slug) { setShared("desk.jobs", { task: slug, by: this.jobs }); }
 
   // A turn ended: keep what we saw of it for the reply's "Worked for" fold (the hook deletes
   // the step file at Stop). The timeline stays for its context size.
@@ -1368,7 +1407,8 @@ export class Desks {
     const lines = statusLines({ waiting: waiting.filter((m) => !carded.has(m.address)),
       blocked: scope.filter((m) => m.status === "blocked" && !this.waitingFor.has(m.address) && !carded.has(m.address)),
       disconnected: lost, handingOff: scope.filter((m) => m.handingOff && m.status !== "working"), queued, queueOpen: this.queueShown,
-      error: shared("desk.runtime.error"), name: (r) => this.roles.byId(r)?.name ?? r });
+      jobs: scope.flatMap((m) => (this.jobs[m.address] ?? []).map((j) => ({ ...j, address: m.address, role: m.role }))),
+      error: shared("desk.runtime.error"), name: (r) => this.roles.byId(r)?.name ?? r, clock });
     const nowLines = statusLineRows(this, t, lines);
     let rail = null;
     if (this.wide) {

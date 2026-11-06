@@ -218,5 +218,45 @@ class TimelineTests(unittest.TestCase):
         self.assertFalse(rt.transcript_timeline(Transcript(self.tmp.name, "small").path)["turn"]["partial"])
 
 
+class TranscriptJobs(unittest.TestCase):
+    """Shapes copied from a real Claude Code 2.1 transcript."""
+    AT = "2026-11-06T05:23:44.222Z"
+
+    def lines(self, *notes):
+        call = {"type": "assistant", "timestamp": self.AT, "message": {"role": "assistant", "content": [
+            {"type": "tool_use", "id": "tu1", "name": "Bash", "input": {"command": "x", "description": "Watch rows", "run_in_background": True}}]}}
+        result = {"type": "user", "timestamp": self.AT, "toolUseResult": {"backgroundTaskId": "b1"}, "message": {"role": "user", "content": [
+            {"type": "tool_result", "tool_use_id": "tu1", "content": "Command running in background with ID: b1. Output is being written to: /tmp/x/b1.output. You will be notified."}]}}
+        return [json.dumps(e) for e in (call, result, *notes)]
+
+    def note(self, kind, status, job="b1"):
+        text = "<task-notification> <task-id>%s</task-id> <status>%s</status> </task-notification>" % (job, status)
+        if kind == "queue-operation":
+            return {"type": kind, "operation": "enqueue", "timestamp": self.AT, "content": text}
+        return {"type": kind, "timestamp": self.AT, "message": {"role": "user", "content": text}}
+
+    def test_a_job_runs_until_its_notification(self):
+        [job] = rt.transcript_jobs(self.lines())
+        self.assertEqual((job["id"], job["title"], job["status"], job["output"]), ("b1", "Watch rows", "running", "/tmp/x/b1.output"))
+        self.assertIsNone(job["ended_ms"])
+        for kind in ("queue-operation", "user"):
+            [job] = rt.transcript_jobs(self.lines(self.note(kind, "completed")))
+            self.assertEqual(job["status"], "done")
+            self.assertIsNotNone(job["ended_ms"])
+
+    def test_a_failed_or_unknown_end_is_failed_and_other_jobs_are_untouched(self):
+        self.assertEqual(rt.transcript_jobs(self.lines(self.note("user", "failed")))[0]["status"], "failed")
+        self.assertEqual(rt.transcript_jobs(self.lines(self.note("user", "killed")))[0]["status"], "failed")
+        self.assertEqual(rt.transcript_jobs(self.lines(self.note("user", "completed", "other")))[0]["status"], "running")
+
+    def test_quoted_text_elsewhere_does_not_end_a_job(self):
+        blob = {"type": "api-request-blob", "message": {"content": "<task-notification> <task-id>b1</task-id> <status>completed</status>"}}
+        self.assertEqual(rt.transcript_jobs(self.lines(blob))[0]["status"], "running")
+
+    def test_a_sidechain_or_broken_line_is_ignored(self):
+        side = {"type": "user", "isSidechain": True, "toolUseResult": {"backgroundTaskId": "s1"}, "message": {"content": []}}
+        self.assertEqual([j["id"] for j in rt.transcript_jobs(self.lines(side) + ['{"backgroundTaskId" broken'])], ["b1"])
+
+
 if __name__ == "__main__":
     unittest.main()

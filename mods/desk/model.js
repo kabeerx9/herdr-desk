@@ -182,6 +182,8 @@ export function parseTimeline(stdout) {
     thought: data.thought && (data.thought.text || data.thought.heading) ? data.thought : null,
     tools: data.tools && typeof data.tools === "object" ? { summary: data.tools.summary || summarizeCounts(data.tools.counts), counts: data.tools.counts ?? {}, failed: Number(data.tools.failed) || 0 } : null,
     subagents, context: ctx, title: data.title ?? null,
+    jobs: (Array.isArray(data.jobs) ? data.jobs : []).filter((j) => j && j.status === "running" && j.id)
+      .map((j) => ({ id: String(j.id), title: j.title || "Background command", started_ms: Number(j.started_ms) || null })),
   };
 }
 
@@ -225,7 +227,7 @@ export function snapshotFor(row, snapshots) {
 
 // What needs you or is pending, in order: approvals, terminal prompts, disconnected sessions,
 // handoffs, the queue, runtime trouble. Each: { id, mark, title, detail, action }.
-export function statusLines({ waiting = [], blocked = [], disconnected = [], handingOff = [], queued = 0, queueOpen = false, error = null, name = (r) => r }) {
+export function statusLines({ waiting = [], blocked = [], disconnected = [], handingOff = [], jobs = [], queued = 0, queueOpen = false, error = null, name = (r) => r, clock = () => "" }) {
   const lines = [];
   for (const m of waiting) lines.push({ id: `wait-${m.id}`, mark: "blocked", title: `${name(m.from)} is waiting on your approval`,
     detail: `${m.tool}${m.detail ? `: ${String(m.detail).split("\n")[0].slice(0, 80)}` : ""}`, action: null });
@@ -236,6 +238,9 @@ export function statusLines({ waiting = [], blocked = [], disconnected = [], han
     action: s.state === "recovering" ? null : { label: "Resume", kind: "resume", arg: s.id, disabled: !s.can_resume } });
   for (const m of handingOff) lines.push({ id: `handoff-${m.address}`, mark: "working", title: `${name(m.role)} is handing off`,
     detail: "writing a handoff; a fresh session takes over", action: null });
+  // Static on purpose: a loop here would redraw the chat every frame for as long as the job runs.
+  for (const j of jobs) lines.push({ id: `job-${j.address}-${j.id}`, mark: "queued", title: `${name(j.role)} is running a background job`,
+    detail: `${j.title}${j.started_ms ? ` · since ${clock(j.started_ms)}` : ""}`, action: { label: "Open terminal", kind: "terminal", arg: j.address } });
   if (queued) lines.push({ id: "queued", mark: "queued", title: `${queued} message${queued === 1 ? "" : "s"} queued`,
     detail: "sent when each recipient is idle", action: { label: queueOpen ? "Hide" : "Edit", kind: "queue" } });
   if (error) lines.push({ id: "runtime", mark: "failed", title: "Session controls unavailable", detail: String(error).slice(0, 120), action: null });

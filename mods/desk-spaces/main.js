@@ -928,6 +928,9 @@ export default class Spaces extends View {
       d.title = this.deskTitle(d.slug, d.members);
       d.full = this.deskInfo.get(d.slug)?.name ?? d.slug;
       d.status = mostUrgent(d.members.map((k) => this.st(k.a))) ?? "idle";
+      // A background job isn't a turn: a static mark, so an idle desk doesn't look finished.
+      const jobs = shared("desk.jobs");
+      if (d.status === "idle" && jobs?.task === d.slug && Object.values(jobs.by ?? {}).some((list) => list.length)) d.status = "queued";
       d.roles = d.members.map((k) => k.l.role);
       d.lead = d.members.find((k) => k.l.role === "cto") ?? d.members[0];
       d.space = { id: d.lead.a.space };
