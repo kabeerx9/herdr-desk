@@ -654,3 +654,62 @@ def cleared_transcript(folder, old, since_ms):
 # edit to x.ts?") and numbered options, the focused one marked "❯". Its key hints ("Esc to
 # cancel") make screen_state call it a dialog. Options are read off the screen, never assumed by
 # position: their wording and order vary by tool and version.
+
+
+def tail_lines(path, size=4_000_000):
+    """The end of a (possibly huge) transcript, newest line first."""
+    with open(path, "rb") as f:
+        f.seek(0, 2)
+        f.seek(max(0, f.tell() - size))
+        return reversed(f.read().decode("utf-8", "replace").splitlines())
+
+
+def claude_context(transcript):
+    """Tokens in a Claude agent's context now: its last main-thread call's prompt plus reply."""
+    try:
+        lines = tail_lines(transcript)
+    except (OSError, TypeError):
+        return None
+    for line in lines:
+        if '"compact_boundary"' in line:  # compacted since its last call: unknown until its next one
+            return None
+        if '"usage"' not in line:
+            continue
+        try:
+            r = json.loads(line)
+        except ValueError:
+            continue
+        if r.get("type") != "assistant" or r.get("isSidechain"):
+            continue
+        u = (r.get("message") or {}).get("usage") or {}
+        return sum(int(u.get(k) or 0) for k in ("input_tokens", "cache_creation_input_tokens", "cache_read_input_tokens", "output_tokens")) or None
+    return None
+
+
+def compact_meta(transcript):
+    try:
+        for line in tail_lines(transcript):
+            if '"compact_boundary"' in line:
+                return json.loads(line).get("compactMetadata")
+    except (OSError, TypeError, ValueError):
+        pass
+    return None
+
+
+def last_text(transcript):
+    """The newest assistant text in a Claude transcript (older Claude Codes' Stop input lacks it)."""
+    try:
+        with open(transcript) as f:
+            lines = f.readlines()[-200:]
+    except (OSError, TypeError):
+        return ""
+    for line in reversed(lines):
+        try:
+            r = json.loads(line)
+        except ValueError:
+            continue
+        if r.get("type") == "assistant":
+            parts = [c.get("text", "") for c in (r.get("message") or {}).get("content", []) if isinstance(c, dict) and c.get("type") == "text"]
+            if any(parts):
+                return "\n".join(parts)
+    return ""

@@ -19,6 +19,25 @@ class LaunchEnv:
     question_timeout: int   # seconds a PermissionRequest hook may wait
 
 
+@dataclass(frozen=True)
+class HookEvent:
+    """One hook call from a CLI, in the Desk's words. Fields a CLI doesn't send stay empty."""
+    kind: str = ""              # "turn_end" for an end of turn; otherwise whatever the CLI sent
+    message: str = ""           # the turn's final text, as the CLI gave it
+    transcript: str = None      # path of the conversation log
+    session_id: str = None
+    cwd: str = None
+    tool: str = None            # the tool a PreToolUse or PermissionRequest is about
+    tool_input: object = None
+    suggestions: tuple = ()     # rules the CLI offers for "always allow"
+
+    @property
+    def conversation(self):
+        """The conversation's durable identity: the transcript's file name."""
+        import os
+        return os.path.splitext(os.path.basename(self.transcript))[0] if self.transcript else None
+
+
 class AgentAdapter:
     name = None
     # Default resume/fork/session argument templates; "{session_id}" is replaced.

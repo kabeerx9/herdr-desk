@@ -69,6 +69,7 @@ def sh(args, cwd=None, check=False):
 
 # Every hc call goes through HOST. It runs through sh, so tests that fake sh see each hc argv.
 HOST = desk_adapters.HcHost(lambda argv: sh(argv))
+CLAUDE, CODEX = desk_adapters.by_cli("claude"), desk_adapters.by_cli("codex")
 
 
 FRESH_AT = 250_000  # roles.json "fresh_at" (or a role's own) overrides it
@@ -219,11 +220,8 @@ def snapshot_turn(cwd):
 
 def prompt_hook():
     """Claude's UserPromptSubmit hook. Prints nothing: its output would join the prompt."""
-    try:
-        payload = json.load(sys.stdin)
-    except ValueError:
-        payload = {}
-    snapshot_turn((payload if isinstance(payload, dict) else {}).get("cwd") or os.getcwd())
+    event = CLAUDE.hook_event(sys.stdin.read())
+    snapshot_turn((event and event.cwd) or os.getcwd())
     note_new_work()
 
 
@@ -246,13 +244,13 @@ def tool_step():
     if not ME:
         return
     try:
-        payload = json.load(sys.stdin)
-        if not isinstance(payload, dict):
+        event = CLAUDE.hook_event(sys.stdin.read())
+        if not event:
             return
         if not os.path.exists(turn_mark(ME)):
-            snapshot_turn(payload.get("cwd") or os.getcwd())
-        rec = {"at": int(time.time() * 1000), "tool": payload.get("tool_name") or "?",
-               "text": step_text(payload.get("tool_name") or "", payload.get("tool_input"))[:160]}
+            snapshot_turn(event.cwd or os.getcwd())
+        rec = {"at": int(time.time() * 1000), "tool": event.tool or "?",
+               "text": step_text(event.tool or "", event.tool_input)[:160]}
         os.makedirs(ACTIVITY, exist_ok=True)
         path = activity_file(ME)
         with open(path, "a", encoding="utf-8") as f:
@@ -983,9 +981,11 @@ def hook(args):
     wake_queue()
     if args.cli == "session":
         try:
-            payload = json.load(sys.stdin)
+            event = CLAUDE.hook_event(sys.stdin.read())
+            if not event:
+                return
             info = terminal(ME) if ME else {}; labels = info.get("labels") or {}
-            identity = payload.get("session_id")
+            identity = event.session_id
             if identity and labels.get("role") and labels.get("task"):
                 runtime_record(ME, labels["role"], labels["task"], info.get("cwd"), labels.get("cli") or "claude", identity)
         except (ValueError, OSError, DeskRuntimeError):
@@ -1001,25 +1001,29 @@ def hook(args):
         return prompt_hook()
     try:
         if args.cli == "codex":
-            payload = json.loads(args.payload[-1]) if args.payload else {}
-            chain_codex_notify(args.payload)
-            if payload.get("type") != "agent-turn-complete":
+            event = CODEX.hook_event(args.payload)
+            if not event:
                 return
-            msg = payload.get("last-assistant-message") or ""
+            chain_codex_notify(args.payload)
+            if event.kind != "turn_end":
+                return
+            msg = event.message
         else:
-            payload = json.load(sys.stdin)
-            msg = payload.get("last_assistant_message") or last_text(payload.get("transcript_path"))
+            event = CLAUDE.hook_event(sys.stdin.read())
+            if not event:
+                return
+            msg = CLAUDE.turn_message(event)
             # Claude's transcript basename is its durable conversation identity. Keep it
             # only for the labeled Desk role that owns this hook; no unrelated scan.
-            if ME and payload.get("transcript_path"):
-                conversation = os.path.splitext(os.path.basename(payload["transcript_path"]))[0]
+            if ME and event.transcript:
+                conversation = event.conversation
                 labels_now = (terminal(ME).get("labels") or {})
                 if labels_now.get("role") and labels_now.get("task"):
                     runtime_record(ME, labels_now["role"], labels_now["task"], terminal(ME).get("cwd"), "claude", conversation)
             # Claude writes the turn's usage just after this hook, so it's measured a moment later, apart.
-            if ME and payload.get("transcript_path"):
+            if ME and event.transcript:
                 env = {k: v for k, v in os.environ.items() if k != "HC_TERMINAL_ID"}
-                subprocess.Popen([SELF, "measure", "--address", ME, "--transcript", payload["transcript_path"]], env=env,
+                subprocess.Popen([SELF, "measure", "--address", ME, "--transcript", event.transcript], env=env,
                                  stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, start_new_session=True)
     except (ValueError, OSError):
         return
@@ -1035,8 +1039,8 @@ def hook(args):
     if not awaiting and who == "cto" and slug and msg.strip():
         # A turn that a report or a finished task started, not a chat message. Kabeer talks to the
         # CTO, so what it concludes reaches the chat too, unless it already posted this turn.
-        since = turn_started((payload or {}).get("transcript_path")) or 0
-        if not closed_by_hand(slug, since, (payload or {}).get("transcript_path")):
+        since = turn_started(event.transcript) or 0
+        if not closed_by_hand(slug, since, event.transcript):
             chat_append(slug, {"from": who, "address": ME, "kind": "say", "text": msg.strip(), "auto": True})
         return
     if not awaiting or not slug or not who:
@@ -1052,7 +1056,7 @@ def hook(args):
     if not msg:
         return
     # It posted by hand this turn after all: don't post twice.
-    if closed_by_hand(slug, int(since or 0), (payload or {}).get("transcript_path")):
+    if closed_by_hand(slug, int(since or 0), event.transcript):
         return
     if what.startswith("ask-"):
         qid = what[4:]
@@ -1156,11 +1160,11 @@ def question_list(inp):
     return out
 
 
-def ask_question(payload, slug, who):
+def ask_question(inp, slug, who):
     """AskUserQuestion in the desk chat: a question card, then a wait for team choose. The answers
     go back as the tool's own `answers` input, so the agent sees what a terminal answer gives it.
     Unanswered in time, the tool is denied: a hidden terminal prompt would stall the desk."""
-    inp = payload.get("tool_input") or {}
+    inp = inp or {}
     questions = question_list(inp)
     if not questions:
         return
@@ -1181,12 +1185,12 @@ def ask_question(payload, slug, who):
                            "decision": "answered" if got else "expired" if expired else "terminal",
                            **({"answers": got["answers"]} if got else {})})
     if got:
-        out = {"behavior": "allow", "updatedInput": {**inp, "answers": got["answers"]}}
+        out = CLAUDE.permission_reply("allow", updated_input={**inp, "answers": got["answers"]})
     elif expired:
-        out = {"behavior": "deny", "message": "Kabeer didn't answer in the desk chat in time. Carry on with work that doesn't depend on this, and put the question in your reply."}
+        out = CLAUDE.permission_reply("deny", "Kabeer didn't answer in the desk chat in time. Carry on with work that doesn't depend on this, and put the question in your reply.")
     else:
         return
-    print(json.dumps({"hookSpecificOutput": {"hookEventName": "PermissionRequest", "decision": out}}))
+    print(json.dumps(out))
 
 
 def permission_request():
@@ -1194,23 +1198,20 @@ def permission_request():
     desk chat instead: a permission record, then a wait for team permit's answer file. No answer in
     time, any error, or not a desk agent: print nothing, and Claude asks in its terminal as usual.
     Nothing is ever allowed by default."""
-    try:
-        payload = json.load(sys.stdin)
-    except ValueError:
-        return
-    if not ME:
+    event = CLAUDE.hook_event(sys.stdin.read())
+    if not event or not ME:
         return
     labels = terminal(ME).get("labels", {}) or {}
     slug, who = labels.get("task"), labels.get("role")
     if not slug or not who:
         return
-    if payload.get("tool_name") == "AskUserQuestion":
-        return ask_question(payload, slug, who)
-    suggestions = payload.get("permission_suggestions") or []
+    if event.tool == "AskUserQuestion":
+        return ask_question(event.tool_input, slug, who)
+    suggestions = list(event.suggestions)
     pid = secrets.token_hex(4)
     path = os.path.join(PERMITS, f"{pid}.json")
-    chat_append(slug, {"from": who, "address": ME, "kind": "permission", "id": pid, "tool": payload.get("tool_name") or "a tool",
-                       "detail": permission_detail(payload.get("tool_input")), "always": rule_label(suggestions) if suggestions else None})
+    chat_append(slug, {"from": who, "address": ME, "kind": "permission", "id": pid, "tool": event.tool or "a tool",
+                       "detail": permission_detail(event.tool_input), "always": rule_label(suggestions) if suggestions else None})
     decision, why = None, ""
     watch_permit(slug, pid)
     try:
@@ -1227,13 +1228,11 @@ def permission_request():
     if not decision:
         return
     if decision == "deny":
-        out = {"behavior": "deny", "message": f"Kabeer said no from the desk chat: {why}" if why else
-               "Kabeer said no from the desk chat. Don't retry it as is: say what you needed it for, or find another way."}
+        out = CLAUDE.permission_reply("deny", f"Kabeer said no from the desk chat: {why}" if why else
+                                      "Kabeer said no from the desk chat. Don't retry it as is: say what you needed it for, or find another way.")
     else:
-        out = {"behavior": "allow"}
-        if decision == "always" and suggestions:
-            out["updatedPermissions"] = suggestions
-    print(json.dumps({"hookSpecificOutput": {"hookEventName": "PermissionRequest", "decision": out}}))
+        out = CLAUDE.permission_reply("allow", rules=suggestions if decision == "always" else None)
+    print(json.dumps(out))
 
 
 def permit_watch(args):
@@ -1298,25 +1297,12 @@ def choose(args):
 def compacted():
     """Claude compacted this agent's context (SessionStart, source compact). Its record lands
     in the transcript just after this hook, so the size is read a moment later, apart."""
-    try:
-        payload = json.load(sys.stdin)
-    except ValueError:
-        return
-    if not ME or not payload.get("transcript_path"):
+    event = CLAUDE.hook_event(sys.stdin.read())
+    if not ME or not event or not event.transcript:
         return
     env = {k: v for k, v in os.environ.items() if k != "HC_TERMINAL_ID"}
-    subprocess.Popen([SELF, "measure", "--address", ME, "--transcript", payload["transcript_path"], "--compacted"], env=env,
+    subprocess.Popen([SELF, "measure", "--address", ME, "--transcript", event.transcript, "--compacted"], env=env,
                      stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, start_new_session=True)
-
-
-def compact_meta(transcript):
-    try:
-        for line in tail_lines(transcript):
-            if '"compact_boundary"' in line:
-                return json.loads(line).get("compactMetadata")
-    except (OSError, TypeError, ValueError):
-        pass
-    return None
 
 
 def compact(args):
@@ -1349,7 +1335,7 @@ def measure(args):
         meta, before = None, (terminal(args.address).get("labels") or {})
         for _ in range(20):
             time.sleep(0.75)
-            meta = compact_meta(args.transcript)
+            meta = CLAUDE.compact_info(args.transcript)
             if meta:
                 break
         # postTokens counts only the summarized history; the system prompt and tools still come on top,
@@ -1365,7 +1351,7 @@ def measure(args):
     ctx = None
     for _ in range(8):
         time.sleep(0.75)
-        ctx = claude_context(args.transcript)
+        ctx = CLAUDE.context_size(args.transcript)
         if ctx and str(ctx) != (terminal(args.address).get("labels") or {}).get("ctx"):
             break
     if not ctx:
@@ -1378,55 +1364,6 @@ def measure(args):
         chat_append(slug, {"from": who, "address": args.address, "kind": "context", "ctx": ctx,
                            "text": f"My context is at {ctx // 1000}k tokens, and every turn re-reads all of it. "
                                    "Compact it? I keep this session; the history becomes a summary."})
-
-
-def tail_lines(path, size=4_000_000):
-    """The end of a (possibly huge) transcript, newest line first."""
-    with open(path, "rb") as f:
-        f.seek(0, 2)
-        f.seek(max(0, f.tell() - size))
-        return reversed(f.read().decode("utf-8", "replace").splitlines())
-
-
-def claude_context(transcript):
-    """Tokens in a Claude agent's context now: its last main-thread call's prompt plus reply."""
-    try:
-        lines = tail_lines(transcript)
-    except (OSError, TypeError):
-        return None
-    for line in lines:
-        if '"compact_boundary"' in line:  # compacted since its last call: unknown until its next one
-            return None
-        if '"usage"' not in line:
-            continue
-        try:
-            r = json.loads(line)
-        except ValueError:
-            continue
-        if r.get("type") != "assistant" or r.get("isSidechain"):
-            continue
-        u = (r.get("message") or {}).get("usage") or {}
-        return sum(int(u.get(k) or 0) for k in ("input_tokens", "cache_creation_input_tokens", "cache_read_input_tokens", "output_tokens")) or None
-    return None
-
-
-def last_text(transcript):
-    """The newest assistant text in a Claude transcript (older Claude Codes' Stop input lacks it)."""
-    try:
-        with open(transcript) as f:
-            lines = f.readlines()[-200:]
-    except (OSError, TypeError):
-        return ""
-    for line in reversed(lines):
-        try:
-            r = json.loads(line)
-        except ValueError:
-            continue
-        if r.get("type") == "assistant":
-            parts = [c.get("text", "") for c in (r.get("message") or {}).get("content", []) if isinstance(c, dict) and c.get("type") == "text"]
-            if any(parts):
-                return "\n".join(parts)
-    return ""
 
 
 def chain_codex_notify(payload):

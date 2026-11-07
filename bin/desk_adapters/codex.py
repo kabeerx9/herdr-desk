@@ -1,7 +1,7 @@
 """Codex CLI adapter. Tested against codex-cli 0.167.0."""
 import json
 
-from .agents import AgentAdapter
+from .agents import AgentAdapter, HookEvent
 from . import codex_transcript, screen
 
 
@@ -17,6 +17,18 @@ class CodexAdapter(AgentAdapter):
 
     def screen_state(self, text):
         return screen.screen_state(text, "codex")
+
+    def hook_event(self, argv):
+        """Codex's notify: its JSON is the last argument. None when it isn't a JSON object."""
+        try:
+            payload = json.loads(argv[-1]) if argv else {}
+        except ValueError:
+            return None
+        if not isinstance(payload, dict):
+            return None
+        if payload.get("type") != "agent-turn-complete":
+            return HookEvent(kind=payload.get("type") or "")
+        return HookEvent(kind="turn_end", message=payload.get("last-assistant-message") or "")
 
     def find_transcript(self, session):
         return codex_transcript.find_codex_rollout(session)

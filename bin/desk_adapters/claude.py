@@ -2,7 +2,7 @@
 import json
 import os
 
-from .agents import AgentAdapter
+from .agents import AgentAdapter, HookEvent
 from . import claude_transcript, screen
 
 
@@ -20,6 +20,42 @@ class ClaudeAdapter(AgentAdapter):
 
     def screen_state(self, text):
         return screen.screen_state(text, "claude")
+
+    # Hooks: Claude sends each hook one JSON object on stdin.
+
+    def hook_event(self, text):
+        """A hook's stdin as a HookEvent, or None when it isn't a JSON object."""
+        try:
+            payload = json.loads(text)
+        except ValueError:
+            return None
+        if not isinstance(payload, dict):
+            return None
+        return HookEvent(kind=payload.get("hook_event_name") or "", message=payload.get("last_assistant_message") or "",
+                         transcript=payload.get("transcript_path"), session_id=payload.get("session_id"),
+                         cwd=payload.get("cwd"), tool=payload.get("tool_name"), tool_input=payload.get("tool_input"),
+                         suggestions=tuple(payload.get("permission_suggestions") or ()))
+
+    def turn_message(self, event):
+        """The turn's final text; older Claude Codes' Stop input lacks it, so then the transcript's."""
+        return event.message or claude_transcript.last_text(event.transcript)
+
+    def permission_reply(self, behavior, message=None, rules=None, updated_input=None):
+        """What a PermissionRequest hook prints to answer for Kabeer: "allow" or "deny"."""
+        decision = {"behavior": behavior}
+        if message:
+            decision["message"] = message
+        if updated_input is not None:
+            decision["updatedInput"] = updated_input
+        if rules:
+            decision["updatedPermissions"] = list(rules)
+        return {"hookSpecificOutput": {"hookEventName": "PermissionRequest", "decision": decision}}
+
+    def context_size(self, transcript):
+        return claude_transcript.claude_context(transcript)
+
+    def compact_info(self, transcript):
+        return claude_transcript.compact_meta(transcript)
 
     def find_transcript(self, session):
         return claude_transcript.find_transcript(session.get("conversation"))

@@ -748,6 +748,56 @@ class NearestBase(unittest.TestCase):
         self.assertEqual('origin/main', rt.nearest_base(self.out({'origin/main': '5', 'origin/dev': '0'}), 'dev'))
 
 
+class HookReplies(unittest.TestCase):
+    """What the hooks print back to Claude, and what they read from Claude's and Codex's payloads."""
+
+    def setUp(self):
+        d = tempfile.TemporaryDirectory(); self.addCleanup(d.cleanup)
+        for p in (patch.object(team, 'CHAT', d.name), patch.object(team, 'PERMITS', os.path.join(d.name, '.permits')),
+                  patch.object(team, 'ME', 't1'), patch.object(team, 'watch_permit', lambda *a: None),
+                  patch.object(team, 'terminal', lambda t: {'labels': {'task': 's', 'role': 'cto'}})):
+            p.start(); self.addCleanup(p.stop)
+        os.makedirs(team.PERMITS)
+
+    def permit(self, got, suggestions=None):
+        payload = {'tool_name': 'Bash', 'tool_input': {'command': 'ls'}, **({'permission_suggestions': suggestions} if suggestions else {})}
+        out = io.StringIO()
+        with patch.object(team, 'await_permit', return_value=got), patch.object(team.sys, 'stdin', io.StringIO(json.dumps(payload))), \
+                contextlib.redirect_stdout(out):
+            team.hook(types.SimpleNamespace(cli='claude-permission', payload=[]))
+        return json.loads(out.getvalue()) if out.getvalue().strip() else None
+
+    def test_allow_always_and_deny_replies(self):
+        rule = [{'type': 'addRules', 'rules': [{'toolName': 'Bash'}]}]
+        reply = lambda d: {'hookSpecificOutput': {'hookEventName': 'PermissionRequest', 'decision': d}}
+        self.assertEqual(reply({'behavior': 'allow'}), self.permit({'decision': 'allow'}, rule))
+        self.assertEqual(reply({'behavior': 'allow', 'updatedPermissions': rule}), self.permit({'decision': 'always'}, rule))
+        self.assertEqual(reply({'behavior': 'allow'}), self.permit({'decision': 'always'}))
+        self.assertEqual(reply({'behavior': 'deny', 'message': 'Kabeer said no from the desk chat: not now'}),
+                         self.permit({'decision': 'deny', 'message': 'not now'}))
+        self.assertTrue(self.permit({'decision': 'deny'})['hookSpecificOutput']['decision']['message'].startswith("Kabeer said no from the desk chat. Don't retry"))
+
+    def test_no_answer_prints_nothing_so_claude_asks_in_its_terminal(self):
+        self.assertIsNone(self.permit(None))
+        self.assertEqual(['permission', 'permission-done'], [r['kind'] for r in team.chat_read('s')])
+        self.assertEqual('Bash', team.chat_read('s')[0]['tool'])
+
+    def codex(self, payload):
+        with patch.object(team, 'chain_codex_notify'), patch.object(team, 'wake_queue'), \
+                patch.object(team, 'clear_activity') as cleared, patch.object(team, 'sh'), \
+                patch.object(team, 'terminal', return_value={'labels': {'task': 's', 'role': 'eng', 'awaiting': 'chat:1'}}), \
+                patch.object(team, 'chat_append') as append:
+            team.hook(types.SimpleNamespace(cli='codex', payload=['ignored', json.dumps(payload)]))
+        return cleared.called, [c.args[1].get('text') for c in append.call_args_list]
+
+    def test_codex_turn_complete_posts_its_last_message(self):
+        cleared, posted = self.codex({'type': 'agent-turn-complete', 'last-assistant-message': 'Done it.'})
+        self.assertTrue(cleared); self.assertIn('Done it.', posted)
+
+    def test_codex_other_notifications_are_ignored(self):
+        self.assertEqual((False, []), self.codex({'type': 'approval-requested'}))
+
+
 class QuestionCards(unittest.TestCase):
     """AskUserQuestion in the desk chat: the hook's card, team choose, and how a wait ends."""
     QUESTION = {'question': 'Which?', 'header': 'Pick', 'multiSelect': False, 'options': [{'label': 'Red', 'description': 'r'}, {'label': 'Blue', 'description': 'b'}]}
@@ -774,7 +824,7 @@ class QuestionCards(unittest.TestCase):
         if answer: fake_write()
         out = io.StringIO()
         with patch.object(team, 'QUESTION_WAIT', wait), contextlib.redirect_stdout(out):
-            team.ask_question(payload, 's', 'cto')
+            team.ask_question(payload['tool_input'], 's', 'cto')
         return json.loads(out.getvalue())['hookSpecificOutput']['decision']
 
     def test_answer_goes_back_as_the_tools_own_input(self):

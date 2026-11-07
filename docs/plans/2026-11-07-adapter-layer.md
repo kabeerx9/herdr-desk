@@ -121,6 +121,12 @@ without a version bump. `team doctor` ships only with:
     difference yet.
 - **D. Hooks.** Move only hook parsing and reply shapes; chat and permit
   waiting stay in `team`.
+  *Done: every hook reads its payload through `ClaudeAdapter.hook_event` or
+  `CodexAdapter.hook_event` into one `HookEvent` (Desk field names), and the
+  PermissionRequest answer comes from `ClaudeAdapter.permission_reply`. Claude's
+  context-size, compaction and last-message readers moved to `claude_transcript`.
+  Tests for the allow, always, deny and Codex turn-end paths landed first, against the
+  old code.*
 - **E. Plan usage.** `usage.py` calls `adapter.plan_usage()`.
 - **F. `team doctor`** with recording and the `hc` shape check.
 

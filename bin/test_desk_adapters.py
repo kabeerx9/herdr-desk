@@ -152,6 +152,59 @@ class Host(unittest.TestCase):
         self.host().reachable(); self.assertEqual(["hc", "server", "status"], self.calls[0])
 
 
+class Hooks(unittest.TestCase):
+    """Each CLI's hook payload in the Desk's words, and Claude's reply shape."""
+
+    def test_claude_payload(self):
+        ev = da.ClaudeAdapter().hook_event(json.dumps({
+            "hook_event_name": "PermissionRequest", "session_id": "S", "cwd": "/w", "transcript_path": "/p/abc-123.jsonl",
+            "tool_name": "Bash", "tool_input": {"command": "ls"}, "permission_suggestions": [{"type": "addRules"}]}))
+        self.assertEqual(("PermissionRequest", "S", "/w", "Bash", {"command": "ls"}, ({"type": "addRules"},), "abc-123"),
+                         (ev.kind, ev.session_id, ev.cwd, ev.tool, ev.tool_input, ev.suggestions, ev.conversation))
+        for bad in ("nope", "[1]", ""):
+            self.assertIsNone(da.ClaudeAdapter().hook_event(bad))
+
+    def test_claude_turn_message_falls_back_to_the_transcript(self):
+        claude = da.ClaudeAdapter()
+        self.assertEqual("said", claude.turn_message(claude.hook_event('{"last_assistant_message": "said"}')))
+        with tempfile.NamedTemporaryFile("w", suffix=".jsonl", delete=False) as f:
+            f.write(json.dumps({"type": "assistant", "message": {"content": [{"type": "text", "text": "from log"}]}}) + "\n")
+        self.addCleanup(os.remove, f.name)
+        self.assertEqual("from log", claude.turn_message(claude.hook_event(json.dumps({"transcript_path": f.name}))))
+        self.assertEqual("", claude.turn_message(claude.hook_event("{}")))
+
+    def test_claude_permission_reply(self):
+        reply = da.ClaudeAdapter().permission_reply
+        wrap = lambda d: {"hookSpecificOutput": {"hookEventName": "PermissionRequest", "decision": d}}
+        self.assertEqual(wrap({"behavior": "allow"}), reply("allow"))
+        self.assertEqual(wrap({"behavior": "deny", "message": "no"}), reply("deny", "no"))
+        self.assertEqual(wrap({"behavior": "allow", "updatedPermissions": [{"r": 1}]}), reply("allow", rules=({"r": 1},)))
+        self.assertEqual(wrap({"behavior": "allow", "updatedInput": {"answers": {}}}), reply("allow", updated_input={"answers": {}}))
+
+    def test_codex_notify(self):
+        codex = da.CodexAdapter()
+        ev = codex.hook_event(["x", json.dumps({"type": "agent-turn-complete", "last-assistant-message": "done"})])
+        self.assertEqual(("turn_end", "done"), (ev.kind, ev.message))
+        self.assertEqual("approval-requested", codex.hook_event(['{"type": "approval-requested"}']).kind)
+        self.assertEqual("", codex.hook_event([]).kind)
+        self.assertIsNone(codex.hook_event(["not json"]))
+
+    def test_claude_context_and_compaction(self):
+        call = {"type": "assistant", "message": {"usage": {"input_tokens": 10, "cache_read_input_tokens": 90, "output_tokens": 5}}}
+        side = {**call, "isSidechain": True, "message": {"usage": {"input_tokens": 999}}}
+        boundary = {"type": "system", "subtype": "compact_boundary", "compactMetadata": {"preTokens": 5000, "trigger": "manual"}}
+        with tempfile.TemporaryDirectory() as d:
+            path = os.path.join(d, "t.jsonl")
+            with open(path, "w") as f:
+                f.write("\n".join(json.dumps(x) for x in (call, side)))
+            self.assertEqual(105, da.ClaudeAdapter().context_size(path))
+            with open(path, "a") as f:
+                f.write("\n" + json.dumps(boundary))
+            self.assertIsNone(da.ClaudeAdapter().context_size(path))
+            self.assertEqual({"preTokens": 5000, "trigger": "manual"}, da.ClaudeAdapter().compact_info(path))
+        self.assertIsNone(da.ClaudeAdapter().context_size("/nonexistent"))
+
+
 class Boundary(unittest.TestCase):
     def test_adapters_never_import_desk_code(self):
         """Adapters sit below the core: importing desk_runtime or team would make a cycle."""

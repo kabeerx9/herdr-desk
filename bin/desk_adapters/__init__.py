@@ -1,5 +1,5 @@
 """Adapters for the programs the Desk runs but doesn't own. See docs/plans/2026-11-07-adapter-layer.md."""
-from .agents import AgentAdapter, ArgvAdapter, LaunchEnv, UnsupportedCli, expand_args
+from .agents import AgentAdapter, ArgvAdapter, HookEvent, LaunchEnv, UnsupportedCli, expand_args
 from .claude import ClaudeAdapter
 from .codex import CodexAdapter
 from .host import HcHost, HostResult
