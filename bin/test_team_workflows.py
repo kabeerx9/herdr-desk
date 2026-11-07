@@ -88,7 +88,7 @@ class TeamWorkflowTests(unittest.TestCase):
             store.mutate(lambda d:team.runtime_queue_item(d,'desk',text,[{'address':'t1','role':'cto'}]))
         sent=[]
         def expect(*args): self.info['labels']['awaiting']='chat:1'; return True
-        with patch.object(team,'send_text',side_effect=lambda a,t:sent.append(t)), patch.object(team,'expect_reply',side_effect=expect), patch.object(team,'chat_append',return_value={}):
+        with patch.object(team,'send_attempt',side_effect=lambda a,t:(sent.append(t),(None,True))[1]), patch.object(team,'expect_reply',side_effect=expect), patch.object(team,'chat_append',return_value={}):
             self.call(team.runtime_queue_dispatch)
             self.call(team.runtime_queue_dispatch)
             self.assertEqual(1,len(sent))
@@ -99,7 +99,7 @@ class TeamWorkflowTests(unittest.TestCase):
     def test_queue_preserves_failure_without_automatic_retry(self):
         store=team.runtime_store()
         store.mutate(lambda d:team.runtime_queue_item(d,'desk','hello',[{'address':'t1','role':'cto'}]))
-        with patch.object(team,'send_text',return_value='transport disconnected after write') as send, patch.object(team,'expect_reply',return_value=True):
+        with patch.object(team,'send_attempt',return_value=('transport disconnected after write',True)) as send, patch.object(team,'expect_reply',return_value=True):
             result=self.call(team.runtime_queue_dispatch)
             self.call(team.runtime_queue_dispatch)
         self.assertEqual('uncertain',result['state']); self.assertEqual(1,send.call_count)
@@ -145,7 +145,7 @@ class TeamWorkflowTests(unittest.TestCase):
         store=team.runtime_store()
         store.mutate(lambda d:team.runtime_queue_item(d,'desk','busy',[{'address':'t1','role':'cto'}]))
         store.mutate(lambda d:team.runtime_queue_item(d,'other','ready',[{'address':'t2','role':'cto'}]))
-        with patch.object(team,'runtime_terminals',return_value={'t1':self.info,'t2':other}), patch.object(team,'send_text',return_value=None) as send, patch.object(team,'expect_reply'), patch.object(team,'chat_append',return_value={}):
+        with patch.object(team,'runtime_terminals',return_value={'t1':self.info,'t2':other}), patch.object(team,'send_attempt',return_value=(None,True)) as send, patch.object(team,'expect_reply'), patch.object(team,'chat_append',return_value={}):
             self.call(team.runtime_queue_dispatch)
         send.assert_called_once_with('t2','[desk chat] Kabeer: ready')
 
@@ -181,7 +181,7 @@ class TeamWorkflowTests(unittest.TestCase):
     def test_queue_reservation_failure_does_not_send(self):
         store=team.runtime_store()
         store.mutate(lambda d:team.runtime_queue_item(d,'desk','hello',[{'address':'t1','role':'cto'}]))
-        with patch.object(team,'expect_reply',return_value=False), patch.object(team,'send_text') as send:
+        with patch.object(team,'expect_reply',return_value=False), patch.object(team,'send_attempt') as send:
             result=self.call(team.runtime_queue_dispatch)
         send.assert_not_called()
         self.assertEqual('not_sent',result['deliveries']['t1']['state'])

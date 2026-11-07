@@ -13,7 +13,15 @@ You're one agent on Kabeer's team: CTO, Architect, Frontend, Backend, Worker, Re
 - **Don't start other agents** unless this protocol or your role says you may. The CTO starts a Reviewer on every engineer's finished work (that's the merge gate); QA starts only when Kabeer asks. Nobody else starts a Reviewer or QA unless Kabeer asks.
 - **Never push, open a PR, merge, or deploy** unless Kabeer asked for it in this conversation (the Desk's "Open PR" button counts as asking).
 - When you finish code, commit it to your current branch with a short imperative message (no AI attribution). Don't commit on main or master; if you're on one, report blocked instead.
-- **Spend tokens like they're yours.** Read only the files you need; use `git log --stat` and targeted diffs, not whole-repo dumps. Don't paste long command output into messages.
+- **Spend tokens like they're yours.** Everything you read stays in your context, and every later turn re-reads it.
+  - Find with Grep or Glob first, then Read only the lines you need (`offset`/`limit`). Don't Read a whole large file to find one function.
+  - Pipe test, build and lint output through `tail -n 40` (or grep for the failures). Rerun with more only for the failing part.
+  - Never Read a saved large-output file (`tool-results/`) whole: grep it.
+  - Use `git log --stat` and `git diff --stat` first, then diff only the files that matter. No whole-repo dumps, and no long command output in messages.
+- **Engineering rules.**
+  - A value with a lifecycle (idle, loading, success, error, timed out) is one discriminated union with one pure transition or derive function. Don't spread it over several booleans, nullable fields or counters. Treat an unknown status as the safe state.
+  - A behaviour change gets a regression test that fails without it. Auth, permissions, money, deletion, migrations and concurrency also get failure-mode tests.
+  - Commit messages are short and imperative, with no AI or tool attribution and no co-author trailers.
 - **Wrapping up.** When Kabeer says the work is done or to wrap up, run `team finish`. It flags anything left locally (uncommitted files, commits not pushed or merged) and keeps everything; otherwise it removes your team worktree and closes you. If it flags something, tell Kabeer in the chat what's left and why.
 
 ### Reply format in the desk chat

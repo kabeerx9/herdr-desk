@@ -412,6 +412,26 @@ class ParallelWorkerTests(unittest.TestCase):
         self.assertNotIn('Skill', tools)
         self.assertIn('--strict-mcp-config', team.argv_for({**arch, 'promptText': ''}, ''))
 
+    def test_a_roles_settings_narrow_its_menu_but_never_replace_the_hooks(self):
+        role = {'cli': 'claude', 'promptText': '', 'settings': {
+            'enabledPlugins': {'slack@claude-plugins-official': False}, 'claudeMdExcludes': ['/u/CLAUDE.md'],
+            'env': {'X': '1'}, 'hooks': {'Stop': []}}}
+        argv = team.argv_for(role, '')
+        settings = json.loads(argv[argv.index('--settings') + 1])
+        self.assertEqual({'slack@claude-plugins-official': False}, settings['enabledPlugins'])
+        self.assertEqual(['/u/CLAUDE.md'], settings['claudeMdExcludes'])
+        self.assertEqual(('1', '/bin/bash'), (settings['env']['X'], settings['env']['CLAUDE_CODE_SHELL']))
+        self.assertTrue(settings['hooks']['Stop'])
+
+    def test_engineers_skip_the_personal_claude_md_and_keep_skills(self):
+        for role in team.load_roles():
+            if role['id'] in ('frontend', 'backend', 'worker', 'qa'):
+                argv = team.argv_for({**role, 'promptText': ''}, '')
+                settings = json.loads(argv[argv.index('--settings') + 1])
+                self.assertEqual([os.path.expanduser('~/.claude/CLAUDE.md')], settings['claudeMdExcludes'], role['id'])
+                self.assertFalse(settings['enabledPlugins'].get('slack@claude-plugins-official', True), role['id'])
+                self.assertIn('Skill', argv[2].split(','), role['id'])
+
     def test_claude_roles_run_commands_in_bash(self):
         argv = team.argv_for({'cli': 'claude', 'promptText': ''}, '')
         settings = json.loads(argv[argv.index('--settings') + 1])
@@ -866,6 +886,42 @@ class QuestionCards(unittest.TestCase):
             if role.get('cli') == 'claude' and role['id'] != 'cto':
                 self.assertNotIn('AskUserQuestion', role['tools'])
 
+
+class RegistrySizeTests(Base):
+    """.runtime.json keeps what resume needs, not a copy of every prompt, and forgets deleted desks."""
+
+    def test_a_session_stores_only_the_prompt_its_launch_added(self):
+        self.roles = [{'id': 'backend', 'name': 'Backend', 'cli': 'claude', 'promptText': 'ROLE FILE + PROTOCOL', 'model': 'm'}]
+        rec = team.runtime_record('t7', 'backend', 'desk', self.tmp.name, 'claude', 'c',
+                                  role_config={**self.roles[0], 'promptText': 'ROLE FILE + PROTOCOL\n\nYour desk is desk.'})
+        stored = next(x for x in team.runtime_store().load()['sessions'] if x['address'] == 't7')['role_config']
+        self.assertNotIn('promptText', stored)
+        self.assertEqual('\n\nYour desk is desk.', stored['prompt_extra'])
+        self.assertEqual('ROLE FILE + PROTOCOL\n\nYour desk is desk.', team.role_for_session(rec)['promptText'])
+        self.assertEqual('m', team.role_for_session(rec)['model'])
+
+    def test_a_prompt_not_built_from_the_files_is_kept_whole(self):
+        slim = rt.slim_role_config({'id': 'x', 'promptText': 'custom'}, 'ROLE FILE')
+        self.assertEqual('custom', slim['promptText'])
+        self.assertEqual(slim, rt.full_role_config(slim, 'ROLE FILE'))
+
+    def test_sessions_of_deleted_desks_are_dropped(self):
+        data = {'sessions': [{'task': 'gone'}, {'task': 'here'}, {'task': None}],
+                'queue': [{'task': 'gone', 'state': 'delivered'}, {'task': 'gone', 'state': 'pending'}, {'task': 'here', 'state': 'failed'}]}
+        data['sessions'].append({'task': 'gone', 'at': 10_000_000})                       # recorded a moment ago
+        self.assertEqual(1, rt.prune_sessions(data, lambda slug: slug == 'here', clock=lambda: 10_000_001))
+        self.assertEqual(10_000_000, data['sessions'].pop()['at'])
+        self.assertEqual([{'task': 'here'}, {'task': None}], data['sessions'])
+        self.assertEqual(['pending', 'failed'], [q['state'] for q in data['queue']])
+
+    def test_recording_a_launch_prunes_and_keeps_the_new_desk(self):
+        team.runtime_record('t8', 'cto', 'old-desk', '/work', 'claude', 'c')
+        team.runtime_store().mutate(lambda d: [x.update(at=1) for x in d['sessions'] if x['task'] == 'old-desk'])
+        team.chat_append('live-desk', {'from': 'kabeer', 'kind': 'desk'})
+        team.runtime_record('t9', 'cto', 'brand-new', '/work', 'claude', 'c')   # no chat file yet
+        tasks = {x['task'] for x in team.runtime_store().load()['sessions']}
+        self.assertNotIn('old-desk', tasks)
+        self.assertIn('brand-new', tasks)
 
 class ArchitectTests(Base):
     """The Architect: a fresh consult per decision, and the plan review that gates design engineers."""

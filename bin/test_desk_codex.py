@@ -167,6 +167,31 @@ class CodexGuardTests(Base):
         code, out = self.call(team.runtime_queue_dispatch)
         self.assertEqual("delivered", out["state"])
 
+    def test_a_recipient_gone_after_the_claim_does_not_stay_awaiting(self):
+        # Nothing was typed, so no turn will end to clear the label: dispatch must clear it.
+        self.call(team.runtime_queue, task="desk", to=["t4:reviewer"], text=["later"])
+        self.term.screen = IDLE
+        with patch.object(team, "terminal", lambda a: {}):
+            code, out = self.call(team.runtime_queue_dispatch)
+        self.assertEqual("uncertain", out["state"])
+        self.assertEqual([], self.sent())
+        self.assertIn(["hc", "label", "t4", "awaiting="], self.term.calls)
+
+    def test_a_failed_hc_send_keeps_awaiting(self):
+        # hc send may have typed some of it: the reply could still come, so the label stays.
+        self.call(team.runtime_queue, task="desk", to=["t4:reviewer"], text=["later"])
+        self.term.screen = IDLE
+        real = self.term.sh
+        def sh(args, **kw):
+            if args[:2] == ["hc", "send"]:
+                self.term.calls.append(args)
+                return subprocess.CompletedProcess(args, 1, "", "broken pipe")
+            return real(args, **kw)
+        with patch.object(team, "sh", side_effect=sh):
+            code, out = self.call(team.runtime_queue_dispatch)
+        self.assertEqual("uncertain", out["state"])
+        self.assertNotIn(["hc", "label", "t4", "awaiting="], self.term.calls)
+
     def test_report_to_a_parent_in_a_dialog_is_recorded_not_typed(self):
         self.info["t5"] = terminal("codex", address="t5", role="reviewer", parent="t4")
         with patch.object(team, "ME", "t5"), patch.object(team, "need_core"), \
@@ -185,6 +210,34 @@ class CodexGuardTests(Base):
         self.call(team.compact, address="t1")
         self.assertEqual("/", self.sent()[-1][3])
 
+
+    def measure(self, labels=None, ctx=160_000):
+        self.info["t1"]["labels"].update(labels or {})
+        with patch.object(team.CLAUDE, "context_size", return_value=ctx), patch.object(team.time, "sleep"), \
+                patch.object(team, "fresh_at", lambda role: 150_000):
+            self.call(team.measure, address="t1", transcript="/x.jsonl", compacted=False)
+
+    def test_past_the_limit_an_idle_agent_is_compacted_without_asking(self):
+        self.term.screen = PROMPT
+        self.measure()
+        self.assertEqual("/", self.sent()[-1][3])
+        self.assertFalse(any(r.get("kind") == "context" for r in team.chat_read("desk")))
+        self.assertIn(["hc", "label", "t1", "ctx=160000", "ctxwarned=1"], self.term.calls)
+
+    def test_an_agent_owed_a_reply_or_in_a_dialog_gets_the_chat_offer(self):
+        self.term.screen = PROMPT
+        self.measure({"awaiting": "chat:1"})
+        self.term.screen = USAGE
+        self.info["t1"]["labels"].pop("awaiting")
+        self.measure()
+        self.assertEqual([], self.sent())
+        self.assertEqual(2, sum(r.get("kind") == "context" for r in team.chat_read("desk")))
+
+    def test_under_the_limit_or_already_warned_does_nothing(self):
+        self.term.screen = PROMPT
+        self.measure(ctx=120_000)
+        self.measure({"ctxwarned": "1"})
+        self.assertEqual([], self.sent())
 
 class StartupDialogTests(Base):
     """team start for a Codex member: a bounded watch of its screen, a chat line when a dialog shows."""

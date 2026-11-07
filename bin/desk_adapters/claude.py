@@ -151,12 +151,20 @@ class ClaudeAdapter(AgentAdapter):
         os.makedirs(env.attachments, exist_ok=True)
         base += ["--add-dir", env.attachments]
         me = env.self_path
-        base += ["--settings", json.dumps({"env": {"CLAUDE_CODE_SHELL": "/bin/bash", "CLAUDE_CODE_ENABLE_PROMPT_SUGGESTION": "false"}, "hooks": {
+        settings = {"env": {"CLAUDE_CODE_SHELL": "/bin/bash", "CLAUDE_CODE_ENABLE_PROMPT_SUGGESTION": "false"}, "hooks": {
             "Stop": [{"hooks": [{"type": "command", "command": f"{me} hook claude", "timeout": 20}]}],
             "PreToolUse": [{"matcher": "*", "hooks": [{"type": "command", "command": f"{me} hook claude-tool", "timeout": 10}]}],
             # UserPromptSubmit: the turn starts; snapshot the worktree for the Last turn review.
             "UserPromptSubmit": [{"hooks": [{"type": "command", "command": f"{me} hook claude-prompt", "timeout": 15}]}],
             "SessionStart": [{"matcher": "startup|resume|clear", "hooks": [{"type": "command", "command": f"{me} hook session", "timeout": 10}]}, {"matcher": "compact", "hooks": [{"type": "command", "command": f"{me} hook claude-compact", "timeout": 20}]}],
-            "PermissionRequest": [{"matcher": "*", "hooks": [{"type": "command", "command": f"{me} hook claude-permission", "timeout": env.question_timeout}]}]}})]
+            "PermissionRequest": [{"matcher": "*", "hooks": [{"type": "command", "command": f"{me} hook claude-permission", "timeout": env.question_timeout}]}]}}
+        # A role's own settings go on top (enabledPlugins narrows its skill menu; claudeMdExcludes
+        # skips memory files it never needs). env merges; the Desk's hooks can't be replaced, because
+        # they are how the Desk sees the agent.
+        for key, value in (role.get("settings") or {}).items():
+            if key == "hooks":
+                continue
+            settings[key] = {**settings["env"], **value} if key == "env" and isinstance(value, dict) else value
+        base += ["--settings", json.dumps(settings)]
         base += ["--append-system-prompt", prompt] if prompt else []
         return base + extra + ([task] if task else [])

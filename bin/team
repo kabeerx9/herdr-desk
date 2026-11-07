@@ -36,7 +36,7 @@ One launcher for everyone (the CTO, the Desk's buttons, you): it reads roles.jso
 gives every editing role its own git worktree, and starts the role with hc in its own Herdr tab, labeled role=<id> task=<slug>.
 Children always outlive their parent, so closing the CTO doesn't end its workers.
 """
-import contextlib, fcntl, glob, io, json, os, re, secrets, shutil, subprocess, sys, time, shlex, types, uuid
+import contextlib, fcntl, glob, io, json, os, re, secrets, shutil, subprocess, sys, tempfile, time, shlex, types, uuid
 import desk_adapters
 from desk_runtime import Store as RuntimeStore, RuntimeError as DeskRuntimeError, adapter as runtime_adapter
 from desk_runtime import JOB_TAIL, nearest_base, read_tail, transcript_jobs
@@ -48,6 +48,7 @@ from desk_runtime import (classify_launch_failure, last_tool_at, turn_started, f
 from desk_runtime import DIALOG_OPEN, NO_INPUT, cleared_transcript, command_result, screen_state
 from desk_runtime import diff_stat, dialog_matches, permission_dialog, pick_option, task_line
 from desk_runtime import has_plan_record, next_record, plan_review_required
+from desk_runtime import full_role_config, prune_sessions, slim_role_config
 
 APP = os.environ.get("HERDR_APP_HOME") or os.path.expanduser("~/.config/herdr-app")
 DESK = os.path.join(APP, "mods", "desk")
@@ -73,7 +74,7 @@ HOST = desk_adapters.HcHost(lambda argv: sh(argv))
 CLAUDE, CODEX = desk_adapters.by_cli("claude"), desk_adapters.by_cli("codex")
 
 
-FRESH_AT = 250_000  # roles.json "fresh_at" (or a role's own) overrides it
+FRESH_AT = 150_000  # roles.json "fresh_at" (or a role's own) overrides it
 
 
 def roles_file():
@@ -118,8 +119,15 @@ def adapter_args(role, action, identity):
         raise DeskRuntimeError(str(e))
 
 
+def base_prompt(role_id):
+    """The prompt a role launches with before any desk note: its prompt file plus the protocol."""
+    return next((r["promptText"] for r in load_roles() if r["id"] == role_id), "")
+
+
 def role_for_session(rec):
-    return rec.get("role_config") or next((r for r in load_roles() if r["id"] == rec.get("role")), None)
+    if rec.get("role_config"):
+        return full_role_config(rec["role_config"], base_prompt(rec.get("role")))
+    return next((r for r in load_roles() if r["id"] == rec.get("role")), None)
 
 
 def agent_identity(info):
@@ -185,10 +193,14 @@ def runtime_record(address, role, task, cwd, cli, conversation=None, parent_task
         return None
     store = runtime_store()
     git_repo = repo_of(cwd) if role_config and cwd else None
-    return store.mutate(lambda data: dict(upsert_session(data, {"address": address, "role": role, "task": task, "cwd": cwd,
-        "cli": cli or "claude", "conversation": conversation, "parent_task": parent_task, "capabilities": capabilities, "recovering": False,
-        "role_config": role_config, "git_root": git_repo["top"] if git_repo else None, "space": space, "tab": tab, "at": int(time.time() * 1000),
-        **extra})))
+    role_config = slim_role_config(role_config, base_prompt(role)) if role_config else role_config
+    def record(data):
+        prune_sessions(data, lambda slug: os.path.exists(chat_file(slug)) or slug == task)
+        return dict(upsert_session(data, {"address": address, "role": role, "task": task, "cwd": cwd,
+            "cli": cli or "claude", "conversation": conversation, "parent_task": parent_task, "capabilities": capabilities, "recovering": False,
+            "role_config": role_config, "git_root": git_repo["top"] if git_repo else None, "space": space, "tab": tab, "at": int(time.time() * 1000),
+            **extra}))
+    return store.mutate(record)
 
 
 def ended_terminals():
@@ -313,6 +325,22 @@ def chat_file(slug):
     return os.path.join(CHAT, f"{slug}.jsonl")
 
 
+def write_atomic(path, text):
+    """Replaces path whole: readers see the old file or the new one, never half. The temp file has a
+    unique name, so two writers never share (and truncate, or move away) one temp file."""
+    folder = os.path.dirname(path) or "."
+    os.makedirs(folder, exist_ok=True)
+    fd, tmp = tempfile.mkstemp(dir=folder, prefix="." + os.path.basename(path) + ".", suffix=".tmp")
+    try:
+        with os.fdopen(fd, "w") as f:
+            f.write(text)
+        os.replace(tmp, path)
+    except BaseException:
+        with contextlib.suppress(OSError):
+            os.remove(tmp)
+        raise
+
+
 @contextlib.contextmanager
 def chat_lock(slug):
     """Appends and the one rewrite (desk_autoname) take this, so a rewrite never drops an append."""
@@ -355,10 +383,7 @@ def desk_autoname(slug, title):
                 return False
             rest = f.read()
         head.update(name=title, named="title", auto=False)
-        tmp = path + ".tmp"
-        with open(tmp, "w") as f:
-            f.write(json.dumps(head) + "\n" + rest)
-        os.replace(tmp, path)
+        write_atomic(path, json.dumps(head) + "\n" + rest)
     return True
 
 
@@ -391,23 +416,28 @@ def cursors_file(slug):
     return chat_file(slug)[:-len(".jsonl")] + ".cursors.json"
 
 
-def unread(slug, address, advance=True):
-    """Chat records `address` hasn't seen: after its cursor, not its own, not ones sent to it.
-    One file per desk keeps each agent's cursor, so nothing repeats and nothing is skipped."""
-    recs = chat_read(slug)
+def read_cursors(slug):
     try:
         with open(cursors_file(slug)) as f:
             cur = json.load(f)
+        return cur if isinstance(cur, dict) else {}
     except (OSError, ValueError):
-        cur = {}
-    new = [r for r in recs[cur.get(address, 0):] if r.get("kind") != "desk" and r.get("address") != address
-           and address not in (r.get("delivered_to") or [])]
-    if advance:
-        cur[address] = len(recs)
-        tmp = cursors_file(slug) + ".tmp"
-        with open(tmp, "w") as f:
-            json.dump(cur, f)
-        os.replace(tmp, cursors_file(slug))
+        return {}
+
+
+def unread(slug, address, advance=True):
+    """Chat records `address` hasn't seen: after its cursor, not its own, not ones sent to it.
+    One file per desk keeps each agent's cursor, so nothing repeats and nothing is skipped. Readers
+    and appends share the chat lock: the cursor read-modify-write never loses another agent's
+    update, and len(recs) can't move between reading the chat and saving the cursor."""
+    with chat_lock(slug):
+        recs = chat_read(slug)
+        cur = read_cursors(slug)
+        new = [r for r in recs[cur.get(address, 0):] if r.get("kind") != "desk" and r.get("address") != address
+               and address not in (r.get("delivered_to") or [])]
+        if advance:
+            cur[address] = len(recs)
+            write_atomic(cursors_file(slug), json.dumps(cur))
     return new
 
 
@@ -526,15 +556,22 @@ def attachment_note(files):
     return "\n\nAttached files:\n" + "\n".join(f"- {f['path']}" for f in files) if files else ""
 
 
-def send_text(addr, text):
+def send_attempt(addr, text):
+    """(why, typed): why is None when sent. typed is False when a check refused before anything
+    reached the terminal (gone, or a dialog open), so no reply can come; True when hc send ran,
+    even if it failed, because some of the text may have been typed."""
     info = terminal(addr)
     if not is_agent(info):
-        return "Recipient is disconnected or no longer running its configured agent"
+        return "Recipient is disconnected or no longer running its configured agent", False
     why = dialog_open(addr, info)
     if why:
-        return why
+        return why, False
     r = HOST.send_text(addr, text)
-    return None if r.ok else r.message[:160]
+    return (None if r.ok else r.message[:160]), True
+
+
+def send_text(addr, text):
+    return send_attempt(addr, text)[0]
 
 
 def send(args):
@@ -1162,10 +1199,7 @@ def rule_label(suggestions):
 
 def write_permit(pid, data):
     os.makedirs(PERMITS, exist_ok=True)
-    path = os.path.join(PERMITS, f"{pid}.json")
-    with open(path + ".tmp", "w") as f:
-        json.dump(data, f)
-    os.replace(path + ".tmp", path)  # whole or absent: the hook never reads half a file
+    write_atomic(os.path.join(PERMITS, f"{pid}.json"), json.dumps(data))  # whole or absent: the hook never reads half a file
 
 
 def await_permit(path, deadline, ready):
@@ -1354,32 +1388,41 @@ def compacted():
                      stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, start_new_session=True)
 
 
-def compact(args):
-    """Types /compact into a Claude agent, as keys (hc send would paste it as a message)."""
-    need_core()
-    info = terminal(args.address)
+def compact_now(address):
+    """Types /compact into a Claude agent, as keys (hc send would paste it as a message). Returns
+    why it didn't, or None. Refuses unless the agent is between turns with no dialog and owes no
+    reply, so it never types over work or a message on its way in."""
+    info = terminal(address)
     if info.get("state") != "live":
-        die(f"{args.address} isn't a live terminal")
-    role = next((r for r in load_roles() if r["id"] == (info.get("labels") or {}).get("role")), {})
-    if role.get("cli") == "codex":
-        die("compact is for Claude agents")
+        return f"{address} isn't a live terminal"
+    if cli_of(info) == "codex":
+        return "compact is for Claude agents"
     status = (info.get("status") or {}).get("state")
     if status in ("working", "blocked"):
-        die(f"it's {'working' if status == 'working' else 'waiting on you in its terminal'}; compact once its turn ends")
-    why = dialog_open(info.get("address") or args.address, info)
+        return f"it's {'working' if status == 'working' else 'waiting on you in its terminal'}; compact once its turn ends"
+    if (info.get("labels") or {}).get("awaiting"):
+        return "a message is on its way to it; compact once it has replied"
+    why = dialog_open(info.get("address") or address, info)
     if why:
-        die(why + "; close it there first")
+        return why + "; close it there first"
     keep = "keep the task and why decisions made files and commits touched next steps open questions and who is waiting"
     keys = ["/", *"compact", "space", *["space" if c == " " else c for c in keep], "enter"]
-    r = HOST.send_keys(info.get("address") or args.address, keys)
-    if not r.ok:
-        die(f"couldn't type into it: {r.error[:160]}")
+    r = HOST.send_keys(info.get("address") or address, keys)
+    return None if r.ok else f"couldn't type into it: {r.error[:160]}"
+
+
+def compact(args):
+    need_core()
+    why = compact_now(args.address)
+    if why:
+        die(why)
     print(json.dumps({"ok": True}))
 
 
 def measure(args):
-    """(Claude's hook, detached) labels ctx=<tokens>; the first time past the role's limit, says so in the chat.
-    After a compaction, its new size, and a line in the chat."""
+    """(Claude's hook, detached) labels ctx=<tokens>. The first time past the role's limit, it compacts
+    the agent itself (its turn has just ended); if it can't, it asks in the chat. After a compaction,
+    its new size, and a line in the chat."""
     if args.compacted:
         meta, before = None, (terminal(args.address).get("labels") or {})
         for _ in range(20):
@@ -1409,7 +1452,8 @@ def measure(args):
     slug, who = labels.get("task"), labels.get("role")
     warn = bool(slug and who and ctx >= fresh_at(who) and not labels.get("ctxwarned"))
     HOST.label(args.address, {"ctx": ctx, **({"ctxwarned": 1} if warn else {})})
-    if warn:
+    # The compaction's own hook posts "compacted its context" and clears ctxwarned.
+    if warn and compact_now(args.address):
         chat_append(slug, {"from": who, "address": args.address, "kind": "context", "ctx": ctx,
                            "text": f"My context is at {ctx // 1000}k tokens, and every turn re-reads all of it. "
                                    "Compact it? I keep this session; the history becomes a summary."})
@@ -1539,11 +1583,7 @@ def approve(args):
     via = "keys"
     if hook and (choice != "always" or hook.get("always")) and dialog_matches(dialog, hook.get("detail")):
         # The hook is waiting on this very prompt: answer it by id (it also saves Claude's rule for "always").
-        os.makedirs(PERMITS, exist_ok=True)
-        path = os.path.join(PERMITS, f"{hook['id']}.json")
-        with open(path + ".tmp", "w") as f:
-            json.dump({"decision": choice}, f)
-        os.replace(path + ".tmp", path)
+        write_permit(hook["id"], {"decision": choice})
         via = "hook"
     else:
         hook = hook if hook and dialog_matches(dialog, hook.get("detail")) else None
@@ -2065,7 +2105,7 @@ def runtime_adopt(_args):
             config = adapter_config(role)
             record = upsert_session(data, {"address": address, "role": labels["role"], "task": labels["task"],
                 "cwd": info.get("cwd"), "cli": cli, "conversation": existing.get("conversation") or identity,
-                "role_config": existing.get("role_config") or role,
+                "role_config": existing.get("role_config") or slim_role_config(role, role.get("promptText")),
                 "capabilities": {"resume": bool(config.get("resume_args")), "fork": bool(config.get("fork_args"))},
                 "git_root": (repo_of(info.get("cwd")) or {}).get("top"),
                 "space": labels.get("herdr.space"), "tab": labels.get("herdr.tab"), "at": existing.get("at") or int(time.time() * 1000)})
@@ -2223,9 +2263,10 @@ def runtime_queue_dispatch_locked(store, _args):
             why = "Could not reserve its reply; this recipient was not sent the message"
             outcome = "not_sent"
         else:
-            why = send_text(target["address"], "[desk chat] Kabeer: " + claimed["text"])
-            # A dialog opened since the claim: nothing was typed, so it waits for the dialog to close.
-            outcome = "not_sent" if why and DIALOG_OPEN in why else "uncertain" if why else "sent"
+            why, typed = send_attempt(target["address"], "[desk chat] Kabeer: " + claimed["text"])
+            # Refused before typing (a dialog opened since the claim, or the recipient is gone): no
+            # turn will end to clear the reservation, so clear it here. A dialog keeps the item queued.
+            outcome = "sent" if not why else "uncertain" if typed else "not_sent"
             if outcome == "not_sent": HOST.label(target["address"], {"awaiting": ""})
         if why: failures.append({"role": target["role"], "why": why, **({"dialog": True} if DIALOG_OPEN in why else {})})
         def record_delivery(data):
@@ -2627,17 +2668,11 @@ def take_over(info, addr, labels, role_id, slug, cwd):
         HOST.label(addr, {"handoff": ""})
         return
     # The new session reads the chat from where the old one stopped.
-    try:
-        with open(cursors_file(slug)) as f:
-            cur = json.load(f)
-    except (OSError, ValueError):
-        cur = {}
-    if addr in cur:
-        cur[new] = cur.pop(addr)
-        tmp = cursors_file(slug) + ".tmp"
-        with open(tmp, "w") as f:
-            json.dump(cur, f)
-        os.replace(tmp, cursors_file(slug))
+    with chat_lock(slug):
+        cur = read_cursors(slug)
+        if addr in cur:
+            cur[new] = cur.pop(addr)
+            write_atomic(cursors_file(slug), json.dumps(cur))
     HOST.kill(addr)
     print(json.dumps({"ok": True, "address": new, "replaced": addr, "handoff": path if wrote else None}))
 

@@ -631,3 +631,39 @@ def next_record(names, kind):
 
 def has_plan_record(names):
     return any(PLAN_RECORD.match(n) for n in names)
+
+
+# Registry size. A session keeps its role's settings for resume, but not the prompt text (about 17k
+# characters each): the prompt files are the source, and only the part this launch added (the desk
+# note, a fork's note) is stored. Sessions of deleted desks are dropped; nothing can resume them.
+def slim_role_config(role_config, base_prompt):
+    if not isinstance(role_config, dict) or "promptText" not in role_config:
+        return role_config
+    text = role_config.get("promptText") or ""
+    slim = {k: v for k, v in role_config.items() if k != "promptText"}
+    if base_prompt and text.startswith(base_prompt):
+        slim["prompt_extra"] = text[len(base_prompt):]
+    else:
+        slim["promptText"] = text  # not built from the current files: keep it whole
+    return slim
+
+
+def full_role_config(role_config, base_prompt):
+    if not isinstance(role_config, dict) or "prompt_extra" not in role_config:
+        return role_config
+    full = {k: v for k, v in role_config.items() if k != "prompt_extra"}
+    full["promptText"] = (base_prompt or "") + role_config["prompt_extra"]
+    return full
+
+
+PRUNE_GRACE_MS = 10 * 60 * 1000  # a desk's chat file is written just after its first session is recorded
+
+
+def prune_sessions(data, desk_exists, clock=now_ms):
+    """Drops sessions (and finished queue items) whose desk is gone. Returns how many sessions went."""
+    recent = clock() - PRUNE_GRACE_MS
+    keep = [s for s in data.get("sessions", []) if not s.get("task") or desk_exists(s["task"]) or (s.get("at") or 0) > recent]
+    gone = len(data.get("sessions", [])) - len(keep)
+    data["sessions"] = keep
+    data["queue"] = [q for q in data.get("queue", []) if q.get("state") in ("pending", "dispatching") or desk_exists(q.get("task"))]
+    return gone
