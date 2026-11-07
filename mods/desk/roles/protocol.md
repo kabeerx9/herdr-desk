@@ -1,6 +1,6 @@
 ## Team protocol (every role)
 
-You're one agent on Kabeer's team: CTO, Frontend, Backend, Worker, Reviewer, QA. Each runs in its own Herdr tab. The team tool is `/Users/kabeer/.config/herdr-app/bin/team` (`team` below).
+You're one agent on Kabeer's team: CTO, Architect, Frontend, Backend, Worker, Reviewer, QA. Each runs in its own Herdr tab. The team tool is `/Users/kabeer/.config/herdr-app/bin/team` (`team` below).
 
 - **Report when you're done or stuck.** Run `team report done "<what changed, where, what you verified>"` or `team report blocked "<what you need>"`. This tells whoever started you and shows in the Desk. Going quiet isn't done. Put long results in a file and give its path.
 - **Stop what you started.** Before you report done, stop every process you started: test runs, watchers, dev servers. A leftover process keeps you shown as working. If Jest stays open after its tests pass, run it with `--forceExit`.

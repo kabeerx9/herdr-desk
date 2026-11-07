@@ -386,7 +386,7 @@ class ParallelWorkerTests(unittest.TestCase):
         self.assertNotIn('--approve-for-me', team.argv_for({'cli': 'codex', 'promptText': ''}, ''))
 
     def test_every_claude_engineer_launches_with_skills(self):
-        roles = [r for r in team.load_roles() if r.get('cli') == 'claude' and r['id'] != 'cto']
+        roles = [r for r in team.load_roles() if r.get('cli') == 'claude' and r['id'] not in ('cto', 'architect')]
         self.assertEqual({'frontend', 'backend', 'worker', 'qa'}, {r['id'] for r in roles})
         for role in roles:
             self.assertIn('Skill', team.argv_for({**role, 'promptText': ''}, '')[2].split(','), role['id'])
@@ -396,11 +396,21 @@ class ParallelWorkerTests(unittest.TestCase):
         settings = json.loads(argv[argv.index('--settings') + 1])
         self.assertEqual('false', settings['env']['CLAUDE_CODE_ENABLE_PROMPT_SUGGESTION'])
 
-    def test_cto_launches_as_a_full_claude_code_session(self):
+    def test_cto_keeps_every_built_in_tool_but_no_mcp(self):
+        # The CTO relays and decides; driving a browser or simulator is QA's or an engineer's job.
         cto = next(r for r in team.load_roles() if r['id'] == 'cto')
         argv = team.argv_for({**cto, 'promptText': ''}, '')
         self.assertNotIn('--tools', argv)
-        self.assertNotIn('--strict-mcp-config', argv)
+        self.assertIn('--strict-mcp-config', argv)
+
+    def test_the_architect_is_a_read_only_consult_on_request(self):
+        arch = next(r for r in team.load_roles() if r['id'] == 'architect')
+        self.assertTrue(arch.get('on_request'))
+        self.assertFalse(arch.get('worktree'))
+        tools = team.argv_for({**arch, 'promptText': ''}, '')[2].split(',')
+        self.assertNotIn('Edit', tools)
+        self.assertNotIn('Skill', tools)
+        self.assertIn('--strict-mcp-config', team.argv_for({**arch, 'promptText': ''}, ''))
 
     def test_claude_roles_run_commands_in_bash(self):
         argv = team.argv_for({'cli': 'claude', 'promptText': ''}, '')
@@ -855,6 +865,91 @@ class QuestionCards(unittest.TestCase):
         for role in team.load_roles():
             if role.get('cli') == 'claude' and role['id'] != 'cto':
                 self.assertNotIn('AskUserQuestion', role['tools'])
+
+
+class ArchitectTests(Base):
+    """The Architect: a fresh consult per decision, and the plan review that gates design engineers."""
+    BACKEND = {'id': 'backend', 'name': 'Backend', 'cli': 'claude', 'promptText': '', 'tools': ['Read'], 'worktree': True}
+    ARCHITECT = {'id': 'architect', 'name': 'Architect', 'cli': 'claude', 'promptText': '', 'tools': ['Read'], 'on_request': True}
+
+    def test_plan_review_rule(self):
+        roles = [self.ARCHITECT, self.BACKEND]
+        need = lambda role, by=None, reviewed=False, rs=roles: rt.plan_review_required(role, rs, by, reviewed)
+        self.assertTrue(need(self.BACKEND))
+        self.assertFalse(need(self.BACKEND, reviewed=True))
+        self.assertFalse(need(self.BACKEND, by='desk'))                              # Kabeer's own call
+        self.assertFalse(need(self.BACKEND, rs=[self.BACKEND]))                      # no architect configured
+        self.assertFalse(need({**self.BACKEND, 'light_review': True}))               # Worker
+        self.assertFalse(need({**self.BACKEND, 'on_request': True}))                 # QA
+        self.assertFalse(need({'id': 'reviewer', 'worktree': False}))
+
+    def test_record_names_count_up_and_find_the_plan(self):
+        self.assertEqual('01-plan.md', rt.next_record([], 'plan'))
+        self.assertEqual('03-where-does-the-cart-live.md', rt.next_record(['01-plan.md', '02-x.md', 'notes.txt'], 'Where does the cart live?'))
+        self.assertEqual('01-decision.md', rt.next_record([], '???'))
+        self.assertTrue(rt.has_plan_record(['02-x.md', '01-plan.md']))
+        self.assertFalse(rt.has_plan_record(['01-plan-notes.md', 'plan.md', '01-x.md']))
+
+    def run_cmd(self, fn, **args):
+        self.roles = [copy.deepcopy(self.ARCHITECT), copy.deepcopy(self.BACKEND)]
+        launches = []
+        def sh(argv, cwd=None, check=False):
+            if argv[:2] == ['hc', 'run']:
+                address = 't%d' % (len(launches) + 2)
+                launches.append(argv)
+                role = next(a.split('=', 1)[1] for a in argv if a.startswith('role='))
+                self.info[address] = terminal(address=address, role=role)
+                return subprocess.CompletedProcess(argv, 0, json.dumps({'address': address}), '')
+            return subprocess.CompletedProcess(argv, 0, '{}', '')
+        repo = {'top': self.tmp.name, 'main': self.tmp.name, 'common': os.path.join(self.tmp.name, '.git'), 'name': 'r'}
+        with patch.object(team, 'need_core'), patch.object(team, 'repo_of', return_value=repo), patch.object(team, 'sh', side_effect=sh):
+            code, out = self.call(fn, **args)
+        return code, out, launches, os.path.join(repo['common'], 'team', 'desks', 'desk', 'architecture')
+
+    def start_backend(self, **extra):
+        args = dict(role='backend', repo=self.tmp.name, brief=None, task='Build it', slug='desk', parent=None, no_parent=True,
+                    space=None, requested=False, by=None, share=True, tab=None, fresh_of=None, note=None, display_task=None,
+                    skip_plan_review=None)
+        return self.run_cmd(team.start, **{**args, **extra})
+
+    def test_start_refuses_a_design_engineer_until_the_plan_is_reviewed(self):
+        code, out, launches, records = self.start_backend()
+        self.assertEqual((2, []), (code, launches))
+        os.makedirs(records)
+        open(os.path.join(records, '01-plan.md'), 'w').close()
+        code, out, launches, _ = self.start_backend()
+        self.assertEqual((0, 1), (code, len(launches)))
+
+    def test_kabeer_a_fresh_start_or_a_stated_reason_skips_the_review(self):
+        self.assertEqual(1, len(self.start_backend(by='desk')[2]))
+        self.assertEqual(1, len(self.start_backend(fresh_of='t9', note='fresh')[2]))
+        code, out, launches, _ = self.start_backend(skip_plan_review='one-line copy fix')
+        self.assertEqual(1, len(launches))
+        self.assertIn('No plan review: one-line copy fix', team.chat_read('desk')[-1]['text'])
+
+    def consult(self, *question, **extra):
+        return self.run_cmd(team.consult, **{'question': list(question), 'plan': None, 'repo': self.tmp.name, 'slug': None, 'topic': None,
+                                             **extra})
+
+    def test_consult_starts_a_fresh_architect_per_record(self):
+        self.info['t1']['labels']['task'] = 'desk'
+        plan = os.path.join(self.tmp.name, 'plan.md')
+        with open(plan, 'w') as f:
+            f.write('# plan')
+        with patch.object(team, 'ME', 't1'):
+            code, out, launches, records = self.consult('Is the contract right?', plan=plan)
+            self.assertEqual((0, 'architect', 'desk'), (code, out['role'], out['task']))
+            task = launches[0][-1]
+            self.assertIn(os.path.join(records, '01-plan.md'), task)
+            self.assertIn(plan, task)
+            self.assertIn('Is the contract right?', task)
+            open(os.path.join(records, '01-plan.md'), 'w').close()
+            code, out, launches, _ = self.consult('Where should retries live?')
+            self.assertIn(os.path.join(records, '02-where-should-retries-live.md'), launches[0][-1])
+            code, out, launches, _ = self.consult('x', plan=os.path.join(self.tmp.name, 'missing.md'))
+            self.assertEqual((1, []), (code, launches))
+        code, out, launches, _ = self.consult('No desk here')               # ME is None: no desk to consult for
+        self.assertEqual((1, []), (code, launches))
 
 
 if __name__ == '__main__':

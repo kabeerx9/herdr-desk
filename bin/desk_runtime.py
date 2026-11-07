@@ -604,3 +604,30 @@ def diff_stat(cwd, run=None):
     if not files:
         return None
     return {"added": added, "removed": removed, "files": files, "branch": branch, "base": base.split("/")[-1]}
+
+
+# The Architect's plan review: an engineer who builds with design judgment (an editing role that is
+# neither light_review nor on_request: Frontend, Backend) starts only once the Architect has reviewed
+# the desk's plan. Kabeer starting one from the Desk is his call and skips it, and so does a desk
+# with no architect role configured.
+PLAN_RECORD = re.compile(r"^\d+-plan\.md$")
+
+
+def plan_review_required(role, roles, by, reviewed):
+    if by == "desk" or reviewed:
+        return False
+    if not any(r.get("id") == "architect" for r in roles):
+        return False
+    return bool(role.get("worktree")) and not role.get("light_review") and not role.get("on_request")
+
+
+def next_record(names, kind):
+    """The next decision record's file name in an architecture folder: NN-<kind>.md, numbered after
+    the highest NN already there. kind: "plan", or a short topic slug."""
+    numbers = [int(m.group(1)) for n in names for m in [re.match(r"^(\d+)-", n)] if m]
+    kind = re.sub(r"[^a-z0-9]+", "-", (kind or "").lower()).strip("-")[:40].rstrip("-") or "decision"
+    return f"{max(numbers, default=0) + 1:02d}-{kind}.md"
+
+
+def has_plan_record(names):
+    return any(PLAN_RECORD.match(n) for n in names)

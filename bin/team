@@ -36,7 +36,7 @@ One launcher for everyone (the CTO, the Desk's buttons, you): it reads roles.jso
 gives every editing role its own git worktree, and starts the role with hc in its own Herdr tab, labeled role=<id> task=<slug>.
 Children always outlive their parent, so closing the CTO doesn't end its workers.
 """
-import contextlib, fcntl, glob, io, json, os, re, secrets, shutil, subprocess, sys, time, shlex, uuid
+import contextlib, fcntl, glob, io, json, os, re, secrets, shutil, subprocess, sys, time, shlex, types, uuid
 import desk_adapters
 from desk_runtime import Store as RuntimeStore, RuntimeError as DeskRuntimeError, adapter as runtime_adapter
 from desk_runtime import JOB_TAIL, nearest_base, read_tail, transcript_jobs
@@ -47,6 +47,7 @@ from desk_runtime import (classify_launch_failure, last_tool_at, turn_started, f
                           session_cli, step_text, transcript_timeline, transcript_title, transcript_turns, triage_apply, triage_clear)
 from desk_runtime import DIALOG_OPEN, NO_INPUT, cleared_transcript, command_result, screen_state
 from desk_runtime import diff_stat, dialog_matches, permission_dialog, pick_option, task_line
+from desk_runtime import has_plan_record, next_record, plan_review_required
 
 APP = os.environ.get("HERDR_APP_HOME") or os.path.expanduser("~/.config/herdr-app")
 DESK = os.path.join(APP, "mods", "desk")
@@ -644,6 +645,12 @@ def start(args):
         folder, branch = add_worktree(repo, role)
         note = f"own worktree on {branch} (from HEAD; uncommitted changes in {repo['name']} aren't in it)"
 
+    skip_review = (getattr(args, "skip_plan_review", None) or "").strip()
+    if repo and not getattr(args, "fresh_of", None) and plan_review_required(role, roles, args.by, bool(skip_review) or plan_reviewed(repo, slug)):
+        die(f"{role['name']} builds with design judgment, so it starts once the Architect has reviewed the plan for {slug}: "
+            f"run `{SELF} consult --plan <your plan file> \"<what to check>\"` and wait for its report. "
+            f"If this job needs no review, pass --skip-plan-review \"<why>\"; the chat shows it.", 2)
+
     task = args.task or ""
     contract, brief_text = None, None
     if args.brief:
@@ -721,7 +728,8 @@ def start(args):
         fell = (f" ({fallbacks[-1]['cli']} failed with {fallbacks[-1]['why'].replace('_', ' ')}; running on {role.get('cli')})"
                 if fallbacks else "")
         chat_append(slug, {"from": starter, "kind": "start", "role": role["id"], "address": launched.get("address"),
-                           "text": f"Started {role['name']} in {os.path.basename(folder)}" + (f" on {branch}" if branch else "") + fell,
+                           "text": f"Started {role['name']} in {os.path.basename(folder)}" + (f" on {branch}" if branch else "") + fell
+                                   + (f". No plan review: {skip_review}" if skip_review else ""),
                            **({"task_line": line} if line else {}), **({"branch": branch} if branch else {}),
                            **({"contract": contract} if contract else {}), **({"runner": role["runner"], "fallbacks": fallbacks} if role.get("runner") else {})})
         if starter == "kabeer":
@@ -910,6 +918,47 @@ def say(args):
         die("nothing to say")
     chat_append(slug, {"from": who, "address": ME, "kind": "say", "text": text})
     print(json.dumps({"ok": True, "task": slug}))
+
+
+def architecture_dir(repo, slug):
+    """The desk's Architect decision records, next to its decisions file."""
+    return os.path.join(repo["common"], "team", "desks", slug, "architecture")
+
+
+def plan_reviewed(repo, slug):
+    try:
+        return has_plan_record(os.listdir(architecture_dir(repo, slug)))
+    except OSError:
+        return False
+
+
+def consult(args):
+    """Starts a fresh Architect session on one decision (or, with --plan, on the desk's plan). It writes
+    one decision record to the desk's architecture folder and reports done to the caller; earlier
+    records are its memory, so each consult starts small."""
+    labels = (terminal(ME).get("labels") or {}) if ME else {}
+    slug = args.slug or labels.get("task")
+    if not slug:
+        die("team consult needs a desk: run it from a desk agent, or pass --slug")
+    folder = os.path.abspath(os.path.expanduser(args.repo or os.getcwd()))
+    repo = repo_of(folder)
+    if not repo:
+        die(f"{folder} isn't in a git repo; pass --repo <the repo the decision is about>")
+    question = " ".join(args.question).strip()
+    plan = os.path.abspath(os.path.expanduser(args.plan)) if args.plan else None
+    if plan and not os.path.isfile(plan):
+        die(f"no plan file at {plan}")
+    records = architecture_dir(repo, slug)
+    os.makedirs(records, exist_ok=True)
+    record = os.path.join(records, next_record(os.listdir(records), "plan" if plan else (args.topic or question[:40])))
+    briefs = os.path.join(repo["common"], "team", "briefs", slug)
+    task = ((f"Review the plan in {plan} (and any briefs in {briefs}) before an engineer starts. " if plan else "")
+            + f"The question: {question}\n\nWrite your decision record to {record}. Earlier records for this desk are in "
+            f"{records}: read them first, and stay consistent with them or say why this one differs. Then report done "
+            f"with the record's path and your decision in one line.")
+    start(types.SimpleNamespace(role="architect", repo=folder, brief=None, task=task, slug=slug, parent=None, no_parent=False,
+                                space=None, requested=True, by=None, share=True, tab=None, fresh_of=None, note=None,
+                                display_task=None, skip_plan_review=None))
 
 
 def ask(args):
@@ -2604,6 +2653,10 @@ def main():
     s.add_argument("--space"); s.add_argument("--requested", action="store_true"); s.add_argument("--by")
     s.add_argument("--share", action="store_true", help="work in --repo as is, never a new worktree")
     s.add_argument("--tab"); s.add_argument("--fresh-of"); s.add_argument("--note")
+    s.add_argument("--skip-plan-review", metavar="WHY", help="start an engineer without the Architect's plan review, and say why")
+    cs = sub.add_parser("consult", help="ask a fresh Architect session for one design decision, or a plan review")
+    cs.add_argument("question", nargs="+"); cs.add_argument("--plan", help="the plan file to review before engineers start")
+    cs.add_argument("--repo"); cs.add_argument("--slug"); cs.add_argument("--topic", help="a short name for the record file")
     r = sub.add_parser("report")
     r.add_argument("kind", choices=["done", "blocked", "update"])
     r.add_argument("--criteria", help='JSON: {"A1":"pass: note","A2":"fail: why","A3":"n/a"}')
@@ -2701,7 +2754,9 @@ def main():
     se = sub.add_parser("send")
     se.add_argument("address"); se.add_argument("text")
     args = p.parse_args()
-    if args.cmd == "start":
+    if args.cmd == "consult":
+        consult(args)
+    elif args.cmd == "start":
         start(args)
     elif args.cmd == "report":
         report(args)

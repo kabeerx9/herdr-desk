@@ -1,5 +1,5 @@
 {
-  "_help": "Team roles for the Desk. cli: claude | codex (or give a full argv). model: what that CLI's --model / -m takes. effort: claude --effort / codex model_reasoning_effort (low, medium, high). tools: Claude's built-in tools for the role (fewer tools = a smaller prompt on every call); omit for the default set. Claude roles skip MCP servers unless mcp is true. prompt: a file in roles/ added to the agent's system prompt. icon: an svg in icons/, without .svg; avatar: a png. worktree: true for roles that edit code; each gets its own git worktree. on_request: true for roles that start only when Kabeer asks (team start needs --requested; the Desk's buttons pass it). bin/team starts every role; roles/protocol.md is added to every role's prompt. light_review: true lets the CTO pass the merge gate on its own diff read (team gate --light), never for risky paths. permission_mode: auto is Claude's auto mode, or Codex's --approve-for-me. fresh_at: context size in tokens past which the Desk suggests a fresh start (a role can set its own). runners: optional [{cli, model, effort}, ...] tried in order; team start moves to the next only when one fails to launch for a usage limit or sign-in, and pins the one that ran to the session (resume keeps it). Without runners a role launches its own cli/model/effort as before.",
+  "_help": "Team roles for the Desk. cli: claude | codex (or give a full argv). model: what that CLI's --model / -m takes. effort: claude --effort / codex model_reasoning_effort (low, medium, high). tools: Claude's built-in tools for the role (fewer tools = a smaller prompt on every call); omit for the default set. Claude roles skip MCP servers unless mcp is true. prompt: a file in roles/ added to the agent's system prompt. icon: an svg in icons/, without .svg; avatar: a png. worktree: true for roles that edit code; each gets its own git worktree. on_request: true for roles that start only when Kabeer asks (team start needs --requested; the Desk's buttons pass it). bin/team starts every role; roles/protocol.md is added to every role's prompt. light_review: true lets the CTO pass the merge gate on its own diff read (team gate --light), never for risky paths. permission_mode: auto is Claude's auto mode, or Codex's --approve-for-me. fresh_at: context size in tokens past which the Desk suggests a fresh start (a role can set its own). runners: optional [{cli, model, effort}, ...] tried in order; team start moves to the next only when one fails to launch for a usage limit or sign-in, and pins the one that ran to the session (resume keeps it). Without runners a role launches its own cli/model/effort as before. The architect (on_request) is a fresh consult-only session that `team consult` starts; while the role exists, team start refuses an editing role that is neither light_review nor on_request until the desk has an Architect plan review (Kabeer's Desk buttons skip it).",
   "fresh_at": 250000,
   "roles": [
     {
@@ -7,16 +7,40 @@
       "name": "CTO",
       "title": "Plans the work, splits it up, reviews the result",
       "cli": "claude",
-      "model": "claude-fable-5-1",
+      "model": "claude-opus-5-5",
       "effort": "medium",
-      "label": "Fable 5.1 · medium",
-      "mcp": true,
+      "label": "Opus 5.5 · medium",
+      "mcp": false,
       "prompt": "roles/cto.md",
       "color": "ansi5",
       "icon": "roles/cto",
       "avatar": "avatars/cto.png",
       "worktree": false,
       "on_request": false,
+      "permission_mode": "auto"
+    },
+    {
+      "id": "architect",
+      "name": "Architect",
+      "title": "Reviews the plan and makes the hard design calls, on request",
+      "cli": "claude",
+      "model": "claude-fable-5-1",
+      "effort": "high",
+      "label": "Fable 5.1 · high",
+      "tools": [
+        "Bash",
+        "Read",
+        "Write",
+        "Glob",
+        "Grep",
+        "WebFetch",
+        "WebSearch"
+      ],
+      "prompt": "roles/architect.md",
+      "color": "ansi5",
+      "icon": "roles/architect",
+      "worktree": false,
+      "on_request": true,
       "permission_mode": "auto"
     },
     {
