@@ -97,10 +97,10 @@ export function attachmentList(t, id, files, { remove = null, thumb = 64, end = 
   const open = (f) => () => exec("open", [f.path]);
   return h_flex().id(id).gap(8).flex_wrap().items_center().when(end, (el) => el.justify_end()).children(files.map((f, i) => (f.kind === "image"
     ? div().id(`${id}-${i}`).relative().size(thumb).flex_none().rounded(10).border_1().border_color(t.border).cursor_pointer().tooltip(f.name).on_click(open(f))
-      .child(image(f.path).size_full().rounded(10)).child(shut(f, i))
+      .child(image(f.path).size_full().rounded(10)).when(remove, (el) => el.child(shut(f, i)))
     : h_flex().id(`${id}-${i}`).relative().h(40).max_w(240).px(10).gap(8).flex_none().items_center().rounded(10).border_1().border_color(t.border)
       .bg(t.raised).text_color(t.muted).cursor_pointer().tooltip(f.name).on_click(open(f))
-      .child(icon("pages", 14)).child(div().min_w(0).truncate().text_size(12).text_color(t.foreground).child(f.name)).child(shut(f, i)))));
+      .child(icon("pages", 14)).child(div().min_w(0).truncate().text_size(12).text_color(t.foreground).child(f.name)).when(remove, (el) => el.child(shut(f, i))))));
 }
 
 export function mineBubble(o, t, id, text, meta, { ok = false, failed = null, open = null, attachments = null } = {}) {

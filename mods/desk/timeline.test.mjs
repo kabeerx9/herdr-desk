@@ -16,7 +16,9 @@ const STUBS = {
         if (typeof prop === "symbol" || prop === "then") return undefined;
         if (prop === "when") return (on, draw) => (on ? draw(self) : self);
         const add = (x) => {
-          if (!x?.isElement) return;
+          // Herdr fails the whole view on anything but an element or a string, null included.
+          if (typeof x === "string") return;
+          if (!x?.isElement) throw new Error("child(value) expects an element, a string, or an entity from cx.new(Class, props)");
           if (x.parent) throw new Error("element " + x.name + " was already added to a parent");
           x.parent = self;
         };
@@ -58,6 +60,14 @@ test('a reply grouped under another draws, once a later reply follows it', () =>
   ]);
   assert.equal(model.rows.filter((r) => r.grouped).length, 1);
   assert.notEqual(model.rows.findIndex((r) => r.grouped), model.lastReply);
+  assert.doesNotThrow(() => drawAll(model));
+});
+
+test('a sent message with an attachment draws (no remove button outside the composer)', () => {
+  const model = buildRows([
+    { at: 0, from: 'kabeer', kind: 'say', to: ['cto'], text: 'look at this',
+      attachments: [{ path: '/tmp/a.png', name: 'a.png', kind: 'image' }, { path: '/tmp/b.txt', name: 'b.txt', kind: 'file' }] },
+  ]);
   assert.doesNotThrow(() => drawAll(model));
 });
 
