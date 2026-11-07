@@ -22,6 +22,10 @@
 !/bin/test_desk_approve.py
 !/bin/test_desk_cost.py
 !/bin/test_desk_codex.py
+!/bin/test_desk_adapters.py
+# Adapters for the CLIs the Desk runs (docs/plans/2026-11-07-adapter-layer.md).
+!/bin/desk_adapters/
+/bin/desk_adapters/__pycache__/
 # Real agent screens the command tests classify.
 !/bin/fixtures/
 

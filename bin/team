@@ -37,6 +37,7 @@ gives every editing role its own git worktree, and starts the role with hc in it
 Children always outlive their parent, so closing the CTO doesn't end its workers.
 """
 import contextlib, fcntl, glob, io, json, os, re, secrets, shutil, subprocess, sys, time, shlex, uuid
+import desk_adapters
 from desk_runtime import Store as RuntimeStore, RuntimeError as DeskRuntimeError, adapter as runtime_adapter
 from desk_runtime import JOB_TAIL, nearest_base, read_tail, transcript_jobs
 from desk_runtime import attention as runtime_attention
@@ -111,20 +112,14 @@ def load_roles():
 
 
 def adapter_config(role):
-    config = {}
-    if role.get("cli", "claude") == "claude" and not role.get("argv"):
-        config = {"resume_args": ["--resume", "{session_id}"],
-                  "fork_args": ["--resume", "{session_id}", "--fork-session"],
-                  "session_args": ["--session-id", "{session_id}"]}
-    config.update(role.get("adapter") or {})
-    return config
+    return desk_adapters.config_for(role)
 
 
 def adapter_args(role, action, identity):
-    values = adapter_config(role).get(action + "_args")
-    if not isinstance(values, list) or not all(isinstance(x, str) for x in values):
-        raise DeskRuntimeError("This CLI has no configured %s arguments" % action)
-    return [x.replace("{session_id}", identity) for x in values]
+    try:
+        return desk_adapters.expand_args(adapter_config(role), action, identity)
+    except ValueError as e:
+        raise DeskRuntimeError(str(e))
 
 
 def role_for_session(rec):
@@ -143,50 +138,12 @@ def is_agent(info):
 
 
 def argv_for(role, task):
-    if isinstance(role.get("argv"), list):
-        return role["argv"] + ([task] if task else [])
-    prompt, extra, effort = role["promptText"], role.get("args", []), role.get("effort")
-    if role.get("cli") not in (None, "claude", "codex"):
-        die("Role %s uses %s; give it an argv list until that adapter is configured." % (role.get("name", role.get("id", "role")), role.get("cli")))
-    if role.get("cli") == "codex":
-        # --no-daemon: otherwise Codex runs its commands outside hc. -c parses TOML;
-        # a JSON string is a valid TOML basic string, and a JSON list a TOML array.
-        base = ["codex", "--no-daemon"] + (["-m", role["model"]] if role.get("model") else [])
-        base += ["-c", f'model_reasoning_effort="{effort}"'] if effort else []
-        # Codex's auto mode: the sandbox stays on, and a reviewer model answers its approval requests.
-        base += ["--approve-for-me"] if role.get("permission_mode") == "auto" else []
-        base += ["-c", "notify=" + json.dumps([SELF, "hook", "codex"])]
-        base += ["-c", "developer_instructions=" + json.dumps(prompt)] if prompt else []
-    else:
-        # --tools first: it takes several values, so a value-less flag must follow it, never the task.
-        # Fewer tools and no MCP servers keep every call's prompt small (measured 41k -> 17k tokens).
-        # A role without Skill in its list gets no skills. With it, the skill list adds about 11k tokens.
-        # A role with no tools list and mcp true (the CTO) launches as a full Claude Code session.
-        base = ["claude"] + (["--tools", ",".join(role["tools"])] if role.get("tools") else [])
-        base += [] if role.get("mcp") else ["--strict-mcp-config"]
-        base += ["--model", role["model"]] if role.get("model") else []
-        base += ["--effort", effort] if effort else []
-        base += ["--permission-mode", role["permission_mode"]] if role.get("permission_mode") else []
-        # Stop: post replies, measure context. PreToolUse: each tool call as one line of the agent's
-        # activity feed (the Desk shows it while the agent works; no tokens spent).
-        # SessionStart after a compaction (asked for or Claude's own): its new size.
-        # PermissionRequest: what it would ask in its terminal, asked in the desk chat (team permit answers).
-        # bash: in zsh, a bare `echo ====` is a failed =cmd lookup that stops the rest of the command.
-        # Prompt suggestions: Claude's grey guess at the next message sits in the input box, and the
-        # screen text can't tell it from typing, so the Desk reads it as unsent text. Nobody types
-        # there anyway, and each guess is a model call.
-        # Before --settings: --add-dir takes several values, so a one-value flag must follow it.
-        os.makedirs(ATTACHMENTS, exist_ok=True)
-        base += ["--add-dir", ATTACHMENTS]
-        base += ["--settings", json.dumps({"env": {"CLAUDE_CODE_SHELL": "/bin/bash", "CLAUDE_CODE_ENABLE_PROMPT_SUGGESTION": "false"}, "hooks": {
-            "Stop": [{"hooks": [{"type": "command", "command": f"{SELF} hook claude", "timeout": 20}]}],
-            "PreToolUse": [{"matcher": "*", "hooks": [{"type": "command", "command": f"{SELF} hook claude-tool", "timeout": 10}]}],
-            # UserPromptSubmit: the turn starts; snapshot the worktree for the Last turn review.
-            "UserPromptSubmit": [{"hooks": [{"type": "command", "command": f"{SELF} hook claude-prompt", "timeout": 15}]}],
-            "SessionStart": [{"matcher": "startup|resume|clear", "hooks": [{"type": "command", "command": f"{SELF} hook session", "timeout": 10}]}, {"matcher": "compact", "hooks": [{"type": "command", "command": f"{SELF} hook claude-compact", "timeout": 20}]}],
-            "PermissionRequest": [{"matcher": "*", "hooks": [{"type": "command", "command": f"{SELF} hook claude-permission", "timeout": QUESTION_TIMEOUT}]}]}})]
-        base += ["--append-system-prompt", prompt] if prompt else []
-    return base + extra + ([task] if task else [])
+    """The command that launches a role; each CLI's flags live in its adapter (bin/desk_adapters)."""
+    try:
+        adapter = desk_adapters.for_role(role)
+    except desk_adapters.UnsupportedCli as e:
+        die(str(e))
+    return adapter.launch_argv(role, task, desk_adapters.LaunchEnv(SELF, ATTACHMENTS, QUESTION_TIMEOUT))
 
 
 def repo_of(folder):
