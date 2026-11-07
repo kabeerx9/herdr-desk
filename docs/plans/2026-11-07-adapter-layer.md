@@ -40,7 +40,8 @@ bin/team        (CLI: parse args, call core, print JSON)
             agents.py      AgentAdapter base + registry by role "cli"
             claude.py      ClaudeAdapter (2.1.319)
             codex.py       CodexAdapter  (0.167.0)
-            host.py        TerminalHost port + HcHost (hc 0.1.18) + HostError
+            host.py        TerminalHost port: HcHost (hc 0.1.18), HostResult
+            plan_usage.py  shared helpers for each adapter's plan_usage()
 ```
 
 **Rule: adapters never import `desk_runtime` or `team`.** Shared screen
@@ -128,6 +129,11 @@ without a version bump. `team doctor` ships only with:
   Tests for the allow, always, deny and Codex turn-end paths landed first, against the
   old code.*
 - **E. Plan usage.** `usage.py` calls `adapter.plan_usage()`.
+  *Done: sign-in reading, the request and the answer parsing live in
+  `ClaudeAdapter.plan_usage` and `CodexAdapter.plan_usage`; `usage.py` is a
+  10-line entry point that adds `bin/` by its full path (it still runs under
+  `python3 -I`). Live output matched the old script except Codex's computed
+  reset time, which moves with the clock.*
 - **F. `team doctor`** with recording and the `hc` shape check.
 
 Cut: rewriting other GUI `exec` calls; reshaping capabilities beyond moving

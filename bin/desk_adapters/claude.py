@@ -1,9 +1,12 @@
 """Claude Code adapter. Tested against Claude Code 2.1.319."""
 import json
 import os
+import subprocess
 
 from .agents import AgentAdapter, HookEvent
-from . import claude_transcript, screen
+from . import claude_transcript, plan_usage as usage_api, screen
+
+USAGE_URL = "https://api.anthropic.com/api/oauth/usage"
 
 
 class ClaudeAdapter(AgentAdapter):
@@ -50,6 +53,62 @@ class ClaudeAdapter(AgentAdapter):
         if rules:
             decision["updatedPermissions"] = list(rules)
         return {"hookSpecificOutput": {"hookEventName": "PermissionRequest", "decision": decision}}
+
+    # Plan usage: the endpoint Claude Code's /usage reads, with its own sign-in.
+
+    @staticmethod
+    def oauth(home=None):
+        """Claude Code's sign-in: its keychain item, else ~/.claude/.credentials.json; None when neither."""
+        try:
+            raw = subprocess.run(["security", "find-generic-password", "-s", "Claude Code-credentials", "-w"],
+                                 capture_output=True, text=True, timeout=10).stdout
+            return json.loads(raw)["claudeAiOauth"]
+        except Exception:
+            path = os.path.join(home or os.path.expanduser("~"), ".claude", ".credentials.json")
+            if not os.path.exists(path):
+                return None
+            with open(path) as f:
+                return json.load(f)["claudeAiOauth"]
+
+    @staticmethod
+    def plan_name(creds):
+        plan = (creds.get("subscriptionType") or "").title()
+        tier = (creds.get("rateLimitTier") or "").rsplit("_", 1)[-1]
+        if tier.endswith("x") and tier[:-1].isdigit():
+            plan = f"{plan} {tier}"
+        return plan or None
+
+    @staticmethod
+    def usage_windows(u):
+        windows = []
+        # `limits` is the list Claude's own usage page draws: session, weekly, and
+        # weekly limits scoped to one model (Fable, ...). Older responses lack it.
+        for l in u.get("limits") or []:
+            model = ((l.get("scope") or {}).get("model") or {}).get("display_name")
+            label = {"session": "Session"}.get(l.get("group"), f"{model} week" if model else "Week")
+            windows.append({"label": label, "used": round(l.get("percent") or 0),
+                            "resets_at": usage_api.iso_to_epoch(l.get("resets_at")), "severity": l.get("severity")})
+        if not windows:
+            for key, label in (("five_hour", "Session"), ("seven_day", "Week")):
+                w = u.get(key)
+                if w and w.get("utilization") is not None:
+                    windows.append({"label": label, "used": round(w["utilization"]), "resets_at": usage_api.iso_to_epoch(w.get("resets_at"))})
+        return windows
+
+    def plan_usage(self, get=usage_api.http_get, creds=None):
+        """Claude's plan limits, or None when Claude Code isn't signed in."""
+        creds = creds or self.oauth()
+        if creds is None:
+            return None
+        out = usage_api.report("Claude", self.plan_name(creds))
+        try:
+            u = get(USAGE_URL, {"Authorization": f"Bearer {creds['accessToken']}",
+                                "anthropic-beta": "oauth-2025-04-20", "User-Agent": "claude-code/2.1.0"})
+        except Exception as e:
+            out["error"] = usage_api.request_failed(e)
+            return out
+        out["windows"] = self.usage_windows(u)
+        return out
 
     def context_size(self, transcript):
         return claude_transcript.claude_context(transcript)

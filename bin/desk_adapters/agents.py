@@ -78,6 +78,10 @@ class AgentAdapter:
     def launch_argv(self, role, task, env):
         raise NotImplementedError
 
+    def plan_usage(self):
+        """This CLI's plan limits ({provider, plan, windows, error}), or None when it has none or isn't signed in."""
+        return None
+
 
 class ArgvAdapter(AgentAdapter):
     """A role that gives its own argv list: launched as written, with no defaults."""

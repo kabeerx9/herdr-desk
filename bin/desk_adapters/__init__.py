@@ -38,6 +38,19 @@ def screen_adapter(cli):
     return _AGENTS.get(cli) or _AGENTS["claude"]
 
 
+def plan_usage():
+    """Every signed-in CLI's plan limits. One provider failing never hides another."""
+    results = []
+    for name, agent in _AGENTS.items():
+        try:
+            r = agent.plan_usage()
+        except Exception as e:
+            r = {"provider": name.title(), "plan": None, "windows": [], "error": type(e).__name__}
+        if r:
+            results.append(r)
+    return results
+
+
 def config_for(role):
     """A role's resume/fork/session templates; a role with an unknown CLI gets only its own."""
     try:

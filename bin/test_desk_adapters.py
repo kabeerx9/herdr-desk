@@ -5,6 +5,8 @@ import subprocess
 import sys
 import tempfile
 import unittest
+import urllib.error
+from unittest.mock import patch
 
 sys.path.insert(0, os.path.dirname(__file__))
 import desk_adapters as da
@@ -203,6 +205,63 @@ class Hooks(unittest.TestCase):
             self.assertIsNone(da.ClaudeAdapter().context_size(path))
             self.assertEqual({"preTokens": 5000, "trigger": "manual"}, da.ClaudeAdapter().compact_info(path))
         self.assertIsNone(da.ClaudeAdapter().context_size("/nonexistent"))
+
+
+class PlanUsage(unittest.TestCase):
+    """Each CLI's plan limits from a recorded usage answer; tokens go only into the request."""
+
+    def fake_get(self, answer):
+        self.sent = []
+        def get(url, headers):
+            self.sent.append((url, headers))
+            if isinstance(answer, Exception):
+                raise answer
+            return answer
+        return get
+
+    def test_claude_limits_and_plan(self):
+        u = {"limits": [{"group": "session", "percent": 47.6, "resets_at": "2026-11-07T10:00:00Z", "severity": "normal"},
+                        {"group": "weekly", "percent": 24, "resets_at": None},
+                        {"group": "weekly", "percent": 29, "scope": {"model": {"display_name": "Fable"}}}]}
+        creds = {"accessToken": "TOKEN", "subscriptionType": "max", "rateLimitTier": "default_claude_max_5x"}
+        out = da.ClaudeAdapter().plan_usage(self.fake_get(u), creds=creds)
+        self.assertEqual(("Claude", "Max 5x", None), (out["provider"], out["plan"], out["error"]))
+        self.assertEqual([("Session", 48, 1794045600), ("Week", 24, None), ("Fable week", 29, None)],
+                         [(w["label"], w["used"], w["resets_at"]) for w in out["windows"]])
+        self.assertEqual("Bearer TOKEN", self.sent[0][1]["Authorization"])
+        self.assertNotIn("TOKEN", json.dumps(out))
+
+    def test_claude_older_answer_shape(self):
+        u = {"five_hour": {"utilization": 10.2, "resets_at": None}, "seven_day": {"utilization": None}}
+        self.assertEqual([{"label": "Session", "used": 10, "resets_at": None}], da.ClaudeAdapter.usage_windows(u))
+
+    def test_codex_limits(self):
+        u = {"plan_type": "plus", "rate_limit": {"primary_window": {"used_percent": 0, "reset_after_seconds": 60},
+                                                 "secondary_window": {"used_percent": 52.4, "reset_at": 1794405593}}}
+        with patch.object(da.codex.time, "time", return_value=1000):
+            out = da.CodexAdapter().plan_usage(self.fake_get(u), tokens={"access_token": "T", "account_id": "A"})
+        self.assertEqual(("Codex", "Plus"), (out["provider"], out["plan"]))
+        self.assertEqual([("Session", 0, 1060), ("Week", 52, 1794405593)], [(w["label"], w["used"], w["resets_at"]) for w in out["windows"]])
+        self.assertEqual("A", self.sent[0][1]["ChatGPT-Account-Id"])
+
+    def test_failed_request_names_the_status_not_the_body(self):
+        err = urllib.error.HTTPError("u", 401, "secret body", {}, None)
+        out = da.CodexAdapter().plan_usage(self.fake_get(err), tokens={"access_token": "T"})
+        self.assertEqual(("usage request failed (401)", []), (out["error"], out["windows"]))
+
+    def test_not_signed_in_is_left_out(self):
+        with tempfile.TemporaryDirectory() as d:
+            self.assertIsNone(da.CodexAdapter.tokens({"CODEX_HOME": d}))
+            with open(os.path.join(d, "auth.json"), "w") as f:
+                json.dump({"tokens": {"access_token": ""}}, f)
+            self.assertIsNone(da.CodexAdapter.tokens({"CODEX_HOME": d}))
+
+    def test_one_provider_failing_never_hides_another(self):
+        ok = {"provider": "Codex", "plan": None, "windows": [], "error": None}
+        with patch.object(da.ClaudeAdapter, "plan_usage", side_effect=OSError), patch.object(da.CodexAdapter, "plan_usage", return_value=ok):
+            self.assertEqual([{"provider": "Claude", "plan": None, "windows": [], "error": "OSError"}, ok], da.plan_usage())
+        with patch.object(da.ClaudeAdapter, "plan_usage", return_value=None), patch.object(da.CodexAdapter, "plan_usage", return_value=ok):
+            self.assertEqual([ok], da.plan_usage())
 
 
 class Boundary(unittest.TestCase):
