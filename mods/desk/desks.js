@@ -667,11 +667,14 @@ export class Desks {
   pollPrompts(cx) {
     const d = this.view !== "list" && this.view !== "new" ? this.desk(this.view) : null;
     if (!d || this.peeking || Date.now() - (this.drawnAt ?? 0) > 15000) return;
-    const blocked = this.members(d.slug).filter((m) => m.status === "blocked");
-    const live = new Set(blocked.map((m) => m.address));
+    // A blocked member every 2.5 s. Any other member not at work every 10 s: a Codex prompt (its
+    // folder-trust question at startup) doesn't always mark it blocked.
+    const polled = this.members(d.slug).filter((m) => m.status !== "working");
+    const live = new Set(polled.map((m) => m.address));
     let changed = false;
     for (const a of Object.keys(this.prompts)) if (!live.has(a)) { delete this.prompts[a]; delete this.approveErr[a]; changed = true; }
-    const due = blocked.filter((m) => !this.prompts[m.address] || Date.now() - this.prompts[m.address].at > 2500);
+    const every = (m) => (m.status === "blocked" ? 2500 : 10000);
+    const due = polled.filter((m) => !this.prompts[m.address] || Date.now() - this.prompts[m.address].at > every(m));
     if (!due.length) { if (changed) cx.notify(); return; }
     this.peeking = true;
     cx.spawn(async (cx) => {
@@ -691,17 +694,18 @@ export class Desks {
       if (changed) cx.notify();
     });
   }
-  // The open cards: a blocked member whose screen shows a Claude permission prompt, or whose
-  // PermissionRequest hook is still waiting on the desk. The hook's record names the command
-  // exactly; the screen's text is the fallback.
+  // The open cards: a member whose screen shows a permission prompt its CLI's adapter reads
+  // (Claude's, Codex's approvals and folder trust), or whose Claude PermissionRequest hook is
+  // still waiting on the desk. The hook's record names the command exactly; the screen's text is the fallback.
   approvals(scope, waiting) {
     const cards = [];
     for (const m of scope) {
       const hook = waiting.find((w) => w.address === m.address) ?? null;
       const peek = this.prompts[m.address]?.dialog ?? null;
-      if (!(m.status === "blocked" && peek) && !hook) continue;
+      if (!peek && !hook) continue;
       const subject = hook?.detail ?? peek?.subject ?? "";
       cards.push({ address: m.address, role: m.role, title: peek?.title ?? hook?.tool ?? null, subject, expect: subject || null,
+        options: peek?.options?.map(({ kind, label, button }) => ({ kind, label, button })) ?? null,
         error: this.approveErr[m.address] ?? null, at: hook?.at ?? this.prompts[m.address]?.at ?? 0 });
     }
     return cards.sort((a, b) => a.at - b.at);

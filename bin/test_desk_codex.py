@@ -68,7 +68,22 @@ class CodexScreenTests(unittest.TestCase):
 
     def test_claude_permission_reader_ignores_codex(self):
         self.assertIsNone(rt.permission_dialog(HOOKS))
-        self.assertIsNone(rt.permission_dialog(APPROVAL, "codex"))
+        self.assertIsNone(rt.permission_dialog(APPROVAL))
+
+    def test_codex_permission_prompts(self):
+        d = rt.permission_dialog(APPROVAL, "codex")
+        self.assertEqual(("Run command", "pnpm --filter web check-types"), (d["title"], d["subject"]))
+        self.assertIn("type-check the web app", d["question"])
+        self.assertEqual([("allow", ["y"], True), ("always", ["a"], False), ("deny", ["esc"], False)],
+                         [(o["kind"], o["keys"], o["focused"]) for o in d["options"]])
+        yn = rt.permission_dialog(APPROVAL_YN, "codex")
+        self.assertEqual(("rm -rf apps/web/dist", ["y", "a", "n"]), (yn["subject"], [o["keys"][0] for o in yn["options"]]))
+        self.assertEqual(["allow", "always", "deny"], [o["kind"] for o in yn["options"]])
+        trust = rt.permission_dialog(TRUST, "codex")
+        self.assertEqual(("Trust folder", "/Users/kabeer/.team-worktrees/tattvix/team-reviewer-1105-101500"), (trust["title"], trust["subject"]))
+        # Not permission prompts: the hooks review, a picker, the idle input.
+        for screen in (HOOKS, PICKER, IDLE):
+            self.assertIsNone(rt.permission_dialog(screen, "codex"))
 
 
 class CodexGuardTests(Base):

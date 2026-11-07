@@ -37,7 +37,7 @@ registerHooks({
   resolve: (specifier, context, next) => (specifier in STUBS ? { url: specifier.startsWith('stub:') ? specifier : `stub:${specifier}`, shortCircuit: true } : next(specifier, context)),
   load: (url, context, next) => (url.startsWith('stub:') ? { format: 'module', source: STUBS[url in STUBS ? url : url.slice(5)], shortCircuit: true } : next(url, context)),
 });
-const { messageRow } = await import('./timeline.js');
+const { messageRow, approvalCard, cardChoices } = await import('./timeline.js');
 const { buildRows } = await import('./model.js');
 const { div } = await import('gpui-kit');
 
@@ -77,4 +77,19 @@ test('the latest reply draws, grouped or not', () => {
     { at: 2000, from: 'cto', address: 't1', kind: 'say', text: 'second' },
   ]);
   assert.doesNotThrow(() => drawAll(model));
+});
+
+test('a permission card shows the prompt\'s own choices: Codex folder trust has no Deny', () => {
+  const trust = { address: 't4', role: 'reviewer', title: 'Trust folder', subject: '/w', options: [
+    { kind: 'always', label: 'Yes, allow Codex to work in this folder without asking for approval', button: 'Trust folder' },
+    { kind: 'allow', label: 'No, ask me to approve edits and commands', button: 'Keep asking' }] };
+  assert.deepEqual(cardChoices(trust).map((b) => [b.kind, b.label, b.primary]), [['always', 'Trust folder', false], ['allow', 'Keep asking', true]]);
+  assert.equal(cardChoices(trust)[0].tip, trust.options[0].label);
+  const codex = { options: [{ kind: 'allow', label: 'Yes, proceed' }, { kind: 'always', label: 'Yes, and don\'t ask again' }, { kind: 'deny', label: 'No' }] };
+  assert.deepEqual(cardChoices(codex).map((b) => b.label), ['Allow', 'Always allow', 'Deny']);
+  assert.deepEqual(cardChoices({ options: [{ kind: 'allow' }, { kind: 'deny' }, { kind: null }] }).map((b) => b.kind), ['allow', 'deny']);
+  assert.deepEqual(cardChoices({ options: null }).map((b) => b.kind), ['allow', 'always', 'deny']);   // a hook request, nothing on screen
+  const o = { acting: null, face: () => div(), roles: { byId: (id) => ({ id, name: id }) }, model: { rows: [] }, approve() {}, openTerminal() {} };
+  assert.doesNotThrow(() => approvalCard(o, {}, trust));
+  assert.doesNotThrow(() => approvalCard(o, {}, { address: 't1', role: 'cto', title: 'Bash command', subject: 'ls', options: null }));
 });

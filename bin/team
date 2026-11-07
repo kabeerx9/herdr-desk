@@ -1447,12 +1447,13 @@ def answer_hook(args, hook, name):
 
 
 def approve(args):
-    """Answer the Claude permission prompt an agent's screen shows, from the Desk. It refuses unless
-    a Claude permission prompt is showing and (with --expect) asks about exactly that command or
-    file, so a stale click never answers a different prompt. The choice maps to the prompt's own
-    option, read off the screen. A prompt the agent's PermissionRequest hook is also waiting on is
-    answered through the hook (bound to its request id); otherwise the option's number is pressed.
-    Then the screen is read again: done only once that prompt is gone."""
+    """Answer the permission prompt an agent's screen shows, from the Desk, for any CLI whose adapter
+    reads its prompts (Claude's, Codex's approvals and folder trust). It refuses unless such a prompt
+    is showing and (with --expect) asks about exactly that command or file, so a stale click never
+    answers a different prompt. The choice maps to the prompt's own option, read off the screen.
+    A prompt Claude's PermissionRequest hook is also waiting on is answered through the hook (bound
+    to its request id); otherwise the option's keys are pressed. Then the screen is read again:
+    done only once that prompt is gone."""
     addr = args.address
     info = terminal(addr)
     if not info or info.get("state") != "live":
@@ -1460,9 +1461,10 @@ def approve(args):
     labels = info.get("labels") or {}
     name = role_label(info)
     cli = approve_cli(addr, info)
-    if cli != "claude":
+    agent = desk_adapters.by_cli(cli)
+    if not agent:
         refuse("unsupported", f"{name} runs {cli}: answer its prompt in its terminal", open_terminal=True)
-    dialog = permission_dialog(screen_of(addr), "claude")
+    dialog = agent.permission_prompt(screen_of(addr))
     if not dialog:
         # Claude runs the PermissionRequest hook first and draws its prompt only if the hook gives up.
         waiting = None if getattr(args, "peek", False) else pending_permit(labels.get("task"), addr)
@@ -1496,13 +1498,14 @@ def approve(args):
         via = "hook"
     else:
         hook = hook if hook and dialog_matches(dialog, hook.get("detail")) else None
-        r = HOST.send_keys(addr, [str(option["n"])])
+        keys = option.get("keys") or [str(option["n"])]
+        r = HOST.send_keys(addr, keys)
         if not r.ok:
-            refuse("send_failed", f"Couldn't press {option['n']} in {name}'s terminal: {r.error[:160]}", open_terminal=True)
+            refuse("send_failed", f"Couldn't press {' '.join(keys)} in {name}'s terminal: {r.error[:160]}", open_terminal=True)
     end, pressed_enter, after = time.time() + APPROVE_S, False, dialog
     while True:
         time.sleep(POLL_S)
-        after = permission_dialog(screen_of(addr), "claude")
+        after = agent.permission_prompt(screen_of(addr))
         if not _same_prompt(after, dialog):
             break
         # A select that only moved its focus onto our option: confirm it, once.

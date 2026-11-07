@@ -20,6 +20,8 @@ BASH = fixture("claude-permission-bash")          # git log: 1 Yes · 2 don't as
 EDIT = fixture("claude-permission-edit")          # Edit file: 1 Yes · 2 allow all edits · 3 No
 REORDERED = fixture("claude-permission-reordered")  # 1 don't ask again · 2 Yes · 3 No
 CODEX = fixture("codex-approval")
+CODEX_YN = fixture("codex-approval-yn")
+TRUST = fixture("codex-trust")
 CMD = "git log --oneline -5 main..HEAD"
 
 
@@ -122,10 +124,39 @@ class ApproveTests(Base):
         self.assertEqual((2, "different", True, []), (code, err["code"], err["open_terminal"], self.term.keys()))
         self.assertTrue(err["showing"].startswith(CMD))
 
-    def test_codex_is_refused_with_open_terminal(self):
+    def codex(self, screen, closes_on):
         self.info["t1"]["foreground"] = {"name": "codex", "argv": ["codex"], "cwd": "/work"}
-        self.term.screen = CODEX
-        code, _ = self.approve("allow")
+        self.term.screen, self.term.calls = screen, []
+        self.term.on_keys = lambda keys, now: PROMPT if keys == closes_on else None
+
+    def test_codex_approval_uses_its_own_shortcut_keys(self):
+        for screen, choice, key in ((CODEX, "allow", "y"), (CODEX, "always", "a"), (CODEX, "deny", "esc"),
+                                    (CODEX_YN, "allow", "y"), (CODEX_YN, "deny", "n")):
+            self.codex(screen, [key])
+            code, out = self.approve(choice, "rm -rf apps/web/dist" if screen is CODEX_YN else "pnpm --filter web check-types")
+            self.assertEqual((0, choice, [[key]]), (code, out["choice"], self.term.keys()), (choice, key))
+        done = self.chat("permission-done")[-1]
+        self.assertEqual(("deny", "screen"), (done["decision"], done["via"]))
+        self.assertEqual("Run command", self.chat("permission")[-1]["tool"])
+
+    def test_codex_folder_trust_is_a_permission_card(self):
+        self.codex(TRUST, None)
+        code, out = self.approve(peek=True)
+        self.assertEqual((0, "codex", "Trust folder"), (code, out["cli"], out["title"]))
+        self.assertEqual([("always", "Trust folder"), ("allow", "Keep asking")], [(o["kind"], o["button"]) for o in out["options"]])
+        self.codex(TRUST, ["2"])
+        self.assertEqual((0, 2), (self.approve("allow")[0], self.approve_n()))
+        self.codex(TRUST, None)
+        code, _ = self.approve("deny")
+        self.assertEqual((2, "no_option", []), (code, self.error()["code"], self.term.keys()))
+
+    def approve_n(self):
+        return int(self.term.keys()[-1][0])
+
+    def test_a_cli_without_an_adapter_is_refused_with_open_terminal(self):
+        self.info["t1"]["foreground"] = {"name": "muse", "argv": ["muse"], "cwd": "/work"}
+        with patch.object(team, "approve_cli", return_value="muse"):
+            code, _ = self.approve("allow")
         self.assertEqual((2, "unsupported", True), (code, self.error()["code"], self.error()["open_terminal"]))
         self.assertEqual([], self.term.typed())
 

@@ -70,7 +70,7 @@ during the move. This prevents import cycles.
 - `launch_argv(role, prompt, task, session_id, self_path)`,
   `resume_argv(identity)`, `fork_argv(identity)`; the `roles.json`
   `adapter` override stays.
-- `screen_state(screen)`, `permission_dialog(screen)`,
+- `screen_state(screen)`, `permission_prompt(screen)`,
   `pick_option(dialog, choice)`, `trust_prompt(screen) -> keys | None`,
   `launch_failure(screen, task)`, `input_as_keys(text) -> bool`.
 - `find_transcript(session)`, `turns`, `timeline`, `usage`, `title`,
@@ -141,12 +141,13 @@ them.
 
 ## Findings during the move
 
-- **Codex trust prompt (open, Kabeer decides).** codex-cli 0.167 replaced
-  "Trust this folder?" with "Yes, allow Codex to work in this folder without
-  asking for approval" (`bin/fixtures/codex-trust.txt`). `CodexAdapter.trust_prompt`
-  never matches it, so the startup-dialog check shows it to Kabeer. Auto-accepting
-  would also turn off Codex's approvals in that folder, so the behaviour is kept
-  until Kabeer chooses.
+- **Permission prompts are a port method (decided 2026-11-07).** Each adapter's
+  `permission_prompt(screen)` reads its CLI's prompts into one shape (title, subject,
+  options with kind, keys and an optional button name). `team approve` and the Desk's
+  card serve every CLI from it. codex-cli 0.167's folder-trust question ("Yes, allow Codex
+  to work in this folder without asking for approval", `bin/fixtures/codex-trust.txt`)
+  is one of these prompts: the card offers **Keep asking** (default) and **Trust folder**,
+  and nothing presses it automatically.
 - `trust_prompt`, `context_size` and `owns` beyond aliases move with phases C and D,
   where their `hc` calls change anyway.
 

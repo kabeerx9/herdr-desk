@@ -24,6 +24,9 @@ class ClaudeAdapter(AgentAdapter):
     def screen_state(self, text):
         return screen.screen_state(text, "claude")
 
+    def permission_prompt(self, text):
+        return screen.permission_dialog(text, "claude")
+
     # Hooks: Claude sends each hook one JSON object on stdin.
 
     def hook_event(self, text):

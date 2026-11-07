@@ -81,14 +81,20 @@ class Screens(unittest.TestCase):
         self.assertEqual(da.CodexAdapter().screen_state(fixture("codex-model-picker.txt"))["state"], "dialog")
 
     def test_trust_prompt_keys(self):
-        # codex-cli 0.167 replaced "Trust this folder?" with an approval-mode question, so the Desk
-        # no longer answers it: accepting would also turn off Codex's approvals for the folder.
-        # The startup-dialog check shows it to Kabeer instead. Kabeer decides whether to change this.
+        # codex-cli 0.167 replaced "Trust this folder?" with an approval-mode question. Accepting it
+        # would also turn off Codex's approvals for the folder, so it is never pressed automatically:
+        # it is a permission prompt, answered from the Desk's card (Trust folder / Keep asking).
         self.assertIsNone(da.CodexAdapter().trust_prompt(fixture("codex-trust.txt")))
         self.assertEqual(da.CodexAdapter().trust_prompt("  Trust this folder?"), ["enter"])
         self.assertIsNone(da.CodexAdapter().trust_prompt(fixture("codex-prompt.txt")))
         self.assertEqual(da.ClaudeAdapter().trust_prompt("│ ❯ 1. Yes, I trust this folder"), ["down", "enter"])
         self.assertIsNone(da.ClaudeAdapter().trust_prompt(fixture("claude-prompt.txt")))
+
+    def test_each_adapter_reads_its_own_permission_prompts(self):
+        self.assertEqual("Run command", da.CodexAdapter().permission_prompt(fixture("codex-approval.txt"))["title"])
+        self.assertEqual("Trust folder", da.CodexAdapter().permission_prompt(fixture("codex-trust.txt"))["title"])
+        self.assertIsNone(da.ClaudeAdapter().permission_prompt(fixture("codex-approval.txt")))
+        self.assertEqual("Bash command", da.ClaudeAdapter().permission_prompt(fixture("claude-permission-bash.txt"))["title"])
 
     def test_unknown_cli_screens_read_as_claude(self):
         self.assertIsInstance(da.screen_adapter("muse"), da.ClaudeAdapter)

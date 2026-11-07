@@ -337,7 +337,19 @@ export function teamCard(o, t, id, m, ctx) {
 // A member stopped at a Claude permission prompt: who, what it wants to run, and the answer.
 // `c`: { address, role, title, subject, error, busy }. Enter in an empty composer is Allow.
 const ASKS = { "Bash command": "wants to run a command", "Edit file": "wants to edit a file", "Write file": "wants to write a file",
-  "Create file": "wants to create a file", "Read file": "wants to read a file", Bash: "wants to run a command", Edit: "wants to edit a file", Write: "wants to write a file" };
+  "Create file": "wants to create a file", "Read file": "wants to read a file", Bash: "wants to run a command", Edit: "wants to edit a file", Write: "wants to write a file",
+  "Run command": "wants to run a command", "Edit files": "wants to edit files", "Trust folder": "asks to work in this folder without approvals" };
+
+// A permission card's buttons: the prompt's own options as its CLI drew them (one per kind), else
+// Allow / Always allow / Deny for a hook request with nothing on screen. Allow is the default.
+const KIND_BUTTON = { allow: "Allow", always: "Always allow", deny: "Deny" };
+const KIND_TIP = { allow: "Allow this once", always: "The CLI's own “don't ask again” option for this prompt", deny: null };
+export function cardChoices(c) {
+  const seen = new Set(), from = c.options?.length ? c.options : ["allow", "always", "deny"].map((kind) => ({ kind }));
+  return from.filter((o) => KIND_BUTTON[o.kind] && !seen.has(o.kind) && seen.add(o.kind))
+    .map((o) => ({ kind: o.kind, label: o.button ?? KIND_BUTTON[o.kind], tip: o.button ? o.label : KIND_TIP[o.kind],
+      primary: o.kind === "allow", ghost: o.kind === "deny" }));
+}
 export function approvalCard(o, t, c, { enter = false } = {}) {
   const id = `ap-${c.address}`, name = nameOf(o, c.role), busy = o.acting === id;
   const what = ASKS[c.title] ?? (c.title ? `wants to use ${c.title.replace(/ command$/, "")}` : "is asking for permission");
@@ -354,11 +366,10 @@ export function approvalCard(o, t, c, { enter = false } = {}) {
         .child(statusMark(t, "failed", 11))
         .child(div().min_w(0).flex_1().text_size(12).line_height(1.4).text_color(t.muted).child(c.error))))
       .child(h_flex().gap(6).items_center()
-        .child(button(t, `${id}-allow`, busy ? "Answering…" : enter ? "Allow ↵" : "Allow", (_e, cx) => o.approve(c, "allow", cx),
-          { primary: true, disabled: Boolean(o.acting), tip: enter ? "Allow this once · Enter in an empty message box" : "Allow this once" }))
-        .child(button(t, `${id}-always`, "Always allow", (_e, cx) => o.approve(c, "always", cx),
-          { disabled: Boolean(o.acting), tip: "Claude's own “don't ask again” option for this prompt" }))
-        .child(button(t, `${id}-deny`, "Deny", (_e, cx) => o.approve(c, "deny", cx), { variant: "ghost", disabled: Boolean(o.acting) }))
+        .children(cardChoices(c).map((b) => button(t, `${id}-${b.kind}`,
+          b.primary && busy ? "Answering…" : b.primary && enter ? `${b.label} ↵` : b.label, (_e, cx) => o.approve(c, b.kind, cx),
+          { primary: b.primary, disabled: Boolean(o.acting), ...(b.ghost ? { variant: "ghost" } : {}),
+            ...(b.tip || (b.primary && enter) ? { tip: [b.tip, b.primary && enter ? "Enter in an empty message box" : null].filter(Boolean).join(" · ") } : {}) })))
         .child(div().flex_1())
         .child(button(t, `${id}-term`, "Open terminal", () => o.openTerminal(c.address), { variant: "ghost", tip: "Look at it in its terminal first" }))));
 }

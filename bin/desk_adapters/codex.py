@@ -22,6 +22,9 @@ class CodexAdapter(AgentAdapter):
     def screen_state(self, text):
         return screen.screen_state(text, "codex")
 
+    def permission_prompt(self, text):
+        return screen.permission_dialog(text, "codex")
+
     def hook_event(self, argv):
         """Codex's notify: its JSON is the last argument. None when it isn't a JSON object."""
         try:

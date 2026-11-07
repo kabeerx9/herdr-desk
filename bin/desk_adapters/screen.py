@@ -157,9 +157,13 @@ def option_kind(label):
 
 
 def permission_dialog(screen, cli="claude"):
-    """Claude's permission prompt on this screen: {"title", "subject" (what it asks about: the
-    command, the file), "question", "options": [{"n", "label", "kind", "focused"}]}, or None when
-    the visible screen shows no permission prompt (its prompt box, another dialog, a picker)."""
+    """The CLI's permission prompt on this screen: {"title", "subject" (what it asks about: the
+    command, the file), "question", "options": [{"n", "label", "kind", "focused", "keys"?,
+    "button"?}]}, or None when the visible screen shows no permission prompt (its prompt box,
+    another dialog, a picker). An option's "keys" pick it (default: its number); "button" names
+    it on the Desk's card when the kind's usual name would mislead."""
+    if cli == "codex":
+        return codex_permission_dialog(screen)
     if cli != "claude":
         return None
     if screen_state(screen, cli)["state"] != "dialog":
@@ -194,6 +198,66 @@ def permission_dialog(screen, cli="claude"):
     title = body.pop(0).strip() if body else ""
     subject = [x.strip() for x in body if x.strip() and not re.fullmatch(r"[╌┄┈─-]+", x.strip())]
     return {"title": title, "subject": "\n".join(subject), "question": lines[q].strip(), "options": options}
+
+
+# Codex 0.167: "Would you like to run the following command?" with numbered options, or the older
+# one-line "Allow command?" › "Yes (y)    Always (a)    No, provide feedback (n)". Its first launch
+# in a folder asks whether it may work there without asking for approval at all.
+CODEX_QUESTION = re.compile(r"^\s*(?:Would you like to .+|Allow [\w ]+)\?\s*$")
+CODEX_OPTION = re.compile(r"^\s*([›❯>]\s*)?(\d{1,2})\.\s+(.+?)\s*$")
+CODEX_SHORTCUT = re.compile(r"\s*\((y|a|n|esc)\)\s*$", re.I)
+CODEX_CHOICE = re.compile(r"([A-Z][^()›]*?)\s*\((y|a|n|esc)\)")
+CODEX_TRUST = "work in this folder without asking for approval"
+CODEX_FOLDER = re.compile(r"You are running Codex in (\S.*?)\s*$")
+
+
+def _codex_kind(label):
+    text = CODEX_SHORTCUT.sub("", label).strip().lower()
+    return "always" if text.startswith("always") else option_kind(label)
+
+
+def codex_permission_dialog(screen):
+    """Codex's approval prompt, or its folder-trust prompt, in permission_dialog's shape."""
+    if screen_state(screen, "codex")["state"] != "dialog":
+        return None
+    lines = [x.rstrip() for x in _lines(screen)]
+    while lines and not lines[-1].strip():
+        lines.pop()
+    tail = lines[-40:]
+    numbered = [(i, CODEX_OPTION.match(x)) for i, x in enumerate(tail) if CODEX_OPTION.match(x)]
+    if any(CODEX_TRUST in m.group(3) for _, m in numbered):
+        folder = next((m.group(1) for m in map(CODEX_FOLDER.search, tail) if m), "")
+        options = []
+        for _, m in numbered:
+            yes = m.group(3).lower().startswith("yes")
+            # "Yes" turns Codex's approvals off in this folder for good; "No" lets it start and keeps asking.
+            options.append({"n": int(m.group(2)), "label": m.group(3), "kind": "always" if yes else "allow",
+                            "focused": bool(m.group(1)), "keys": [m.group(2)], "button": "Trust folder" if yes else "Keep asking"})
+        return {"title": "Trust folder", "subject": folder, "question": "Let Codex work in this folder without asking for approval?",
+                "options": options}
+    q = next((i for i in range(len(tail) - 1, -1, -1) if CODEX_QUESTION.match(tail[i])), None)
+    if q is None:
+        return None
+    below = tail[q + 1:]
+    options = []
+    for _, m in ((i, CODEX_OPTION.match(x)) for i, x in enumerate(below)):
+        if m and int(m.group(2)) == len(options) + 1:
+            key = CODEX_SHORTCUT.search(m.group(3))
+            options.append({"n": int(m.group(2)), "label": CODEX_SHORTCUT.sub("", m.group(3)), "kind": _codex_kind(m.group(3)),
+                            "focused": bool(m.group(1)), "keys": [key.group(1).lower()] if key else [m.group(2)]})
+    if not options:
+        line = next((x for x in below if len(CODEX_CHOICE.findall(x)) >= 2), "")
+        for n, (label, key) in enumerate(CODEX_CHOICE.findall(line), 1):
+            options.append({"n": n, "label": label.strip(), "kind": _codex_kind(label), "focused": False, "keys": [key.lower()]})
+    if not any(o["kind"] == "allow" for o in options) or not any(o["kind"] == "deny" for o in options):
+        return None
+    command = [x.strip()[2:] for x in below if x.strip().startswith("$ ")]
+    reason = next((x.strip()[len("Reason:"):].strip() for x in below if x.strip().startswith("Reason:")), "")
+    question = tail[q].strip()
+    title = "Run command" if command else "Edit files" if "edit" in question.lower() else "Codex"
+    subject = "\n".join(command) or "\n".join(x.strip() for x in below if x.strip() and not CODEX_OPTION.match(x)
+                                              and not CODEX_CHOICE.search(x) and not _hinted(x) and not x.strip().startswith("Reason:"))
+    return {"title": title, "subject": subject, "question": question + (f" ({reason})" if reason else ""), "options": options}
 
 
 def _squash(text):

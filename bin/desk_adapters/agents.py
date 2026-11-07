@@ -56,6 +56,10 @@ class AgentAdapter:
     def screen_state(self, screen):
         raise NotImplementedError
 
+    def permission_prompt(self, screen):
+        """The permission prompt this screen shows, in screen.permission_dialog's shape, or None."""
+        return None
+
     def find_transcript(self, session):
         return None
 
