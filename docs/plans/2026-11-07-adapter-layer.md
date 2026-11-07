@@ -100,10 +100,10 @@ without a version bump. `team doctor` ships only with:
 
 ## Migration (one commit per phase, all tests green after each)
 
-- **A. Agent adapters, launch.** `AgentAdapter` base, registry, Claude and
+- **A. Agent adapters, launch.** *Done (da7303c).* `AgentAdapter` base, registry, Claude and
   Codex adapters; move `argv_for` and `adapter_config` into `launch_argv`,
   `resume_argv`, `fork_argv`. argv output is byte-for-byte unchanged.
-- **B. Agent adapters, parsing.** Move screen parsing and transcript reading
+- **B. Agent adapters, parsing.** *Done: screen, transcript, usage, pricing and launch-failure code moved to `desk_adapters/`; `team cost`, `state` and 47 real transcripts print byte-identical output.* Move screen parsing and transcript reading
   (pure functions, tested through `rt.*`) plus `owns`, `launch_failure`,
   `trust_prompt`, `context_size`. Re-export from `desk_runtime`.
 - **C. Terminal host.** `TerminalHost`, `HcHost`, `FakeHost`. Rewrite the 13
@@ -116,6 +116,17 @@ without a version bump. `team doctor` ships only with:
 
 Cut: rewriting other GUI `exec` calls; reshaping capabilities beyond moving
 them.
+
+## Findings during the move
+
+- **Codex trust prompt (open, Kabeer decides).** codex-cli 0.167 replaced
+  "Trust this folder?" with "Yes, allow Codex to work in this folder without
+  asking for approval" (`bin/fixtures/codex-trust.txt`). `CodexAdapter.trust_prompt`
+  never matches it, so the startup-dialog check shows it to Kabeer. Auto-accepting
+  would also turn off Codex's approvals in that folder, so the behaviour is kept
+  until Kabeer chooses.
+- `trust_prompt`, `context_size` and `owns` beyond aliases move with phases C and D,
+  where their `hc` calls change anyway.
 
 ## Verification
 

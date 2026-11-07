@@ -120,7 +120,7 @@ class TranscriptCommandTests(Base):
 
     def test_unreadable_transcript_is_an_error(self):
         tr = Transcript(os.path.join(self.tmp.name, 'projects'))
-        with patch.object(team, 'transcript_turns', side_effect=OSError('denied')):
+        with patch.object(team.desk_adapters.ClaudeAdapter, 'turns', side_effect=OSError('denied')):
             code, _ = self.call(team.runtime_transcript, address='t1', limit=5)
         self.assertEqual(1, code); self.assertIn('denied', self.err)
 

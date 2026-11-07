@@ -3,6 +3,7 @@ import json
 import os
 
 from .agents import AgentAdapter
+from . import claude_transcript, screen
 
 
 class ClaudeAdapter(AgentAdapter):
@@ -10,6 +11,24 @@ class ClaudeAdapter(AgentAdapter):
     default_args = {"resume_args": ["--resume", "{session_id}"],
                     "fork_args": ["--resume", "{session_id}", "--fork-session"],
                     "session_args": ["--session-id", "{session_id}"]}
+    aliases = frozenset({"claude", "claude-code"})
+    has_transcript = True
+
+    def trust_prompt(self, text):
+        # Claude's prompt defaults to "No, exit", so it needs down then enter.
+        return ["down", "enter"] if "Yes, I trust this folder" in text else None
+
+    def screen_state(self, text):
+        return screen.screen_state(text, "claude")
+
+    def find_transcript(self, session):
+        return claude_transcript.find_transcript(session.get("conversation"))
+
+    def turns(self, path, limit):
+        return claude_transcript.transcript_turns(path, limit)
+
+    def usage(self, lines):
+        return claude_transcript.transcript_usage(lines)
 
     def launch_argv(self, role, task, env):
         prompt, extra, effort = role["promptText"], role.get("args", []), role.get("effort")

@@ -58,6 +58,53 @@ class Launch(unittest.TestCase):
         self.assertIn('"timeout": 60', settings)
 
 
+FIXTURES = os.path.join(os.path.dirname(__file__), "fixtures")
+
+
+def fixture(name):
+    with open(os.path.join(FIXTURES, name), encoding="utf-8") as f:
+        return f.read()
+
+
+class Screens(unittest.TestCase):
+    """Each adapter reads its own CLI's real screens (recorded in bin/fixtures)."""
+
+    def test_prompt_screens(self):
+        self.assertEqual(da.ClaudeAdapter().screen_state(fixture("claude-prompt.txt"))["state"], "prompt")
+        self.assertEqual(da.CodexAdapter().screen_state(fixture("codex-prompt.txt"))["state"], "prompt")
+
+    def test_dialog_screens(self):
+        self.assertEqual(da.CodexAdapter().screen_state(fixture("codex-model-picker.txt"))["state"], "dialog")
+
+    def test_trust_prompt_keys(self):
+        # codex-cli 0.167 replaced "Trust this folder?" with an approval-mode question, so the Desk
+        # no longer answers it: accepting would also turn off Codex's approvals for the folder.
+        # The startup-dialog check shows it to Kabeer instead. Kabeer decides whether to change this.
+        self.assertIsNone(da.CodexAdapter().trust_prompt(fixture("codex-trust.txt")))
+        self.assertEqual(da.CodexAdapter().trust_prompt("  Trust this folder?"), ["enter"])
+        self.assertIsNone(da.CodexAdapter().trust_prompt(fixture("codex-prompt.txt")))
+        self.assertEqual(da.ClaudeAdapter().trust_prompt("│ ❯ 1. Yes, I trust this folder"), ["down", "enter"])
+        self.assertIsNone(da.ClaudeAdapter().trust_prompt(fixture("claude-prompt.txt")))
+
+    def test_unknown_cli_screens_read_as_claude(self):
+        self.assertIsInstance(da.screen_adapter("muse"), da.ClaudeAdapter)
+        self.assertIsNone(da.by_cli("muse"))
+
+
+class Processes(unittest.TestCase):
+    def test_aliases_cover_every_adapter_and_known_cli(self):
+        aliases = da.process_aliases()
+        self.assertEqual(aliases["claude"], {"claude", "claude-code"})
+        self.assertEqual(aliases["codex"], {"codex", "codex-cli"})
+        self.assertIn("muse", aliases)
+
+    def test_runtime_uses_adapter_aliases(self):
+        import desk_runtime as rt
+        live = {"foreground": {"name": "2.1.319", "argv": ["claude-code"]}, "status": {}}
+        self.assertTrue(rt.foreground_agent(live, "claude"))
+        self.assertFalse(rt.foreground_agent(live, "codex"))
+
+
 class Boundary(unittest.TestCase):
     def test_adapters_never_import_desk_code(self):
         """Adapters sit below the core: importing desk_runtime or team would make a cycle."""

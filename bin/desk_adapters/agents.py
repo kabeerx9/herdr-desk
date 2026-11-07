@@ -23,6 +23,28 @@ class AgentAdapter:
     name = None
     # Default resume/fork/session argument templates; "{session_id}" is replaced.
     default_args = {}
+    # Process names this CLI shows as (argv[0], foreground name, Herdr's status.app).
+    aliases = frozenset()
+    # Reads its own conversation log (team transcript, team cost).
+    has_transcript = False
+    # Shows a dialog right after launch that the Desk must surface (not a trust prompt).
+    startup_dialog = False
+
+    def trust_prompt(self, screen):
+        """Keys that accept this CLI's folder-trust prompt if the screen shows one, else None."""
+        return None
+
+    def screen_state(self, screen):
+        raise NotImplementedError
+
+    def find_transcript(self, session):
+        return None
+
+    def turns(self, path, limit):
+        raise NotImplementedError
+
+    def usage(self, lines):
+        raise NotImplementedError
 
     def config(self, role):
         """The role's argument templates: the adapter's defaults, then roles.json "adapter"."""

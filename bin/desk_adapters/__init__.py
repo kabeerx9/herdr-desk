@@ -18,6 +18,25 @@ def for_role(role):
     return _AGENTS[cli]
 
 
+# CLIs the Desk recognises in a terminal but has no adapter for yet.
+_KNOWN_ONLY = {"muse": frozenset({"muse", "muse-code"})}
+
+
+def process_aliases():
+    """{cli: process names it shows as}, for every CLI the Desk recognises."""
+    return {**{name: a.aliases for name, a in _AGENTS.items()}, **_KNOWN_ONLY}
+
+
+def by_cli(cli):
+    """The adapter for a CLI name, or None when the Desk has none."""
+    return _AGENTS.get(cli or "claude")
+
+
+def screen_adapter(cli):
+    """Who reads a screen: the CLI's adapter, else Claude's (the Desk's long-standing default)."""
+    return _AGENTS.get(cli) or _AGENTS["claude"]
+
+
 def config_for(role):
     """A role's resume/fork/session templates; a role with an unknown CLI gets only its own."""
     try:

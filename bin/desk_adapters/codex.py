@@ -2,11 +2,30 @@
 import json
 
 from .agents import AgentAdapter
+from . import codex_transcript, screen
 
 
 class CodexAdapter(AgentAdapter):
     name = "codex"
     default_args = {}  # resume and fork aren't wired up for Codex yet
+    aliases = frozenset({"codex", "codex-cli"})
+    has_transcript = True
+    startup_dialog = True
+
+    def trust_prompt(self, text):
+        return ["enter"] if "Trust this folder?" in text else None
+
+    def screen_state(self, text):
+        return screen.screen_state(text, "codex")
+
+    def find_transcript(self, session):
+        return codex_transcript.find_codex_rollout(session)
+
+    def turns(self, path, limit):
+        return codex_transcript.codex_turns(path, limit)
+
+    def usage(self, lines):
+        return codex_transcript.codex_usage(lines)
 
     def launch_argv(self, role, task, env):
         prompt, extra, effort = role["promptText"], role.get("args", []), role.get("effort")

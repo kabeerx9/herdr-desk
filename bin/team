@@ -577,11 +577,9 @@ def accept_trust(name, cli):
         if isinstance(st, dict) and st.get("state"):
             return False
         screen = sh(["hc", "read", "--lines", "0", name]).stdout
-        if cli == "codex" and "Trust this folder?" in screen:
-            sh(["hc", "keys", name, "enter"])
-            return True
-        if cli != "codex" and "Yes, I trust this folder" in screen:
-            sh(["hc", "keys", name, "down", "enter"])
+        keys = desk_adapters.screen_adapter(cli).trust_prompt(screen)
+        if keys:
+            sh(["hc", "keys", name, *keys])
             return True
         time.sleep(0.5)
     return False
@@ -758,7 +756,7 @@ def start(args):
     if len(variants) == 1:
         trusted = accept_trust(name, role.get("cli")) if branch else None
     startup_dialog = None
-    if role.get("cli") == "codex" and launched.get("address"):
+    if getattr(desk_adapters.by_cli(role.get("cli")), "startup_dialog", False) and launched.get("address"):
         startup_dialog = watch_startup_dialog(launched["address"])
         if startup_dialog:
             chat_append(slug, {"from": role["id"], "address": launched["address"], "kind": "command-note", "dialog": True,
@@ -1965,15 +1963,16 @@ def runtime_transcript(args):
     if not rec:
         die("No saved session has address %s" % args.address)
     cli = session_cli(rec)
-    if cli not in ("claude", "codex"):
+    agent = desk_adapters.by_cli(cli)
+    if not (agent and agent.has_transcript):
         print(json.dumps({"address": args.address, "supported": False, "turns": [], "partial": False,
                           "reason": "%s doesn't write a transcript the Desk can read" % cli})); return
-    path = find_codex_rollout(rec) if cli == "codex" else find_transcript(rec.get("conversation"))
+    path = agent.find_transcript(rec)
     if not path:
         print(json.dumps({"address": args.address, "supported": True, "turns": [], "partial": False, "reason": "No transcript yet"})); return
     limit = args.limit if args.limit and args.limit > 0 else 120
     try:
-        out = (codex_turns if cli == "codex" else transcript_turns)(path, min(limit, 500))
+        out = agent.turns(path, min(limit, 500))
     except OSError as exc:
         die("Couldn't read the transcript: %s" % exc)
     print(json.dumps({"address": args.address, **out}))
@@ -2032,15 +2031,12 @@ def branch_files(cwd):
 
 def session_usage(rec):
     """What one saved session spent, read from its CLI's own log; None if there's no log."""
-    conversation = rec.get("conversation")
-    if session_cli(rec) == "codex":
-        path, read = find_codex_rollout(rec), codex_usage
-    else:
-        path, read = find_transcript(conversation), transcript_usage
+    agent = desk_adapters.screen_adapter(session_cli(rec))
+    path = agent.find_transcript(rec) if agent.has_transcript else None
     if not path:
         return None
     with open(path, encoding="utf-8", errors="replace") as f:
-        return read(f)
+        return agent.usage(f)
 
 
 def cost(args):
