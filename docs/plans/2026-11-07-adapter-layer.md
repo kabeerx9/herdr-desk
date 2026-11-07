@@ -109,6 +109,16 @@ without a version bump. `team doctor` ships only with:
 - **C. Terminal host.** `TerminalHost`, `HcHost`, `FakeHost`. Rewrite the 13
   tests that patch `team.sh` to use `FakeHost` **in the same commit**, so no
   test passes by skipping the code. Route `desks.js:1278` through `team`.
+  *Done: all 42 `hc` calls in `team` go through `HOST = HcHost(...)`; the GUI's two
+  direct `hc send` calls (Open PR, send brief) go through the new `team send`, which
+  refuses an open dialog.* Changes from the plan, decided during the move:
+  - No `FakeHost`. `HcHost` runs through `team.sh`, so the existing tests still fake
+    the process boundary and assert every exact `hc` argv. That checks more than a
+    fake port would. Six mutations of `host.py` each fail the suite.
+  - Records stay the dicts `hc get --json` prints. More than 40 readers use their keys
+    (`status`, `labels`, `foreground`, `parent`); phase F's shape check guards them.
+  - "Not found" and "hc is down" are still one result (`None`); no caller needs the
+    difference yet.
 - **D. Hooks.** Move only hook parsing and reply shapes; chat and permit
   waiting stay in `team`.
 - **E. Plan usage.** `usage.py` calls `adapter.plan_usage()`.

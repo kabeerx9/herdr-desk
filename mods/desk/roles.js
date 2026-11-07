@@ -1,5 +1,5 @@
 import { image, div, svg } from "gpui-kit";
-import { agents, terminals, panes, spaces, run, notify, appHome, home, readTextFile, exec, hc } from "herdr";
+import { agents, terminals, panes, spaces, run, notify, appHome, home, readTextFile, exec } from "herdr";
 
 // Team roles from roles.json, shared by the Team tab, the sidebar and the PR buttons.
 // Every role starts through bin/team (the same launcher the CTO uses), which labels
@@ -144,8 +144,9 @@ export async function startBrief(brief, roles, space, { slug, parent } = {}) {
 // Hands the brief to a running agent of its role instead.
 export async function sendBrief(brief, agent) {
   const sent = await fileBrief(brief, "sent");
-  const r = await hc(["send", agent.address, `Your brief is in ${sent}. Read it, then carry it out within the files and contract it gives you.`]);
-  if (r.code !== 0) throw new Error(r.stderr.trim() || "hc send failed");
+  // Through `team send`: it never types into a dialog open in the agent's terminal.
+  const r = await exec(TEAM(), ["send", agent.address, `Your brief is in ${sent}. Read it, then carry it out within the files and contract it gives you.`]);
+  if (r.code !== 0) { let msg = r.stderr.trim() || "couldn't send the brief"; try { msg = JSON.parse(msg).error ?? msg; } catch {} throw new Error(msg); }
   run("agent.focus", { terminal: agent.address });
 }
 

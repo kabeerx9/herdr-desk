@@ -2,6 +2,7 @@
 from .agents import AgentAdapter, ArgvAdapter, LaunchEnv, UnsupportedCli, expand_args
 from .claude import ClaudeAdapter
 from .codex import CodexAdapter
+from .host import HcHost, HostResult
 
 _AGENTS = {"claude": ClaudeAdapter(), "codex": CodexAdapter()}
 _ARGV = ArgvAdapter()

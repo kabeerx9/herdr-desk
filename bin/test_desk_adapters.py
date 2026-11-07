@@ -1,5 +1,7 @@
 import ast
+import json
 import os
+import subprocess
 import sys
 import tempfile
 import unittest
@@ -105,13 +107,59 @@ class Processes(unittest.TestCase):
         self.assertFalse(rt.foreground_agent(live, "codex"))
 
 
+class Host(unittest.TestCase):
+    """HcHost against a recorded hc: the argv it sends and how it reads hc's answers."""
+
+    def host(self, code=0, out="", err=""):
+        self.calls = []
+        return da.HcHost(lambda argv: self.calls.append(argv) or subprocess.CompletedProcess(argv, code, out, err))
+
+    def test_launch_argv(self):
+        r = self.host(out='{"address":"t9"}').launch(["claude", "go"], "/w", {"role": "cto", "herdr.tab": "tb1"},
+                                                     name="cto-x", parent="t1", shell="/bin/zsh")
+        self.assertEqual(["hc", "run", "--bg", "--outlive-parent", "--name", "cto-x", "--cwd", "/w",
+                          "--label", "role=cto", "--label", "herdr.tab=tb1", "--parent", "t1",
+                          "--", "/bin/zsh", "-lic", 'exec "$@"', "team-role", "claude", "go"], self.calls[0])
+        self.assertEqual("t9", r.json()["address"])
+        self.host().launch(["x"], "/w", {}, parent="t1", no_parent=True)
+        self.assertIn("--no-parent", self.calls[0]); self.assertNotIn("--parent", self.calls[0])
+
+    def test_label_empty_value_clears(self):
+        self.host().label("t1", {"awaiting": "", "ctx": 1200})
+        self.assertEqual(["hc", "label", "t1", "awaiting=", "ctx=1200"], self.calls[0])
+
+    def test_failure_keeps_text_and_unwraps_hc_message(self):
+        err = json.dumps({"error": {"message": "no such terminal"}})
+        r = self.host(code=1, err=err).send_text("t1", "hi")
+        self.assertEqual((False, err, "no such terminal"), (r.ok, r.error, r.message))
+        self.assertEqual("plain", self.host(code=1, out="plain\n").send_keys("t1", ["enter"]).message)
+        self.assertIsNone(self.host(code=1, out="{}").send_text("t1", "x").json())
+
+    def test_records(self):
+        self.assertEqual("", self.host(code=1, out="junk").screen("t1"))
+        self.assertIsNone(self.host(code=1).get("t1"))
+        self.assertIsNone(self.host(out="[1]").get("t1"))
+        self.assertEqual(["hc", "get", "t1", "--json"], self.calls[0])
+        live = [{"address": "t1"}, "noise"]
+        self.assertEqual([{"address": "t1"}], self.host(out=json.dumps({"terminals": live})).list(label="task=x"))
+        self.assertEqual(["hc", "ls", "--label", "task=x", "--json"], self.calls[0])
+        self.assertEqual([{"address": "t1"}], self.host(out=json.dumps(live)).list(all=True))
+        self.assertEqual(["hc", "ls", "--all", "--json"], self.calls[0])
+        self.assertEqual([], self.host(code=1).list())
+
+    def test_reachable(self):
+        self.host().reachable("t1"); self.assertEqual(["hc", "get", "t1", "--json"], self.calls[0])
+        self.host().reachable(); self.assertEqual(["hc", "server", "status"], self.calls[0])
+
+
 class Boundary(unittest.TestCase):
     def test_adapters_never_import_desk_code(self):
         """Adapters sit below the core: importing desk_runtime or team would make a cycle."""
         for name in os.listdir(HERE):
             if not name.endswith(".py"):
                 continue
-            tree = ast.parse(open(os.path.join(HERE, name)).read())
+            with open(os.path.join(HERE, name)) as f:
+                tree = ast.parse(f.read())
             for node in ast.walk(tree):
                 mods = [a.name for a in node.names] if isinstance(node, ast.Import) else \
                        [node.module or ""] if isinstance(node, ast.ImportFrom) else []

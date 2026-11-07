@@ -1,6 +1,6 @@
 import { div, svg } from "gpui-kit";
 import { h_flex, v_flex, TextareaState, Textarea, InputState, Input, TextView } from "gpui-base";
-import { terminals, agents, panes, spaces, exec, home, appHome, readTextFile, watchFolder, notify, run, shared, setShared, hc, playSound, pickFolder, settings, openOverlay, window as appWindow } from "herdr";
+import { terminals, agents, panes, spaces, exec, home, appHome, readTextFile, watchFolder, notify, run, shared, setShared, playSound, pickFolder, settings, openOverlay, window as appWindow } from "herdr";
 import { button, empty, icon, iconButton, statusMark, shownStatus } from "./ui.js";
 import { Roles, roleTile, team, folderOf, findBriefs, startBrief, fileBrief, agentIcon, agentCli } from "./roles.js";
 import { WorkflowControls, runtimeData, runTeam, refreshRuntime, openDesk } from "./workflows.js";
@@ -1275,8 +1275,7 @@ export class Desks {
           .child(button(t, `${id}-qa`, "QA", (_e, cx) => this.busy(`${id}-qa`, () => child("qa", "Test the work on this branch against its brief: write tests for the intended behaviour and edge cases, and report what passes and fails. Your parent is the engineer who wrote it."), cx),
             { disabled: Boolean(this.acting), tip: "QA on this branch; it reports to this engineer" }))
           .child(button(t, `${id}-pr`, "Open PR", (_e, cx) => this.busy(`${id}-pr`, async () => {
-            const r = await hc(["send", m.address, "Kabeer approved opening a PR for this work. Commit anything left on your branch, push it, and open a PR with gh pr create (what changed, how you verified it, and a link to the related PR from this desk if there is one). Then report the PR URL with team report done."]);
-            if (r.code !== 0) throw new Error(r.stderr.trim() || "couldn't send; is it waiting on you?");
+            await runTeam(["send", m.address, "Kabeer approved opening a PR for this work. Commit anything left on your branch, push it, and open a PR with gh pr create (what changed, how you verified it, and a link to the related PR from this desk if there is one). Then report the PR URL with team report done."]);
           }, cx), { iconName: "pr", disabled: Boolean(this.acting), tip: "Ask it to push its branch and open a PR" }))))
       .child(div().pl(compact ? 0 : 30).child(this.workflow.actions(t, m)));
   }

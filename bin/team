@@ -67,14 +67,8 @@ def sh(args, cwd=None, check=False):
     return r
 
 
-def hc_json(*args):
-    r = sh(["hc", *args, "--json"])
-    if r.returncode != 0:
-        return None
-    try:
-        return json.loads(r.stdout)
-    except ValueError:
-        return None
+# Every hc call goes through HOST. It runs through sh, so tests that fake sh see each hc argv.
+HOST = desk_adapters.HcHost(lambda argv: sh(argv))
 
 
 FRESH_AT = 250_000  # roles.json "fresh_at" (or a role's own) overrides it
@@ -174,11 +168,9 @@ def runtime_store():
 
 def runtime_terminals():
     """Address keyed terminal facts; tolerated when the core is temporarily unavailable."""
-    data = hc_json("ls") or {}
-    items = data.get("terminals", []) if isinstance(data, dict) else data
     result = {}
-    for item in items:
-        if not isinstance(item, dict) or not item.get("address"):
+    for item in HOST.list():
+        if not item.get("address"):
             continue
         detail = terminal(item["address"])
         result[item["address"]] = detail or item
@@ -199,9 +191,7 @@ def runtime_record(address, role, task, cwd, cli, conversation=None, parent_task
 
 def ended_terminals():
     """Terminals that have ended, for telling a deliberate close from a loss. Reasons only: no detail calls."""
-    data = hc_json("ls", "--all") or {}
-    items = data.get("terminals", []) if isinstance(data, dict) else data
-    return {x["address"]: x for x in items if isinstance(x, dict) and x.get("address") and x.get("state") != "live"}
+    return {x["address"]: x for x in HOST.list(all=True) if x.get("address") and x.get("state") != "live"}
 
 
 def activity_file(addr):
@@ -433,11 +423,9 @@ def digest_for(slug, address, limit=20):
 
 def desk_members(slug):
     """The desk's live agents, with their labels (hc ls filters by label but doesn't print them)."""
-    d = hc_json("ls", "--label", f"task={slug}") or {}
-    items = d.get("terminals", []) if isinstance(d, dict) else d
     out = []
-    for t in items:
-        if isinstance(t, dict) and t.get("state") == "live":
+    for t in HOST.list(label=f"task={slug}"):
+        if t.get("state") == "live":
             info = terminal(t["address"])
             if (info.get("labels") or {}).get("role"):
                 out.append({**t, "labels": info["labels"]})
@@ -446,7 +434,7 @@ def desk_members(slug):
 
 def expect_reply(addr, what):
     """Marks a terminal as owing a reply; its end-of-turn hook posts that reply (team hook)."""
-    return sh(["hc", "label", addr, f"awaiting={what}:{int(time.time() * 1000)}"]).returncode == 0
+    return HOST.label(addr, {"awaiting": f"{what}:{int(time.time() * 1000)}"}).ok
 
 
 def role_label(info):
@@ -460,8 +448,7 @@ def role_label(info):
 
 
 def screen_of(addr, history=0):
-    r = sh(["hc", "read", "--lines", str(history), addr])
-    return r.stdout if r.returncode == 0 else ""
+    return HOST.screen(addr, history)
 
 
 def cli_of(info):
@@ -547,25 +534,25 @@ def send_text(addr, text):
     why = dialog_open(addr, info)
     if why:
         return why
-    r = sh(["hc", "send", addr, text])
-    if r.returncode == 0:
-        return None
-    why = (r.stderr or r.stdout).strip()
-    try:
-        why = json.loads(why)["error"]["message"]
-    except (ValueError, KeyError, TypeError):
-        pass
-    return why[:160]
+    r = HOST.send_text(addr, text)
+    return None if r.ok else r.message[:160]
+
+
+def send(args):
+    """(The Desk) types a message into an agent, with send_text's checks: never into a dialog
+    or a terminal that no longer runs its agent."""
+    why = send_text(args.address, args.text)
+    if why:
+        die(why)
+    print(json.dumps({"ok": True}))
 
 
 def live_terminals():
-    d = hc_json("ls") or {}
-    items = d.get("terminals", []) if isinstance(d, dict) else d
-    return [t for t in items if isinstance(t, dict) and t.get("state") == "live"]
+    return [t for t in HOST.list() if t.get("state") == "live"]
 
 
 def terminal(t):
-    return hc_json("get", t) or {}
+    return HOST.get(t) or {}
 
 
 def accept_trust(name, cli):
@@ -576,10 +563,9 @@ def accept_trust(name, cli):
         st = terminal(name).get("status")
         if isinstance(st, dict) and st.get("state"):
             return False
-        screen = sh(["hc", "read", "--lines", "0", name]).stdout
-        keys = desk_adapters.screen_adapter(cli).trust_prompt(screen)
+        keys = desk_adapters.screen_adapter(cli).trust_prompt(HOST.screen(name))
         if keys:
-            sh(["hc", "keys", name, *keys])
+            HOST.send_keys(name, keys)
             return True
         time.sleep(0.5)
     return False
@@ -684,14 +670,9 @@ def start(args):
     space = args.space or caller_labels.get("herdr.space") or "spteam" + secrets.token_hex(8)
     tab = args.tab or "tb" + secrets.token_hex(16)
     name = unique_name(f"{role['id']}-{slug}")
-    cmd = ["hc", "run", "--bg", "--outlive-parent", "--name", name, "--cwd", folder,
-           "--label", f"role={role['id']}", "--label", f"task={slug}", "--label", f"by={args.by or ME or 'shell'}",
-           "--label", f"herdr.space={space}", "--label", f"herdr.tab={tab}"]
+    labels = {"role": role["id"], "task": slug, "by": args.by or ME or "shell", "herdr.space": space, "herdr.tab": tab}
     initial_chat = getattr(args, "display_task", None)
-    if initial_chat: cmd += ["--label", "awaiting=chat:" + str(int(time.time() * 1000))]
-    cmd += ["--no-parent"] if args.no_parent else (["--parent", args.parent] if args.parent else [])
-    # Through the user's own login + interactive shell: hc's environment lacks what ~/.zshrc sets
-    # up (nvm's node and npm, Android tools). exec swaps the shell for the agent itself.
+    if initial_chat: labels["awaiting"] = "chat:" + str(int(time.time() * 1000))
     shell = os.environ.get("SHELL") or "/bin/zsh"
     desk_note = f"\n\nYour desk is `{slug}`: your team chat and, for briefs, `team/briefs/{slug}/`."
     if repo:
@@ -705,13 +686,10 @@ def start(args):
     for n, variant in enumerate(variants):
         identity = str(uuid.uuid4()) if adapter_config(variant).get("session_args") else None
         command = argv_for(variant, "") + (adapter_args(variant, "session", identity) if identity else []) + ([task] if task else [])
-        r = sh(cmd + ["--", shell, "-lic", 'exec "$@"', "team-role"] + command)
-        if r.returncode != 0:
-            die(f"hc run failed: {(r.stderr or r.stdout).strip()}")
-        try:
-            launched = json.loads(r.stdout)
-        except ValueError:
-            launched = {"raw": r.stdout.strip()}
+        r = HOST.launch(command, folder, labels, name=name, parent=args.parent, no_parent=args.no_parent, shell=shell)
+        if not r.ok:
+            die(f"hc run failed: {r.error}")
+        launched = r.json() if isinstance(r.json(), dict) else {"raw": r.out.strip()}
         if len(variants) == 1:
             break
         # A runner list: watch the launch, and only a usage limit or a sign-in failure moves on.
@@ -722,7 +700,7 @@ def start(args):
                 note = ((note + "; ") if note else "") + f"every runner failed ({why}); the last one is left open"
             break
         fallbacks.append({"cli": variant.get("cli"), "model": variant.get("model"), "why": why})
-        sh(["hc", "kill", launched.get("address") or name]); sh(["hc", "rm", launched.get("address") or name])
+        HOST.kill(launched.get("address") or name); HOST.remove(launched.get("address") or name)
     role = variant
     runtime_record(launched.get("address"), role["id"], slug, folder, role.get("cli"), identity,
                    capabilities={"resume": bool(adapter_config(role).get("resume_args")), "fork": bool(adapter_config(role).get("fork_args"))},
@@ -734,7 +712,7 @@ def start(args):
 
     # The CTO that fans a task out is part of it too, so the Desk groups them.
     if ME and caller_labels.get("role") == "cto" and caller_labels.get("task") != slug:
-        sh(["hc", "label", ME, f"task={slug}"])
+        HOST.label(ME, {"task": slug})
     starter = caller_labels.get("role") or ("kabeer" if args.by == "desk" else (ME or "shell"))
     # What it was brought in to do, in one line, for the Desk's team card.
     line = task_line(args.task, brief_text)
@@ -800,7 +778,7 @@ def watch_launch(address, task, seconds=None):
     deadline, seen_working = time.time() + (RUNNER_WATCH if seconds is None else seconds), False
     while True:
         info = terminal(address)
-        why = classify_launch_failure(sh(["hc", "read", "--lines", "200", address]).stdout, task)
+        why = classify_launch_failure(HOST.screen(address, 200), task)
         if why:
             return why
         if info.get("state") and info.get("state") != "live":
@@ -820,9 +798,9 @@ SANDBOX_HINT = ("hc can't reach herdr-core from here. If you're in a sandbox (Co
 
 
 def need_core():
-    r = sh(["hc", "get", ME or "self", "--json"]) if ME else sh(["hc", "server", "status"])
-    if r.returncode != 0:
-        die(f"{SANDBOX_HINT} ({(r.stderr or r.stdout).strip()[:160]})", 3)
+    r = HOST.reachable(ME)
+    if not r.ok:
+        die(f"{SANDBOX_HINT} ({r.error[:160]})", 3)
 
 
 def stop_leftover_tests():
@@ -878,9 +856,9 @@ def report(args):
     head = getattr(args, "head", None) or (git_out(cwd, "rev-parse", "HEAD") if cwd and args.kind == "done" else None)
     if args.kind == "done":
         stop_leftover_tests()
-    lr = sh(["hc", "label", ME, f"phase={args.kind}", f"note={text[:240]}"])
-    if lr.returncode != 0:
-        die(f"couldn't record the report: {(lr.stderr or lr.stdout).strip()[:200]}", 3)
+    lr = HOST.label(ME, {"phase": args.kind, "note": text[:240]})
+    if not lr.ok:
+        die(f"couldn't record the report: {lr.error[:200]}", 3)
     who = labels.get("role") or me.get("name") or ME
     sent = False
     parent = me.get("parent")
@@ -895,10 +873,10 @@ def report(args):
     if parent:
         # Never typed into a dialog open in the parent's terminal: the chat record below still has it.
         why = dialog_open(parent, terminal(parent))
-        r = None if why else sh(["hc", "send", parent, f"[{who} {args.kind}] {text}{extra}"])
-        sent = bool(r) and r.returncode == 0
+        r = None if why else HOST.send_text(parent, f"[{who} {args.kind}] {text}{extra}")
+        sent = bool(r) and r.ok
         if not sent:
-            why = why or (r.stderr or r.stdout).strip()[:200]
+            why = why or r.error[:200]
             print(json.dumps({"warning": f"recorded, but not delivered to {parent}: {why}"}), file=sys.stderr)
     diff = diff_stat(cwd) if args.kind == "done" and cwd else None
     facts = {**({"criteria": criteria} if criteria else {}), **({"evidence": evidence} if args.kind == "done" else {}),
@@ -1053,7 +1031,7 @@ def hook(args):
     # Cleared whatever the turn said: an empty or failed turn owes nothing more, so the Desk
     # never shows "replying" for a reply that isn't coming.
     if awaiting:
-        sh(["hc", "label", ME, "awaiting="])
+        HOST.label(ME, {"awaiting": ""})
     if not awaiting and who == "cto" and slug and msg.strip():
         # A turn that a report or a finished task started, not a chat message. Kabeer talks to the
         # CTO, so what it concludes reaches the chat too, unless it already posted this turn.
@@ -1358,9 +1336,9 @@ def compact(args):
         die(why + "; close it there first")
     keep = "keep the task and why decisions made files and commits touched next steps open questions and who is waiting"
     keys = ["/", *"compact", "space", *["space" if c == " " else c for c in keep], "enter"]
-    r = sh(["hc", "keys", info.get("address") or args.address, *keys])
-    if r.returncode != 0:
-        die(f"couldn't type into it: {(r.stderr or r.stdout).strip()[:160]}")
+    r = HOST.send_keys(info.get("address") or args.address, keys)
+    if not r.ok:
+        die(f"couldn't type into it: {r.error[:160]}")
     print(json.dumps({"ok": True}))
 
 
@@ -1378,7 +1356,7 @@ def measure(args):
         # so the new size is left to the next turn's measurement.
         meta = meta or {}
         pre = meta.get("preTokens") or before.get("ctx")
-        sh(["hc", "label", args.address, "ctxwarned=", "ctx="])
+        HOST.label(args.address, {"ctxwarned": "", "ctx": ""})
         if before.get("task") and before.get("role"):
             size = f" (was {int(pre) // 1000}k tokens)" if pre else ""
             chat_append(before["task"], {"from": before["role"], "address": args.address, "kind": "compact",
@@ -1395,7 +1373,7 @@ def measure(args):
     labels = terminal(args.address).get("labels") or {}
     slug, who = labels.get("task"), labels.get("role")
     warn = bool(slug and who and ctx >= fresh_at(who) and not labels.get("ctxwarned"))
-    sh(["hc", "label", args.address, f"ctx={ctx}", *(["ctxwarned=1"] if warn else [])])
+    HOST.label(args.address, {"ctx": ctx, **({"ctxwarned": 1} if warn else {})})
     if warn:
         chat_append(slug, {"from": who, "address": args.address, "kind": "context", "ctx": ctx,
                            "text": f"My context is at {ctx // 1000}k tokens, and every turn re-reads all of it. "
@@ -1581,9 +1559,9 @@ def approve(args):
         via = "hook"
     else:
         hook = hook if hook and dialog_matches(dialog, hook.get("detail")) else None
-        r = sh(["hc", "keys", addr, str(option["n"])])
-        if r.returncode != 0:
-            refuse("send_failed", f"Couldn't press {option['n']} in {name}'s terminal: {(r.stderr or r.stdout).strip()[:160]}", open_terminal=True)
+        r = HOST.send_keys(addr, [str(option["n"])])
+        if not r.ok:
+            refuse("send_failed", f"Couldn't press {option['n']} in {name}'s terminal: {r.error[:160]}", open_terminal=True)
     end, pressed_enter, after = time.time() + APPROVE_S, False, dialog
     while True:
         time.sleep(POLL_S)
@@ -1593,7 +1571,7 @@ def approve(args):
         # A select that only moved its focus onto our option: confirm it, once.
         focused = next((o for o in after["options"] if o["focused"]), None)
         if via == "keys" and not pressed_enter and focused and focused["n"] == option["n"]:
-            sh(["hc", "keys", addr, "enter"]); pressed_enter = True
+            HOST.send_keys(addr, ["enter"]); pressed_enter = True
         if time.time() >= end:
             refuse("still_open", f"{name}'s prompt is still open after answering; check its terminal", open_terminal=True)
     if slug and os.path.exists(chat_file(slug)):
@@ -1622,17 +1600,10 @@ def type_raw(addr, text):
         return f"{role_label(info)} has unsent text in its input; clear it in its terminal first"
     if text.startswith("/") and "\n" not in text and len(text) <= RAW_KEYS_MAX:
         keys = ["space" if c == " " else c for c in text] + ["enter"]
-        r = sh(["hc", "keys", addr, *keys])
+        r = HOST.send_keys(addr, keys)
     else:
-        r = sh(["hc", "send", addr, text])
-    if r.returncode == 0:
-        return None
-    why = (r.stderr or r.stdout).strip()
-    try:
-        why = json.loads(why)["error"]["message"]
-    except (ValueError, KeyError, TypeError):
-        pass
-    return why[:160] or "couldn't type into it"
+        r = HOST.send_text(addr, text)
+    return None if r.ok else (r.message[:160] or "couldn't type into it")
 
 
 SETTLE_S = 3.0      # how long an info command gets to print or open its dialog
@@ -1661,7 +1632,7 @@ def watch_screen(addr, cli, done, timeout, history=60):
 def back_to_prompt(addr, cli, tries=2):
     """Esc out of whatever dialog is open, until Claude's empty input box is back. True when it is."""
     for _ in range(tries):
-        sh(["hc", "keys", addr, "esc"])
+        HOST.send_keys(addr, ["esc"])
         state, _, _ = watch_screen(addr, cli, lambda st, _s: st["state"] == "prompt" and not st["input"], 1.5, history=0)
         if state["state"] == "prompt" and not state["input"]:
             return True
@@ -1724,7 +1695,7 @@ def follow_command(task, addr, role, text, mode, since_ms, conversation=None):
     left = lambda st, _s: st["state"] == "dialog" or (st["state"] == "prompt" and st["input"] != text)
     state, _, _ = watch_screen(addr, cli, left, ACCEPT_S, history=0)
     if state["state"] == "prompt" and state["input"] == text:
-        sh(["hc", "keys", addr, "enter"])
+        HOST.send_keys(addr, ["enter"])
         state, _, _ = watch_screen(addr, cli, left, ACCEPT_S, history=0)
     if state["state"] == "dialog":
         peek(f"{command} opened a dialog in {name}'s terminal; opened it for you")
@@ -1761,7 +1732,7 @@ def post_raw(args, text, targets):
         why = type_raw(addr, text)
         if why:
             if reply:
-                sh(["hc", "label", addr, "awaiting="])
+                HOST.label(addr, {"awaiting": ""})
             failed.append({"role": role, "address": addr, "why": why, **({"dialog": True} if DIALOG_OPEN in why else {})})
         else:
             delivered.append(role); delivered_to.append(addr)
@@ -1809,7 +1780,7 @@ def post(args):
             continue
         why = send_text(addr, note)
         if why:
-            sh(["hc", "label", addr, "awaiting="])  # nothing was sent, so no reply is coming
+            HOST.label(addr, {"awaiting": ""})  # nothing was sent, so no reply is coming
             failed.append({"role": role, "address": addr, "why": why, **({"dialog": True} if DIALOG_OPEN in why else {})})
         else:
             delivered.append(role); delivered_to.append(addr)
@@ -2006,7 +1977,7 @@ def review_send(args):
         die(f"couldn't reserve its reply, so nothing was sent; the batch is still in {args.file}")
     why = send_text(addr, text)
     if why:
-        sh(["hc", "label", addr, "awaiting="])
+        HOST.label(addr, {"awaiting": ""})
         die(f"not sent ({why}); the batch is still in {args.file}")
     role = labels.get("role") or rec.get("role")
     chat_append(labels.get("task") or rec.get("task"), {"from": "kabeer", "kind": "review", "to": [role], "text": text,
@@ -2143,8 +2114,8 @@ def runtime_recover(args):
     if info and info.get("state") == "live":
         if executable not in shell_names:
             release(); die("This terminal is occupied; recovery never replaces a running program")
-        result = sh(["hc", "send", rec["address"], "exec " + shlex.join(command)])
-        if result.returncode:
+        result = HOST.send_text(rec["address"], "exec " + shlex.join(command))
+        if not result.ok:
             # A transport error may follow a successful send: never inject a retry.
             die("Recovery delivery is uncertain. Check the terminal before retrying.")
         address = rec["address"]
@@ -2152,14 +2123,11 @@ def runtime_recover(args):
         space = rec.get("space") or "spteam" + secrets.token_hex(8)
         tab = rec.get("tab") or "tb" + secrets.token_hex(16)
         shell = os.environ.get("SHELL") or "/bin/zsh"
-        launch = ["hc", "run", "--bg", "--outlive-parent", "--cwd", rec["cwd"], "--no-parent",
-            "--label", "role=" + rec["role"], "--label", "task=" + rec["task"],
-            "--label", "herdr.space=" + space, "--label", "herdr.tab=" + tab,
-            "--", shell, "-lic", 'exec "$@"', "team-role"] + command
-        result = sh(launch)
-        if result.returncode: die("Recovery launch is uncertain. Check live terminals before retrying.")
-        try: address = json.loads(result.stdout)["address"]
-        except (ValueError, KeyError): die("Recovery launch returned no terminal identity; check live terminals before retrying.")
+        result = HOST.launch(command, rec["cwd"], {"role": rec["role"], "task": rec["task"], "herdr.space": space, "herdr.tab": tab},
+                             no_parent=True, shell=shell)
+        if not result.ok: die("Recovery launch is uncertain. Check live terminals before retrying.")
+        try: address = result.json()["address"]
+        except (TypeError, KeyError): die("Recovery launch returned no terminal identity; check live terminals before retrying.")
         def remap(data):
             record = next(x for x in data["sessions"] if x["id"] == rec["id"])
             old = record["address"]; record.update(address=address, space=space, tab=tab)
@@ -2269,7 +2237,7 @@ def runtime_queue_dispatch_locked(store, _args):
             why = send_text(target["address"], "[desk chat] Kabeer: " + claimed["text"])
             # A dialog opened since the claim: nothing was typed, so it waits for the dialog to close.
             outcome = "not_sent" if why and DIALOG_OPEN in why else "uncertain" if why else "sent"
-            if outcome == "not_sent": sh(["hc", "label", target["address"], "awaiting="])
+            if outcome == "not_sent": HOST.label(target["address"], {"awaiting": ""})
         if why: failures.append({"role": target["role"], "why": why, **({"dialog": True} if DIALOG_OPEN in why else {})})
         def record_delivery(data):
             item = runtime_find_queue(data, claimed["id"])
@@ -2377,15 +2345,11 @@ def runtime_fork(args, rec, view):
         fork_role = {**role, "promptText": role.get("promptText", "") + "\n\nThis is an isolated conversation fork. Your current desk is " + slug + ". Work only in " + path + "; do not replay the previous task. The original desk remains unchanged."}
         command = argv_for(fork_role, "") + adapter_args(fork_role, "fork", rec["conversation"]) + ([args.text] if args.text else [])
         shell = os.environ.get("SHELL") or "/bin/zsh"
-        launch = ["hc", "run", "--bg", "--outlive-parent", "--name", name, "--cwd", path,
-                  "--label", "role=" + role["id"], "--label", "task=" + slug, "--label", "by=desk",
-                  "--label", "herdr.space=" + space, "--label", "herdr.tab=" + tab,
-                  "--no-parent", "--", shell, "-lic", 'exec "$@"', "team-role", *command]
-        result = sh(launch)
-        if result.returncode: die("Couldn't launch context fork: " + (result.stderr or result.stdout).strip())
+        result = HOST.launch(command, path, {"role": role["id"], "task": slug, "by": "desk", "herdr.space": space, "herdr.tab": tab},
+                             name=name, no_parent=True, shell=shell)
+        if not result.ok: die("Couldn't launch context fork: " + result.error)
         launched = True
-        try: started = json.loads(result.stdout)
-        except ValueError: started = {}
+        started = result.json() if isinstance(result.json(), dict) else {}
         chat_append(slug, {"from": "kabeer", "kind": "desk", "name": "Fork · " + rec.get("task", "Desk"),
                            "folder": path, "project": repo["name"], "parent_task": rec.get("task"), "parent_session": rec["id"]})
         chat_append(slug, {"from": "kabeer", "kind": "start", "role": role["id"], "address": started.get("address"),
@@ -2435,9 +2399,9 @@ def join(args):
         die(f"no role {args.role}")
     if role["id"] == "cto" and any(t["labels"].get("role") == "cto" for t in desk_members(args.task)):
         die("this desk has a CTO already")
-    r = sh(["hc", "label", addr, f"role={role['id']}", f"task={args.task}", "by=kabeer"])
-    if r.returncode != 0:
-        die(f"couldn't label {addr}: {(r.stderr or r.stdout).strip()[:160]}")
+    r = HOST.label(addr, {"role": role["id"], "task": args.task, "by": "kabeer"})
+    if not r.ok:
+        die(f"couldn't label {addr}: {r.error[:160]}")
     # It wasn't started by team, so it has no end-of-turn hook: its replies aren't posted for it.
     note = (f"[desk chat] Kabeer added you to desk `{args.task}` as {role['name']}. The team tool is `{SELF}` "
             f"and the protocol is `{os.path.join(DESK, 'roles', 'protocol.md')}`: read it once. One difference for you: "
@@ -2528,7 +2492,7 @@ def finish(args):
         if left:
             text = f"Left locally in {where}: " + "; ".join(left) + ". Nothing removed."
             rec = chat_append(slug, {"from": who, "address": target, "kind": "flag", "text": text})
-            sh(["hc", "label", target, "phase=blocked", f"note={text[:240]}"])
+            HOST.label(target, {"phase": "blocked", "note": text[:240]})
             print(json.dumps({"finished": False, "left": left, **rec}))
             return
         others = [t["address"] for t in live_terminals() if t["address"] != target and inside(
@@ -2560,7 +2524,7 @@ def end_agent(target):
     """Ends an agent on purpose. Marked first: a wrap-up is terminal, unlike a crash or restart, and
     the Desk must never see it dead and unmarked. An agent closing itself dies at the kill."""
     mark_finished(target)
-    sh(["hc", "kill", target])
+    HOST.kill(target)
     for _ in range(20):  # so a wrap-up of the next agent sees this one gone
         if terminal(target).get("state") != "live":
             break
@@ -2640,7 +2604,7 @@ def fresh(args):
                           "If you keep the decisions file, bring it up to date too. Then end your turn; start nothing new.")
     if why:
         die(f"couldn't reach it: {why}")
-    sh(["hc", "label", addr, f"handoff={path}"])
+    HOST.label(addr, {"handoff": path})
     expect_reply(addr, "fresh")
     print(json.dumps({"ok": True, "handoff": path}))
 
@@ -2671,7 +2635,7 @@ def take_over(info, addr, labels, role_id, slug, cwd):
         why = (r.stderr or r.stdout).strip()[:200]
         chat_append(slug, {"from": role_id, "address": addr, "kind": "flag",
                            "text": f"Couldn't start a fresh {role['name']} ({why}). The old session is still running."})
-        sh(["hc", "label", addr, "handoff="])
+        HOST.label(addr, {"handoff": ""})
         return
     # The new session reads the chat from where the old one stopped.
     try:
@@ -2685,7 +2649,7 @@ def take_over(info, addr, labels, role_id, slug, cwd):
         with open(tmp, "w") as f:
             json.dump(cur, f)
         os.replace(tmp, cursors_file(slug))
-    sh(["hc", "kill", addr])
+    HOST.kill(addr)
     print(json.dumps({"ok": True, "address": new, "replaced": addr, "handoff": path if wrote else None}))
 
 
@@ -2794,6 +2758,8 @@ def main():
     co = sub.add_parser("cost")
     co.add_argument("--task"); co.add_argument("--json", action="store_true")
     sub.add_parser("roles")
+    se = sub.add_parser("send")
+    se.add_argument("address"); se.add_argument("text")
     args = p.parse_args()
     if args.cmd == "start":
         start(args)
@@ -2873,6 +2839,8 @@ def main():
         runtime_gate(args)
     elif args.cmd == "cost":
         cost(args)
+    elif args.cmd == "send":
+        send(args)
     else:
         print(json.dumps([{k: r.get(k) for k in ("id", "name", "cli", "model", "worktree", "on_request")} for r in load_roles()]))
 

@@ -267,6 +267,17 @@ class CommandTests(Base):
         self.assertIsNone(team.send_text("t1", "hi"))
         self.assertEqual(["hc", "send", "t1", "hi"], self.term.typed()[-1])
 
+    def test_team_send_command_refuses_a_dialog(self):
+        """The Desk's Open PR and send-brief buttons go through `team send`, not a bare hc send."""
+        self.term.screen = PICKER
+        code, out = self.call(team.send, address="t1", text="open a PR")
+        self.assertEqual((1, None), (code, out))
+        self.assertIn("dialog open", self.err)
+        self.assertNotIn("send", [c[1] for c in self.term.typed()])
+        self.term.screen = PROMPT
+        self.assertEqual((0, {"ok": True}), self.call(team.send, address="t1", text="open a PR"))
+        self.assertEqual(["hc", "send", "t1", "open a PR"], self.term.typed()[-1])
+
     def test_queue_waits_while_a_dialog_is_open(self):
         self.call(team.runtime_queue, task="desk", to=["t1:cto"], text=["later"])
         self.term.screen = USAGE
