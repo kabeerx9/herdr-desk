@@ -22,11 +22,11 @@
     {
       "id": "architect",
       "name": "Architect",
-      "title": "Reviews the plan and makes the hard design calls, on request",
+      "title": "Makes the hard design calls, reviews the plan, diagnoses hard bugs",
       "cli": "claude",
-      "model": "claude-fable-5-1",
+      "model": "claude-fable-5-2",
       "effort": "high",
-      "label": "Fable 5.1 · high",
+      "label": "Fable 5.2 · high",
       "tools": [
         "Bash",
         "Read",
