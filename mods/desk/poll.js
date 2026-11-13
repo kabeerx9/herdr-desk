@@ -33,3 +33,16 @@ export function due(stamps, key, every, now) {
   stamps[key] = now;
   return true;
 }
+
+// Whether to read a member's screen for a permission prompt (team approve --peek, a process
+// each). Blocked: every 2.5 s. Otherwise every 10 s, but only while something could have
+// changed: its status, turn or agent record moved since the last look (sig), the last look
+// found a prompt, or it started in the last 2 minutes (a Codex folder-trust question doesn't
+// always mark it blocked). An unchanged member still gets a look once a minute.
+export function peekDue(prev, { status, sig, created }, now) {
+  if (!prev) return true;
+  const age = now - prev.at;
+  if (status === "blocked") return age > 2500;
+  if (age <= 10000) return false;
+  return prev.sig !== sig || Boolean(prev.dialog) || now - (created ?? 0) < 120000 || age > 60000;
+}

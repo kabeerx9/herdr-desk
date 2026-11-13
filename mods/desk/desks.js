@@ -11,7 +11,7 @@ import { COLUMN, measured, messageRow, liveRows, statusLineRows, headerStrip, ap
 import { routeKey, routeHeader, routeRow, routeEmpty, commandMenu } from "./route.js";
 import { commandsFor, slashQuery, matchCommands, resolveCommand, menuKey, mentionQuery, mentionItems } from "./commands.js";
 import { minimap } from "./minimap.js";
-import { tickEvery, lastLines, due } from "./poll.js";
+import { tickEvery, lastLines, due, peekDue } from "./poll.js";
 import { DIALOG } from "./delete-dialog.js";
 
 // Desks: each one an independent team (its own agents, thread and worktrees) that
@@ -672,14 +672,16 @@ export class Desks {
   pollPrompts(cx) {
     const d = this.view !== "list" && this.view !== "new" ? this.desk(this.view) : null;
     if (!d || this.peeking || Date.now() - (this.drawnAt ?? 0) > 15000) return;
-    // A blocked member every 2.5 s. Any other member not at work every 10 s: a Codex prompt (its
-    // folder-trust question at startup) doesn't always mark it blocked.
+    // A blocked member every 2.5 s. Any other member not at work every 10 s while it could have
+    // changed (poll.js peekDue): a Codex prompt (its folder-trust question at startup) doesn't
+    // always mark it blocked.
     const polled = this.members(d.slug).filter((m) => m.status !== "working");
     const live = new Set(polled.map((m) => m.address));
     let changed = false;
     for (const a of Object.keys(this.prompts)) if (!live.has(a)) { delete this.prompts[a]; delete this.approveErr[a]; changed = true; }
-    const every = (m) => (m.status === "blocked" ? 2500 : 10000);
-    const due = polled.filter((m) => !this.prompts[m.address] || Date.now() - this.prompts[m.address].at > every(m));
+    const turn = new Map(terminals().map((x) => [x.address, x.turn])), seq = new Map(agents().map((x) => [x.address, x.seq]));
+    const sigOf = (m) => `${m.status}|${turn.get(m.address) ?? ""}|${seq.get(m.address) ?? ""}`;
+    const due = polled.filter((m) => peekDue(this.prompts[m.address], { status: m.status, sig: sigOf(m), created: m.created }, Date.now()));
     if (!due.length) { if (changed) cx.notify(); return; }
     this.peeking = true;
     cx.spawn(async (cx) => {
@@ -693,7 +695,7 @@ export class Desks {
           } catch { why = "error"; }
           const before = this.prompts[m.address];
           if (JSON.stringify(before?.dialog ?? null) !== JSON.stringify(dialog) || before?.why !== why) changed = true;
-          this.prompts[m.address] = { at: Date.now(), dialog, why };
+          this.prompts[m.address] = { at: Date.now(), dialog, why, sig: sigOf(m) };
         }
       } finally { this.peeking = false; }
       if (changed) cx.notify();

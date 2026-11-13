@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { runtimeWake, agentSignature, tickEvery, lastLines, due } from './poll.js';
+import { runtimeWake, agentSignature, tickEvery, lastLines, due, peekDue } from './poll.js';
 
 const dir = '/u/.herdr/team';
 
@@ -49,4 +49,19 @@ test('due spaces runs per key', () => {
   assert.equal(due(stamps, 'd2', 3000, 12999), true, 'another desk has its own spacing');
   assert.equal(due(stamps, 'd1', 3000, 13000), true);
   assert.equal(stamps.d1, 13000);
+});
+
+test('peekDue keeps blocked members quick and skips unchanged idle ones', () => {
+  const old = 0, now = 1_000_000;
+  const idle = { status: 'idle', sig: 'idle|3|9', created: old };
+  assert.equal(peekDue(undefined, idle, now), true, 'first look');
+  assert.equal(peekDue({ at: now - 3000, sig: 'blocked|3|9' }, { ...idle, status: 'blocked' }, now), true, 'blocked: 2.5 s');
+  assert.equal(peekDue({ at: now - 2000, sig: 'x' }, { ...idle, status: 'blocked' }, now), false);
+  assert.equal(peekDue({ at: now - 11000, sig: 'idle|3|9' }, idle, now), false, 'unchanged idle member is skipped');
+  assert.equal(peekDue({ at: now - 11000, sig: 'idle|2|8' }, idle, now), true, 'its turn moved');
+  assert.equal(peekDue({ at: now - 5000, sig: 'idle|2|8' }, idle, now), false, 'never sooner than 10 s');
+  assert.equal(peekDue({ at: now - 11000, sig: 'idle|3|9', dialog: { title: 'Trust?' } }, idle, now), true, 'a shown prompt is watched until it goes');
+  assert.equal(peekDue({ at: now - 11000, sig: 'idle|3|9' }, { ...idle, created: now - 30000 }, now), true, 'a new agent may show a trust prompt');
+  assert.equal(peekDue({ at: now - 61000, sig: 'idle|3|9' }, idle, now), true, 'once a minute regardless');
+  assert.equal(peekDue({ at: 0, dialog: null, why: null }, idle, now), true, 'after an answer, look again at once');
 });
