@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { runtimeWake, agentSignature, tickEvery, lastLines, due, peekDue } from './poll.js';
+import { runtimeWake, agentSignature, tickEvery, lastLines, due, peekDue, coalesce } from './poll.js';
 
 const dir = '/u/.herdr/team';
 
@@ -64,4 +64,29 @@ test('peekDue keeps blocked members quick and skips unchanged idle ones', () => 
   assert.equal(peekDue({ at: now - 11000, sig: 'idle|3|9' }, { ...idle, created: now - 30000 }, now), true, 'a new agent may show a trust prompt');
   assert.equal(peekDue({ at: now - 61000, sig: 'idle|3|9' }, idle, now), true, 'once a minute regardless');
   assert.equal(peekDue({ at: 0, dialog: null, why: null }, idle, now), true, 'after an answer, look again at once');
+});
+
+test('coalesce shares a read in flight only with callers it started after', async () => {
+  const reads = new Map();
+  let runs = 0;
+  const start = () => { const n = ++runs; return new Promise((r) => setImmediate(() => r(`read ${n}`))); };
+  const a = coalesce(reads, 'list', 100, start, 100);
+  const b = coalesce(reads, 'list', 100, start, 100);      // woke at the same moment: joins
+  const c = coalesce(reads, 'list', 101, start, 101);      // woke after it started: its own read
+  assert.equal(await a, 'read 1'); assert.equal(await b, 'read 1'); assert.equal(await c, 'read 2');
+  assert.equal(runs, 2);
+  assert.equal(reads.size, 0, 'settled reads are dropped');
+  const d = coalesce(reads, 'list', 0, start, 200);
+  assert.equal(await d, 'read 3', 'nothing settled is reused');
+  const e = coalesce(reads, 'other', Infinity, start, 300);
+  const f = coalesce(reads, 'other', Infinity, start, 300); // no wake time: never joins
+  await Promise.all([e, f]); assert.equal(runs, 5);
+});
+
+test('a joiner reads for itself when the shared read fails', async () => {
+  const reads = new Map();
+  const failing = coalesce(reads, 'k', 0, () => Promise.reject(new Error('closed')), 10);
+  const joined = coalesce(reads, 'k', 10, () => Promise.resolve('own'), 10);
+  await assert.rejects(failing);
+  assert.equal(await joined, 'own');
 });

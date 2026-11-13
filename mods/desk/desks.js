@@ -11,7 +11,7 @@ import { COLUMN, measured, messageRow, liveRows, statusLineRows, headerStrip, ap
 import { routeKey, routeHeader, routeRow, routeEmpty, commandMenu } from "./route.js";
 import { commandsFor, slashQuery, matchCommands, resolveCommand, menuKey, mentionQuery, mentionItems } from "./commands.js";
 import { minimap } from "./minimap.js";
-import { tickEvery, lastLines, due, peekDue } from "./poll.js";
+import { tickEvery, lastLines, due, peekDue, coalesce } from "./poll.js";
 import { DIALOG } from "./delete-dialog.js";
 
 // Desks: each one an independent team (its own agents, thread and worktrees) that
@@ -80,6 +80,10 @@ const LIST = `cd "$1" 2>/dev/null || exit 0
 for f in *.jsonl; do [ -f "$f" ] || continue
   printf '%s\\t%s\\t%s\\t%s\\t%s\\n' "\${f%.jsonl}" "$(stat -f %m "$f")" "$(wc -l < "$f" | tr -d ' ')" "$(head -n1 "$f")" "$(tail -n1 "$f")"
 done | sort -t "$(printf '\\t')" -k2 -rn`;
+
+// Reads in flight, shared by the copies of this mod (the panel, the main chat, the card and
+// chat panes each hold a Desks) that one thread append wakes together (poll.js coalesce).
+const reads = new Map();
 
 // Toasts once per report: an agent's phase label changing.
 class PhaseWatch {
@@ -217,10 +221,15 @@ export class Desks {
       for (;;) { await watchFolder(`${DIR()}/.activity`); this.pollSteps(cx); this.pollRoute(cx); }
     });
 
-    this.roles.load(cx);
-    cx.timer.every(5000, (cx) => this.roles.load(cx));
+    // roles.json every 5 s in the copy in front (the primary one, or one that drew its desk in
+    // the last 15 s); others, such as the card's, every 30 s. Briefs only where they're drawn.
+    this.roles.load(cx); this.rolesAt = Date.now();
+    cx.timer.every(5000, (cx) => {
+      const now = Date.now(), front = this.wide || (!chatLayout() && this.toasts) || now - (this.drawnAt ?? 0) <= 15000;
+      if (front || now - this.rolesAt >= 30000) { this.rolesAt = now; this.roles.load(cx); }
+    });
     cx.timer.every(2500, () => { if (this.toasts) this.watch.check(this.roles); });
-    cx.timer.every(8000, (cx) => this.scanBriefs(cx));
+    cx.timer.every(8000, (cx) => { if (Date.now() - (this.drawnAt ?? 0) <= 15000) this.scanBriefs(cx); });
     // Another mod can open a desk (shared "desk.view": the sidebar, the spaces list); load it.
     // "desk.here" (a space picked in the spaces list) points a new desk at that space.
     cx.timer.every(400, (cx) => {
@@ -286,9 +295,9 @@ export class Desks {
       // macOS watches recursively: .activity/ (every tool call), .runtime.json and the locks
       // change many times a second while agents work. Only a desk's thread file is news.
       for (;;) {
-        const changed = await watchFolder(DIR());
+        const changed = await watchFolder(DIR()), woke = Date.now();
         if (!changed.some((p) => p === DIR() || p === `${DIR()}/` || /^[^/.][^/]*\.jsonl$/.test(p.slice(DIR().length + 1)))) continue;
-        await this.reload(cx);
+        await this.reload(cx, woke);
       }
     });
   }
@@ -328,10 +337,11 @@ export class Desks {
     if ((shared("desk.counts")?.desks ?? 0) !== n) setShared("desk.counts", { ...shared("desk.counts"), desks: n });
   }
 
-  async reload(cx) {
+  // since: when the caller's change woke it; it may share another copy's read started after.
+  async reload(cx, since = Infinity) {
     this.loaded = this.view;
     try {
-      const r = await exec("sh", ["-c", LIST, "list", DIR()]);
+      const r = await coalesce(reads, `list:${DIR()}`, since, () => exec("sh", ["-c", LIST, "list", DIR()]));
       const desks = r.stdout.split("\n").filter(Boolean).map((line) => {
         const [slug, mtime, n, first, last] = line.split("\t");
         let head = null, tail = null;
@@ -367,7 +377,7 @@ export class Desks {
       this.counts = Object.fromEntries(desks.map((d) => [d.slug, d.n]));
       this.desks = desks;
       const open = this.desk();
-      this.messages = open ? parse(await readTextFile(`${DIR()}/${open.slug}.jsonl`)) : [];
+      this.messages = open ? parse(await coalesce(reads, `thread:${open.slug}`, since, () => readTextFile(`${DIR()}/${open.slug}.jsonl`))) : [];
       this.derive(open?.slug ?? null);
       if (open && (this.onScreen() || this.fixed || this.wide)) this.markRead(open.slug);
       this.publish();

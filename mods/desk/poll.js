@@ -46,3 +46,17 @@ export function peekDue(prev, { status, sig, created }, now) {
   if (age <= 10000) return false;
   return prev.sig !== sig || Boolean(prev.dialog) || now - (created ?? 0) < 120000 || age > 60000;
 }
+
+// One read for the copies one change wakes (every copy of the mod watches the same folder).
+// A read in flight is shared only with callers that woke (`since`) no later than it started,
+// so no caller gets data from before its change; settled reads are never reused. A joiner
+// whose shared read fails (its copy closed mid-read) reads for itself.
+export function coalesce(reads, key, since, start, now = Date.now()) {
+  const hit = reads.get(key);
+  if (hit && hit.at >= since) return hit.promise.catch(() => start());
+  const entry = { at: now, promise: Promise.resolve(start()) };
+  reads.set(key, entry);
+  const clear = () => { if (reads.get(key) === entry) reads.delete(key); };
+  entry.promise.then(clear, clear);
+  return entry.promise;
+}
