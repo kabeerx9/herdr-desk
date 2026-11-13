@@ -36,7 +36,17 @@ One launcher for everyone (the CTO, the Desk's buttons, you): it reads roles.jso
 gives every editing role its own git worktree, and starts the role with hc in its own Herdr tab, labeled role=<id> task=<slug>.
 Children always outlive their parent, so closing the CTO doesn't end its workers.
 """
-import contextlib, fcntl, glob, io, json, os, re, secrets, shutil, subprocess, sys, tempfile, time, shlex, types, uuid
+import contextlib, fcntl, glob, io, json, os, re, shutil, subprocess, sys, tempfile, time, shlex, types, uuid
+
+
+class secrets:
+    """`import secrets` (hashlib, random) costs every run about 5 ms; few commands need it."""
+    @staticmethod
+    def token_hex(nbytes):
+        import secrets as real
+        return real.token_hex(nbytes)
+
+
 import desk_adapters
 from desk_runtime import Store as RuntimeStore, RuntimeError as DeskRuntimeError, adapter as runtime_adapter
 from desk_runtime import JOB_TAIL, nearest_base, read_tail, transcript_jobs

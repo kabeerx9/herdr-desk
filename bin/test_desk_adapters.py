@@ -285,5 +285,29 @@ class Boundary(unittest.TestCase):
                     self.assertNotIn(m.split(".")[0], ("desk_runtime", "team"), f"{name} imports {m}")
 
 
+class LazyImports(unittest.TestCase):
+    """bin/team starts on every Desk poll and hook: keep slow modules out of its start-up."""
+    HERE = os.path.dirname(os.path.abspath(__file__))
+
+    def test_start_up_skips_urllib_and_secrets(self):
+        code = ("import importlib.machinery, importlib.util, sys; sys.path.insert(0, sys.argv[1]); "
+                "loader = importlib.machinery.SourceFileLoader('team', sys.argv[1] + '/team'); "
+                "spec = importlib.util.spec_from_loader(loader.name, loader); m = importlib.util.module_from_spec(spec); "
+                "loader.exec_module(m); print(sorted(x for x in ('urllib.request', 'secrets') if x in sys.modules)); "
+                "print(len(m.secrets.token_hex(3)), int(m.secrets.token_hex(4), 16) >= 0)")
+        out = subprocess.run([sys.executable, "-I", "-c", code, self.HERE], capture_output=True, text=True, check=True).stdout
+        self.assertEqual(["[]", "6 True"], out.split("\n")[:2])
+
+    def test_http_get_still_fetches(self):
+        import importlib
+        plan_usage = importlib.import_module("desk_adapters.plan_usage")  # the package exports a function of the same name
+        with tempfile.NamedTemporaryFile("w", suffix=".json", delete=False) as f:
+            json.dump({"ok": 1}, f)
+        try:
+            self.assertEqual({"ok": 1}, plan_usage.http_get("file://" + f.name, {"Accept": "application/json"}))
+        finally:
+            os.unlink(f.name)
+
+
 if __name__ == "__main__":
     unittest.main()

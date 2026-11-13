@@ -4,11 +4,11 @@ Tokens stay in this process: plan_usage() returns only plan names, percentages a
 reset times. These endpoints are private and the most likely to change.
 """
 import json
-import urllib.request
 from datetime import datetime
 
 
 def http_get(url, headers, timeout=15):
+    import urllib.request  # here, not at the top: it costs every bin/team run about 10 ms
     req = urllib.request.Request(url, headers=headers)
     with urllib.request.urlopen(req, timeout=timeout) as r:
         return json.load(r)
