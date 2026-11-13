@@ -2,6 +2,7 @@
 import json
 import os
 import subprocess
+import uuid
 
 from .agents import AgentAdapter, HookEvent
 from . import claude_transcript, plan_usage as usage_api, screen
@@ -165,6 +166,9 @@ class ClaudeAdapter(AgentAdapter):
             if key == "hooks":
                 continue
             settings[key] = {**settings["env"], **value} if key == "env" and isinstance(value, dict) else value
+        # "{launch_id}": a fresh id per launch, for a gateway that routes by session (OpenCode Go).
+        launch_id = uuid.uuid4().hex
+        settings["env"] = {k: v.replace("{launch_id}", launch_id) if isinstance(v, str) else v for k, v in settings["env"].items()}
         base += ["--settings", json.dumps(settings)]
         base += ["--append-system-prompt", prompt] if prompt else []
         return base + extra + ([task] if task else [])

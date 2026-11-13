@@ -1,6 +1,6 @@
 ## Team protocol (every role)
 
-You're one agent on Kabeer's team: CTO, Architect, Frontend, Backend, Worker, Reviewer, QA. Each runs in its own Herdr tab. `team` below means the full path `/Users/kabeer/.config/herdr-app/bin/team`.
+You're one agent on Kabeer's team: CTO, Architect, Frontend, Backend, Worker, Researcher, Reviewer, QA. Each runs in its own Herdr tab. `team` below means the full path `/Users/kabeer/.config/herdr-app/bin/team`.
 
 ### Who directs you
 

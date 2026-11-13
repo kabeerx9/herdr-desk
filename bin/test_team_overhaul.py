@@ -386,7 +386,7 @@ class ParallelWorkerTests(unittest.TestCase):
         self.assertNotIn('--approve-for-me', team.argv_for({'cli': 'codex', 'promptText': ''}, ''))
 
     def test_every_claude_engineer_launches_with_skills(self):
-        roles = [r for r in team.load_roles() if r.get('cli') == 'claude' and r['id'] not in ('cto', 'architect')]
+        roles = [r for r in team.load_roles() if r.get('cli') == 'claude' and r['id'] not in ('cto', 'architect', 'researcher')]
         self.assertEqual({'frontend', 'backend', 'worker', 'qa'}, {r['id'] for r in roles})
         for role in roles:
             self.assertIn('Skill', team.argv_for({**role, 'promptText': ''}, '')[2].split(','), role['id'])
@@ -422,6 +422,35 @@ class ParallelWorkerTests(unittest.TestCase):
         self.assertEqual(['/u/CLAUDE.md'], settings['claudeMdExcludes'])
         self.assertEqual(('1', '/bin/bash'), (settings['env']['X'], settings['env']['CLAUDE_CODE_SHELL']))
         self.assertTrue(settings['hooks']['Stop'])
+
+    def test_a_launch_id_in_a_settings_env_value_is_fresh_on_every_launch(self):
+        role = {'cli': 'claude', 'promptText': '', 'settings': {'env': {'H': 'x-session: desk-{launch_id}'}}}
+        def header():
+            argv = team.argv_for(role, '')
+            return json.loads(argv[argv.index('--settings') + 1])['env']['H']
+        first, second = header(), header()
+        self.assertRegex(first, r'^x-session: desk-[0-9a-f]{32}$')
+        self.assertNotEqual(first, second)
+
+    def test_the_worker_runs_through_the_go_gateway_without_auto_mode_or_web_search(self):
+        roles = {r['id']: r for r in team.load_roles()}
+        worker, researcher = roles['worker'], roles['researcher']
+        argv = team.argv_for({**worker, 'promptText': ''}, '')
+        settings = json.loads(argv[argv.index('--settings') + 1])
+        # Go passes neither Claude's auto-mode safety check nor its server-side web search.
+        self.assertEqual('acceptEdits', argv[argv.index('--permission-mode') + 1])
+        self.assertNotIn('WebSearch', argv[2].split(','))
+        self.assertIn('opencode.ai', settings['env']['ANTHROPIC_BASE_URL'])
+        self.assertIn('security find-generic-password', settings['apiKeyHelper'])
+        # The key stays in the Keychain: no key or token in the settings the launch carries.
+        self.assertFalse({'ANTHROPIC_API_KEY', 'ANTHROPIC_AUTH_TOKEN'} & set(settings['env']))
+        self.assertIn('Bash(git push:*)', settings['permissions']['deny'])
+        self.assertTrue(any(rule.endswith('bin/team:*)') for rule in settings['permissions']['allow']))
+        # Research keeps real web search, so it stays on Anthropic and edits no code.
+        self.assertIn('WebSearch', researcher['tools'])
+        self.assertTrue(researcher['model'].startswith('claude-'))
+        self.assertFalse(researcher.get('worktree'))
+        self.assertNotIn('env', researcher.get('settings', {}))
 
     def test_engineers_skip_the_personal_claude_md_and_keep_skills(self):
         for role in team.load_roles():

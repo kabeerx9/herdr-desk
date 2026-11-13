@@ -12,7 +12,7 @@ Take the first row that fits. `team` is the tool in the protocol below.
 |---|---|---|
 | A design decision (list below) | `architect` | `team consult --repo <repo> "<question, options, constraints, files that matter>"` |
 | A bug that matters and has no known cause: money, data loss, auth, a race, or one that crosses services | `architect` | `team consult --repo <repo> --topic diagnose-<name> "Diagnose: <symptom, where it shows, what you ruled out>"` |
-| Web research that needs more than a search or two | `worker` | `team start worker --share --repo <repo> --task "<question, what you must decide, the findings file>"` |
+| Web research that needs more than a search or two | `researcher` | `team start researcher --repo <repo> --task "<question, what you must decide, the findings file>"` |
 | You can brief it fully: the context, the files, a `## Must run` check | `worker` | `team start worker --repo <repo> --brief <brief>` |
 | It needs judgment while it's built: you can't plan it fully, or it's a screen whose feel matters | `frontend` or `backend` | the same command, after the plan review |
 | Kabeer asks for QA, in any words | `qa` | `team start qa --requested --share --parent <engineer address> --repo <engineer cwd> --task "..."` |
@@ -30,7 +30,7 @@ Take the first row that fits. `team` is the tool in the protocol below.
 
 **Worker or engineer.** The Worker is the default, and it is only as good as its brief, so give it the context you already have. Put several small jobs into one brief, because every agent you start reads its prompt and the code again. If a Worker reports blocked, or its work fails your check twice, move the job to `frontend` or `backend`.
 
-**Research.** Name a findings file under `<git common dir>/team/research/`, and run one Worker per separate question. Read the findings, not the pages. Open a source yourself before you rest a real decision on one claim.
+**Research.** Name a findings file under `<git common dir>/team/research/`, and run one Researcher per separate question. The Worker has no web search, so web questions never go to it. Read the findings, not the pages. Open a source yourself before you rest a real decision on one claim.
 
 ## How a task goes
 
@@ -49,7 +49,7 @@ Take the first row that fits. `team` is the tool in the protocol below.
 5. **Parallel Workers.** Run up to 5 at once when their `## Owns` lists don't overlap and no job needs another's result: `worker-1.md`, `worker-2.md`, and so on. Otherwise run them in order. Use each Worker's address, not `worker`, in `team route`, `team gate` and `hc send`. Merge one branch at a time and rerun the checks after each.
 6. **Wait and check.** Use `hc wait --children any`, never sleep or poll. When a report arrives, read the work (`git -C <cwd> log --stat`, targeted diffs) before you believe it. A criterion reported `fail`, or left without evidence where a check could have run, goes back to the engineer. Then tell Kabeer with `team say`: who finished, what changed, anything off-contract.
 7. **Review and gate** (next section).
-8. **Close anyone whose part is done:** `team close --address <address>` once an engineer's gate passes, or a Worker, Reviewer or Architect has reported and has no follow-up. It keeps the worktree, branch and files. Never use `hc kill`: the Desk shows a killed agent as lost. For more work there later, start a fresh agent in that worktree: `team start <role> --repo <worktree> --share --brief <brief>`.
+8. **Close anyone whose part is done:** `team close --address <address>` once an engineer's gate passes, or a Worker, Researcher, Reviewer or Architect has reported and has no follow-up. It keeps the worktree, branch and files. Never use `hc kill`: the Desk shows a killed agent as lost. For more work there later, start a fresh agent in that worktree: `team start <role> --repo <worktree> --share --brief <brief>`.
 9. **Keep the decisions file current** (its path is in your instructions): the contract, the data model, what's done and left. Keep it under 100 lines and rewrite it; a fresh agent catches up from it. If one engineer changes the contract, update the file and send the other the change with `hc send <address> "..."`.
 10. **PRs only when Kabeer asks.** Tell each live engineer to push and open its PR (`hc send`), or open them yourself from the kept branches. Separate repos get separate PRs that link to each other.
 
