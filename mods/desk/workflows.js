@@ -1,7 +1,8 @@
 import { div } from "gpui-kit";
 import { h_flex, v_flex, TextareaState, Textarea } from "gpui-base";
-import { exec, appHome, shared, setShared, run, notify, window } from "herdr";
+import { exec, appHome, home, agents, watchFolder, shared, setShared, run, notify, window } from "herdr";
 import { button, icon, pill } from "./ui.js";
+import { runtimeWake, agentSignature } from "./poll.js";
 
 export const runtimeData = () => shared("desk.runtime") ?? { sessions: [], queue: [], attention: [] };
 export async function runTeam(args) {
@@ -28,41 +29,65 @@ export function openDesk(task) {
 }
 
 // Only the always-visible rail polls the runtime. Shared data feeds the card, chat and inbox.
+// The poll's own bookkeeping stays in this module (shared by every copy of the mod): each
+// setShared redraws every mod, so only the result and its error go through shared state, and
+// only when they change. at: the last start; inflight: the running request; dirty: a forced
+// refresh arrived during it (run again at once); pending: a change arrived too soon (the
+// watch's 1 s timer runs it once the 2.5 s spacing allows).
+const poll = { at: 0, inflight: null, dirty: 0, pending: false };
+const setError = (value) => { if ((shared("desk.runtime.error") ?? null) !== value) setShared("desk.runtime.error", value); };
 export function refreshRuntime(cx, force = false) {
-  const now = Date.now(), active = shared("desk.runtime.inflight");
+  const now = Date.now(), active = poll.inflight;
   if (active && now - active.at < 15000) {
-    if (force) setShared("desk.runtime.dirty", now);
+    if (force) poll.dirty = now; else poll.pending = true;
     return;
   }
-  if (!force && now - (shared("desk.runtime.poll") ?? 0) < 2500) return;
+  if (!force && now - poll.at < 2500) { poll.pending = true; return; }
   const request = { id: `${now}-${Math.random()}`, at: now };
-  setShared("desk.runtime.poll", now);
-  setShared("desk.runtime.inflight", request);
+  poll.at = now; poll.inflight = request; poll.pending = false;
   cx.spawn(async (cx) => {
     try {
       const next = await runTeam(["state"]);
-      if (shared("desk.runtime.inflight")?.id !== request.id) return;
+      if (poll.inflight?.id !== request.id) return;
       if (JSON.stringify(next) !== JSON.stringify(runtimeData())) setShared("desk.runtime", next);
-      setShared("desk.runtime.error", null);
+      setError(null);
     } catch (e) {
-      if (shared("desk.runtime.inflight")?.id === request.id) setShared("desk.runtime.error", String(e?.message ?? e));
+      if (poll.inflight?.id === request.id) setError(String(e?.message ?? e));
     } finally {
-      if (shared("desk.runtime.inflight")?.id === request.id) {
-        setShared("desk.runtime.inflight", null);
-        if ((shared("desk.runtime.dirty") ?? 0) >= request.at) {
-          setShared("desk.runtime.dirty", 0); refreshRuntime(cx, true);
-        }
+      if (poll.inflight?.id === request.id) {
+        poll.inflight = null;
+        if (poll.dirty >= request.at) { poll.dirty = 0; refreshRuntime(cx, true); }
       }
       cx.notify();
     }
   });
 }
 
+// Polls on change, not on a clock: a write to the runtime file or a thread (the hooks append
+// permission requests and questions there), or an agent's status changing. A fallback timer
+// catches the rest (transcript titles): every 25 s, or every 60 s while Herdr is in the back.
+const FALLBACK = 25000, FALLBACK_AWAY = 60000;
 export class RuntimeWatch {
   init(cx) {
     this.needsYou = new NeedsYouAlerts();
+    this.agents = agentSignature(agents());
     refreshRuntime(cx, true);
-    cx.timer.every(3000, (cx) => { refreshRuntime(cx); this.needsYou.check(); });
+    // In memory only: no exec and no setShared unless something is due.
+    cx.timer.every(1000, (cx) => {
+      const sig = agentSignature(agents()), now = Date.now();
+      if (sig !== this.agents) { this.agents = sig; refreshRuntime(cx); }
+      else if (poll.pending || now - poll.at >= (window().active ? FALLBACK : FALLBACK_AWAY)) refreshRuntime(cx);
+      this.needsYou.check();
+    });
+    cx.spawn(async (cx) => {
+      const dir = `${home()}/.herdr/team`;
+      try { await exec("mkdir", ["-p", dir]); } catch {}
+      for (;;) {
+        let changed;
+        try { changed = await watchFolder(dir); } catch { return; }   // the fallback timer still runs
+        if (runtimeWake(changed, dir)) refreshRuntime(cx);
+      }
+    });
   }
 }
 
