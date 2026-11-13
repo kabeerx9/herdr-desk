@@ -440,7 +440,9 @@ export default class Spaces extends View {
         if ((this.seenAt[addr] ?? 0) < now - 1000) { this.seenAt[addr] = now; dirty = true; }
       }
     }
-    if (dirty) {
+    // seenAt moves every second while you look; write it when a dot flips, else every 30 s.
+    if (dirty && (changed || first || now - (this.savedAt ?? 0) > 30000)) {
+      this.savedAt = now;
       const live = new Set(all.map((a) => a.address));
       for (const m of [this.doneAt, this.seenAt]) for (const k of Object.keys(m)) if (!live.has(k)) delete m[k];
       localStorage.setItem("agents.doneAt", JSON.stringify(this.doneAt));
