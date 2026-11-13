@@ -6,7 +6,7 @@ import { fetchUsage, railMeters, openLimits } from "./usage.js";
 import { inboxCount } from "./inbox.js";
 import { showTerminals } from "./desks.js";
 import { RuntimeWatch } from "./workflows.js";
-import { cardOpen, setCardOpen } from "./ui.js";
+import { cardOpen, setCardOpen, syncCardColumn } from "./ui.js";
 
 // The always-visible edge of the Desk: one icon per tab, a badge for counts.
 export class Rail {
@@ -47,7 +47,27 @@ export class Rail {
   // every other count lives in the tooltip.
   render() {
     const t = theme(), open = isOpen(), active = currentTab(), counts = shared("desk.counts") ?? {}, inbox = inboxCount();
+    syncCardColumn();
+    // In the desk-chat layout the rail also holds the center's switch (chat or terminals) and
+    // the desk panel's toggle, so neither has to float over the chat.
+    const chatLayout = shared("layout") === "desk-chat", terms = Boolean(shared("deskchat.terminals"));
+    const view = shared("desk.view"), hasDesk = Boolean(view) && view !== "list" && view !== "new";
+    const tool = (id, name, tip, on, onClick, disabled = false) => {
+      const hovered = this.hovered === id;
+      return div().id(`rail-${id}`).size(28).flex().items_center().justify_center().rounded(8)
+        .when(!disabled, (el) => el.cursor_pointer().on_click(onClick))
+        .when(on, (el) => el.bg(t.selected)).when(!on && hovered && !disabled, (el) => el.bg(t.hover))
+        .text_color(disabled ? t.border : on || hovered ? t.foreground : t.dim).tooltip(tip)
+        .on_hover((h, cx) => { this.hovered = h ? id : this.hovered === id ? null : this.hovered; cx.notify(); })
+        .child(svg(`mods/desk/icons/${name}.svg`).size(15));
+    };
+    const tools = chatLayout ? [
+      tool("center", terms ? "terminal" : "chat", terms ? "Showing terminals. Click for the chat (⌘E)" : "Showing the chat. Click for the terminals (⌘E)", false, () => showTerminals(!terms)),
+      tool("card", "pane", !hasDesk ? "Open a desk to see its pipeline" : cardOpen() ? "Hide the desk's pipeline" : "Show the desk's pipeline: team, changes, gate, pull requests", hasDesk && cardOpen(), () => setCardOpen(!cardOpen()), !hasDesk),
+      div().w(20).h(1).flex_none().my(4).bg(t.border),
+    ] : [];
     return v_flex().id("desk-rail").size_full().pt(10).gap(4).items_center().bg(t.chrome)
+      .children(tools)
       .children(TABS.map((tab) => {
         const on = open && tab.id === active, hovered = this.hovered === tab.id;
         const n = tab.id === "inbox" ? inbox.n : counts[tab.id] ?? 0;

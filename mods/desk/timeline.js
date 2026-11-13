@@ -108,7 +108,8 @@ export function mineBubble(o, t, id, text, meta, { ok = false, failed = null, op
   return v_flex().id(id).items_end().gap(4).pt(gapTop(o))
     .on_hover((h, cx) => o.hoverOn(id, h, cx))
     .when(Boolean(attachments?.length), (el) => el.child(div().max_w_4_5().child(attachmentList(t, `${id}-files`, attachments, { thumb: 128, end: true }))))
-    .when(Boolean(text), (el) => el.child(div().max_w_4_5().px(14).py(9).rounded(18).bg(t.raised).border_1().border_color(t.border)
+    // Yours sit on the right in the accent's tint; the agents' sit on the left in the raised grey.
+    .when(Boolean(text), (el) => el.child(div().max_w_4_5().px(14).py(9).rounded(16).bg(t.accent + "26").border_1().border_color(t.accent + "4d")
       .text_size(size).line_height(1.55).text_color(t.foreground).child(text)))
     .child(h_flex().h(22).gap(6).items_center().text_size(11).text_color(t.dim).when(!hovered, (el) => el.opacity(0))
       .child(copyButton(o, t, id, text))
@@ -252,10 +253,15 @@ export function messageRow(o, t, slug, row, ctx) {
       .child(body)
       .when(Boolean(m.criteria?.length), (el) => el.child(criteriaList(t, id, m.criteria, true)))
       .child(diffFooter(o, t, id, m, slug, ctx.members))
-    : v_flex().gap(6).child(body).when(Boolean(m.criteria?.length), (el) => el.child(criteriaList(t, id, m.criteria)));
+    // A reply is a bubble that hugs its text; an aside (a note between agents) stays plain.
+    : aside ? v_flex().gap(6).child(body).when(Boolean(m.criteria?.length), (el) => el.child(criteriaList(t, id, m.criteria)))
+    : v_flex().self_start().max_w_full().min_w(0).px(14).py(10).gap(6).rounded(16).bg(t.raised).border_1().border_color(t.border)
+      .child(body).when(Boolean(m.criteria?.length), (el) => el.child(criteriaList(t, id, m.criteria, true)));
 
   const nameRow = h_flex().h(face).gap(8).items_center()
     .child(who(o, t, `${id}-who`, link, div().flex_none().text_size(aside ? 12 : 12.5).font_semibold().text_color(aside ? t.muted : t.foreground).child(role?.name ?? m.from)))
+    // Which model is speaking: the role's label without its effort ("Opus 5.5").
+    .when(Boolean(role?.label) && !aside, (el) => el.child(div().flex_none().text_size(11.5).text_color(t.dim).child(role.label.split(" · ")[0])))
     .when(Boolean(to), (el) => el.child(div().flex_none().text_size(11.5).text_color(t.dim).child(`to ${to}`)))
     .when(Boolean(kind), (el) => el.child(h_flex().flex_none().gap(4).items_center().text_size(11.5).text_color(t.muted)
       .when(Boolean(kind.mark), (x) => x.child(statusMark(t, kind.mark, 11, { still: true }))).child(kind.word)))

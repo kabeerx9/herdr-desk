@@ -58,7 +58,7 @@ const store = {
 // One mod, six parts: the panel (props.projects), its icon rail (props.rail),
 // the usage popover the rail opens (props.popover), the sidebar agent list (props.agents),
 // one desk popped out as a pane (props.chat, props.task = the desk), and in the desk-chat
-// layout the chat as the main view (props.main) with its floating card (props.card).
+// layout the chat as the main view (props.main) with its docked card column (props.card).
 export default class Desk extends View {
   init(_props, cx) {
     const p = props();
@@ -87,10 +87,7 @@ class MainChat {
   init(_p, cx) { this.chat = new Desks(null, cx, { wide: true }); }
   render(_cx) {
     const t = theme();
-    // The floating card sits over this same center: it sizes its density from this height.
-    return v_flex().id("chat-main").size_full().bg(t.background).text_color(t.foreground)
-      .on_size_change((size) => { if (Math.abs((shared("desk.center.h") ?? 0) - size.height) > 4) setShared("desk.center.h", Math.round(size.height)); })
-      .child(this.chat.render(t));
+    return v_flex().id("chat-main").size_full().bg(t.background).text_color(t.foreground).child(this.chat.render(t));
   }
 }
 

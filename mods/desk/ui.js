@@ -1,6 +1,6 @@
 import { div, svg } from "gpui-kit";
 import { h_flex, v_flex } from "gpui-base";
-import { shared, setShared } from "herdr";
+import { shared, setShared, run } from "herdr";
 
 // What a status mark shows: "done" only while it's unread (the sidebar publishes the unread
 // addresses as shared("desk.unread")); read, it's idle. Without that list, the status as is.
@@ -145,6 +145,19 @@ export function cardCollapsed() {
 export function setCardCollapsed(collapsed) {
   try { localStorage.setItem("card.collapsed", JSON.stringify(collapsed)); } catch {}
   if (shared("desk.card.collapsed") !== collapsed) setShared("desk.card.collapsed", collapsed);
+}
+// The card is a docked column in the desk-chat layout (node "desk-card"): shown while a desk is
+// open and the card isn't collapsed, hidden otherwise. Called from the rail's render (always on
+// screen); the layout is only told when the answer changes.
+export const CARD_WIDTH = 300;
+let cardColumn = null;
+export function syncCardColumn() {
+  if (shared("layout") !== "desk-chat") return;
+  const view = shared("desk.view"), hasDesk = Boolean(view) && view !== "list" && view !== "new";
+  const want = hasDesk && !cardCollapsed() ? "shown" : "hidden";
+  if (want === cardColumn) return;
+  cardColumn = want;
+  run(want === "shown" ? "layout.show" : "layout.hide", { id: "desk-card" });
 }
 // Kept for callers that think in open/closed (desks.js): open = not collapsed.
 export const cardOpen = () => !cardCollapsed();

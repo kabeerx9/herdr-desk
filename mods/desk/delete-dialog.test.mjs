@@ -6,7 +6,7 @@ import { registerHooks } from 'node:module';
 const STUBS = {
   'gpui-kit': 'export { div, svg, image } from "stub:ui";',
   'gpui-base': 'export { h_flex, v_flex } from "stub:ui";',
-  herdr: 'export { props, closeOverlay, setShared, theme, noop as shared, noop as appHome, noop as home } from "stub:ui";',
+  herdr: 'export { props, closeOverlay, setShared, theme, noop as shared, noop as appHome, noop as home, noop as run } from "stub:ui";',
   'stub:ui': `
     export const log = { keys: null, closed: [], shared: [] };
     const element = (name) => {

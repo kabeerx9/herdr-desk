@@ -125,20 +125,24 @@
                   },
                   "padding": 8
                 }
-              ],
-              "floating": [
-                {
-                  "id": "desk-card",
-                  "content": {
-                    "mod": "desk",
-                    "props": {
-                      "card": true
-                    }
-                  },
-                  "edge": "right",
-                  "align": "start"
-                }
               ]
+            },
+            {
+              "id": "desk-card",
+              "type": "block",
+              "content": {
+                "mod": "desk",
+                "props": {
+                  "card": true
+                }
+              },
+              "size": {
+                "px": 300
+              },
+              "min": 300,
+              "max": 300,
+              "background": "chrome",
+              "hidden": true
             },
             {
               "id": "panel",

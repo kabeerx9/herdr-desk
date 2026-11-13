@@ -1,7 +1,7 @@
 import { div, svg } from "gpui-kit";
 import { h_flex, v_flex, TextareaState, Textarea, InputState, Input, TextView } from "gpui-base";
 import { terminals, agents, panes, spaces, exec, home, appHome, readTextFile, watchFolder, notify, run, shared, setShared, playSound, pickFolder, settings, openOverlay, window as appWindow } from "herdr";
-import { button, empty, icon, iconButton, statusMark, shownStatus } from "./ui.js";
+import { button, empty, icon, iconButton, statusMark, shownStatus, pill, mostUrgent } from "./ui.js";
 import { Roles, roleTile, team, folderOf, findBriefs, startBrief, fileBrief, agentIcon, agentCli } from "./roles.js";
 import { WorkflowControls, runtimeData, runTeam, refreshRuntime, openDesk } from "./workflows.js";
 import { ReviewView } from "./review.js";
@@ -27,6 +27,7 @@ const STATUS = { blocked: "needs you", done: "done", working: "working", idle: "
 const PERMIT_WAIT = 540000;
 const QUESTION_WAIT = 3540000;
 const RANK = { blocked: 0, done: 1, working: 2, idle: 3 };
+const firstLineOf = (text) => String(text ?? "").split("\n").find((l) => l.trim())?.trim() ?? "";
 
 // In the desk-chat layout the center is a stack: the chat, or the shown tab's terminals.
 // Anything that jumps to a terminal switches the stack first; other layouts just focus it.
@@ -955,43 +956,51 @@ export class Desks {
 
   // ── list ──────────────────────────────────────────────────────────────────
 
+  // One table, grouped by project: a 44px row per desk. Mark, name, its latest line, who is on
+  // it, how old. The narrow panel drops the latest line and the faces.
   listView(t) {
-    const cards = this.desks.map((d) => {
+    const wide = this.wide;
+    const row = (d) => {
       const members = this.members(d.slug), unread = this.unread(d), id = `dk-${d.slug}`;
-      const top = [...members].sort((a, b) => (RANK[a.status] ?? 9) - (RANK[b.status] ?? 9))[0];
+      const status = members.length ? mostUrgent(members.map((m) => m.status)) ?? "idle" : "idle";
       const last = d.last && d.last.kind !== "desk"
-        ? `${d.last.from === "kabeer" ? "You" : this.roles.byId(d.last.from)?.name ?? d.last.from}: ${d.last.text}` : "No messages yet";
-      return v_flex().id(id).mx(10).mb(6).px(12).py(10).gap(7).rounded(10).border_1().border_color(t.border).bg(t.raised)
-        .cursor_pointer().hover((s) => s.border_color(t.input).bg(t.hover)).on_click((_e, cx) => this.go(d.slug, cx))
-        .child(h_flex().gap(8).items_center()
-          .child(div().min_w(0).truncate().text_size(13.5).font_semibold().text_color(t.foreground).child(d.name))
-          .when(Boolean(top?.status === "blocked"), (el) => el.child(h_flex().flex_none().gap(4).items_center().text_size(11).text_color(t.muted).child(statusMark(t, "blocked", 11)).child("needs you")))
-          .child(div().flex_1())
-          .when(unread > 0, (el) => el.child(div().min_w(18).h(18).px(5).rounded(9).bg(t.accent).text_color(t.accent_foreground)
-            .text_size(10.5).font_semibold().flex().items_center().justify_center().child(String(unread))))
-          .child(div().text_size(11).text_color(t.dim).child(ago(d.at))))
-        .child(h_flex().gap(6).items_center()
-          .child(h_flex().gap(4).flex_none().children(members.slice(0, 6).map((m) => this.avatar(t, this.roles.byId(m.role), m.status, 20))))
-          .child(div().min_w(0).flex_1().truncate().text_size(11).text_color(members.length ? t.muted : t.dim).child(members.length ? this.nowLine(members) : "nobody running"))
-          .when(Boolean(d.project), (el) => el.child(div().flex_none().text_size(11).text_color(t.dim).child(d.project))))
-        .child(div().text_size(11.5).line_height(1.4).text_color(t.muted).max_h(34).overflow_hidden().child(last.slice(0, 180)));
-    });
-    // The floating card sits over the top right: "New desk" keeps clear of it.
-    const inset = this.wide ? Math.max(0, Number(shared("desk.cardInset")?.right) || 0) : 0;
-    return v_flex().id("desks-list").size_full().min_h(0).overflow_y_scrollbar().pb(10)
-      .child(h_flex().pl(14).pr(14 + inset).pt(12).pb(10).items_center()
-        .child(v_flex().gap(2)
-          .child(div().text_size(15).font_semibold().text_color(t.foreground).child("Desks"))
-          .child(div().text_size(11.5).text_color(t.dim).child("Each desk is its own team: agents, chat and worktrees.")))
-        .child(div().flex_1())
-        .child(button(t, "desk-new", "New desk", (_e, cx) => this.go("new", cx), { iconName: "plus", primary: true })))
+        ? `${d.last.from === "kabeer" ? "You" : this.roles.byId(d.last.from)?.name ?? d.last.from}: ${firstLineOf(d.last.text)}`
+        : members.length ? this.nowLine(members) : "No messages yet";
+      return h_flex().id(id).h(44).flex_none().px(10).gap(12).items_center().rounded(9).cursor_pointer()
+        .hover((s) => s.bg(t.chrome)).active((s) => s.bg(t.selected)).on_click((_e, cx) => this.go(d.slug, cx))
+        .tooltip(members.length ? this.nowLine(members) : "Nobody running")
+        .child(h_flex().w(14).flex_none().justify_center().child(statusMark(t, status, 12, { still: status !== "working" && status !== "blocked" })))
+        .child(div().min_w(0).truncate().text_size(13).font_medium().text_color(t.foreground)
+          .when(wide, (el) => el.w(220).flex_none()).when(!wide, (el) => el.flex_1()).child(d.name))
+        .when(wide, (el) => el.child(div().min_w(0).flex_1().truncate().text_size(12.5).text_color(t.dim).child(last.slice(0, 200))))
+        .when(status === "blocked", (el) => el.child(pill(t, "needs you", t.blocked)))
+        .when(wide && members.length > 0, (el) => el.child(h_flex().flex_none().gap(3)
+          .children(members.slice(0, 4).map((m) => this.avatar(t, this.roles.byId(m.role), null, 16)))))
+        .when(unread > 0, (el) => el.child(div().min_w(18).h(18).px(5).flex_none().rounded(9).bg(t.accent).text_color(t.accent_foreground)
+          .text_size(10.5).font_semibold().flex().items_center().justify_center().child(String(unread))))
+        .child(div().w(28).flex_none().text_size(11.5).text_color(t.dim).text_right().child(ago(d.at)));
+    };
+    // Projects in the order of their newest desk; desks without one go last.
+    const groups = new Map();
+    for (const d of this.desks) { const k = d.project || ""; if (!groups.has(k)) groups.set(k, []); groups.get(k).push(d); }
+    const label = (text) => div().h(30).flex_none().px(10).pt(12).text_size(11).font_semibold().text_color(t.dim).child(text.toUpperCase());
+    const body = [...groups].sort(([a], [b]) => (a === "") - (b === ""))
+      .flatMap(([name, list]) => [label(name || "No project"), ...list.map(row)]);
+    const column = v_flex().w_full().when(wide, (el) => el.max_w(860).mx_auto().px(18).pt(14)).when(!wide, (el) => el.px(4));
+    // The header sits in the same column as the rows, so "New desk" lines up with their right edge.
+    const header = h_flex().px(10).h(48).flex_none().gap(10).items_center()
+      .child(div().text_size(15).font_semibold().text_color(t.foreground).child("Desks"))
+      .when(this.desks.length > 0, (el) => el.child(div().text_size(12).text_color(t.dim).child(String(this.desks.length))))
+      .child(div().flex_1())
+      .child(button(t, "desk-new", "New desk", (_e, cx) => this.go("new", cx), { iconName: "plus", primary: true }));
+    return v_flex().id("desks-list").size_full().min_h(0).overflow_y_scrollbar().pb(14)
+      .child(column.children([header, ...body]))
       .when(!this.desks.length, (el) => el.child(v_flex().mx(10).mt(6).px(16).py(18).gap(10).items_center().rounded(12).border_1().border_color(t.border)
         .child(icon("team", 22).text_color(t.dim))
         .child(div().text_size(13).font_semibold().text_color(t.foreground).child("No desks yet"))
         .child(div().text_size(12).line_height(1.45).text_color(t.muted).text_center()
           .child("Start a desk with the CTO, tell it what you want, and it brings in Frontend, Backend and the rest when needed."))
-        .child(button(t, "desk-new-empty", "Start a desk", (_e, cx) => this.go("new", cx), { iconName: "plus", primary: true }))))
-      .children(cards);
+        .child(button(t, "desk-new-empty", "Start a desk", (_e, cx) => this.go("new", cx), { iconName: "plus", primary: true }))));
   }
 
   // ── new desk ──────────────────────────────────────────────────────────────

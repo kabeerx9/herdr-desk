@@ -72,6 +72,7 @@ function statusMark(t, status, size = 12) {
 }
 // Geometry (the approved "Needs you + tree" prototype): 28px project headers, 32px desk rows,
 // 28px member rows indented under a 1px guide, 44px two-line "Needs you" rows; radius 7.
+const IDLE_DAYS = 14, IDLE_PER_PROJECT = 4; // desks with nobody running that stay in the tree
 const FOLDER_H = 28, THREAD_H = 32, MEMBER_H = 28, NEED_H = 44, INSET = 9, RADIUS = 7;
 const MEMBER_X = 34, GUIDE_X = 16; // a member's face and the guide line, from the row's left
 // Faces: 18 on desk rows, 16 on member rows, 22 on "Needs you" rows, 15 in a desk's face stack.
@@ -591,7 +592,7 @@ export default class Spaces extends View {
   // A desk row: its team chat. The terminal view stays where it is (the card follows the desk).
   openDesk(w, slug) {
     this.setDeskOpen(slug, true);
-    run("space.select", { id: w.id });
+    if (w?.id) run("space.select", { id: w.id });
     setShared("desk.view", slug);
     setShared("desk.route", null);
   }
@@ -733,11 +734,14 @@ export default class Spaces extends View {
         if (selected && others.length) { this.setDeskOpen(desk.slug, !desk.open); cx.notify(); }
         else this.openDesk(w, desk.slug);
       })
-      .child(this.face(t, desk.lead, FACE, selected))
+      // Nobody running: a hollow mark where the lead's face would be, and its age at rest.
+      .child(desk.lead ? this.face(t, desk.lead, FACE, selected)
+        : h_flex().size(FACE).flex_none().items_center().justify_center().child(statusMark(t, "idle", 11)))
       .child(div().min_w(0).flex_1().truncate().text_size(13).when(!recede, (el) => el.font_medium())
         .text_color(recede ? (hovered ? t.foreground : t.muted) : t.foreground).child(desk.title))
       .when(stack, (el) => el.child(this.faceStack(t, others, selected)))
-      .child(this.trailing(t, { status: desk.status, at: info?.at, word: !stack, hovered }))];
+      .child(desk.lead ? this.trailing(t, { status: desk.status, at: info?.at, word: !stack, hovered })
+        : div().flex_none().text_size(11.5).text_color(t.dim).child(info?.at ? ago(info.at) : ""))];
   }
 
   // An agent's face: its role's avatar with its program's badge, else the program's mark.
@@ -926,6 +930,22 @@ export default class Spaces extends View {
     }
     // A desk headed for a space drawn later than its first member's.
     for (const d of deskMap.values()) if (d.pending) { bySpace.get(d.pending.w.id).desks.push(d); delete d.pending; }
+    // Desks with nobody running stay in the tree, quiet: the newest few per project from the
+    // last two weeks, so a recent desk is one click away without a trip to the list.
+    const now = Date.now(), perHome = new Map();
+    for (const [slug, info] of [...this.deskInfo].sort((a, b) => b[1].at - a[1].at)) {
+      if (deskMap.has(slug) || !info.folder || now - info.at > IDLE_DAYS * 86400000) continue;
+      const home = homeOf.get(info.folder), key = home ? home.w.id : info.folder;
+      if ((perHome.get(key) ?? 0) >= IDLE_PER_PROJECT) continue;
+      perHome.set(key, (perHome.get(key) ?? 0) + 1);
+      const d = { slug, members: [], spaceId: home?.w.id ?? null };
+      deskMap.set(slug, d);
+      if (home) bySpace.get(home.w.id).desks.push(d);
+      else {
+        if (!synth.has(info.folder)) synth.set(info.folder, { folder: info.folder, desks: [], outside: [], kids: [] });
+        synth.get(info.folder).desks.push(d);
+      }
+    }
     for (const d of deskMap.values()) {
       d.title = this.deskTitle(d.slug, d.members);
       d.full = this.deskInfo.get(d.slug)?.name ?? d.slug;
@@ -934,8 +954,8 @@ export default class Spaces extends View {
       const jobs = shared("desk.jobs");
       if (d.status === "idle" && jobs?.task === d.slug && Object.values(jobs.by ?? {}).some((list) => list.length)) d.status = "queued";
       d.roles = d.members.map((k) => k.l.role);
-      d.lead = d.members.find((k) => k.l.role === "cto") ?? d.members[0];
-      d.space = { id: d.lead.a.space };
+      d.lead = d.members.find((k) => k.l.role === "cto") ?? d.members[0] ?? null;
+      d.space = { id: d.lead ? d.lead.a.space : d.spaceId };
       d.open = this.deskOpen.has(d.slug);
     }
     for (const s of synth.values()) s.kids = s.desks.flatMap((d) => d.members);
@@ -1004,7 +1024,7 @@ export default class Spaces extends View {
       if (collapsed) return list.flatMap(draw);
       const chunks = [];
       for (const r of list) (r.tree && chunks.length ? chunks[chunks.length - 1] : chunks[chunks.push([]) - 1]).push(r);
-      return chunks.map((c, ci) => v_flex().id(`group-${c[0].synth ? c[0].key : c[0].w.id}`).flex_none().when(ci > 0, (el) => el.mt(10)).children(c.flatMap(draw)));
+      return chunks.map((c, ci) => v_flex().id(`group-${c[0].synth ? c[0].key : c[0].w.id}`).flex_none().when(ci > 0, (el) => el.mt(2)).children(c.flatMap(draw)));
     };
     // Keyboard order follows the list (Herdr's next/previous agent).
     const finish = (list) => { setAgentOrder(order); return list; };
@@ -1053,9 +1073,9 @@ export default class Spaces extends View {
     const tip = [extra, place(w, ps), !tree && offMain(g?.branch) ? g.branch : null, behind].filter(Boolean).join(" · ");
     const fold = this.rowButton(t, `${id}-fold`, wc(`chevron-${shut ? "right" : "down"}`, 12), shut ? "Show its desks" : "Fold",
       () => this.toggleSpace(w.id), false, 20);
-    const dot = shut ? DOT[status] : null;
-    return this.rowBase(t, id, { pl: 10 + (tree ? 16 : 0), h: FOLDER_H, tip: tip || undefined })
-      .pr(4).gap(8)
+    const dot = shut ? DOT[status] : status === "blocked" ? "blocked" : null;
+    return this.rowBase(t, id, { pl: (tree ? 26 : 5), h: FOLDER_H, tip: tip || undefined })
+      .pr(4).gap(tree ? 8 : 3)
       .when(this.pressed === i && this.over !== i, (el) => el.opacity(0.5))
       .when(this.pressed !== null && this.over === i && this.pressed !== i, (el) => el.child(
         div().absolute().left(6).right(6).h(2).rounded(1).bg(t.accent)
@@ -1076,8 +1096,8 @@ export default class Spaces extends View {
         cx.notify();
       })
       .on_mouse_down("right", () => this.menu(w))
-      .child(wc(tree ? "branch" : "folder", 14).text_color(t.muted))
-      .child(this.headerTail(t, id, { title, hint, dot, shut, count, hovered, fold,
+      .child(tree ? wc("branch", 14).text_color(t.muted) : fold)
+      .child(this.headerTail(t, id, { title, hint, dot, shut, count, hovered, fold: tree ? fold : null,
         onNew: () => this.newDeskHere(w.id), newTip: chatLayout() ? "New desk here" : "New terminal" }));
   }
 
@@ -1086,11 +1106,11 @@ export default class Spaces extends View {
   headerTail(t, id, { title, hint, dot, shut, count, hovered, fold, onNew, newTip }) {
     return h_flex().min_w(0).flex_1().gap(8).items_center()
       .child(h_flex().min_w(0).flex_1().gap(6).items_center()
-        .child(div().min_w(0).flex_shrink_1().truncate().text_size(12).font_semibold().text_color(t.muted).child(title))
+        .child(div().min_w(0).flex_shrink_1().truncate().text_size(12.5).font_semibold().text_color(count > 0 ? t.foreground : t.muted).child(title))
         .when(Boolean(hint), (el) => el.child(div().min_w(0).flex_shrink_1().truncate().text_size(12).text_color(t.dim).child(hint))))
       .when(Boolean(dot), (el) => el.child(div().size(6).rounded(3).flex_none().bg(t[dot])))
       .when(shut && count > 0, (el) => el.child(div().flex_none().text_size(12).font_medium().text_color(t.dim).child(String(count))))
-      .when(hovered, (el) => el.child(this.rowButton(t, `${id}-new`, wc(chatLayout() ? "square-pen" : "plus", 13), newTip, onNew, false, 20)).child(fold))
+      .when(hovered, (el) => el.child(this.rowButton(t, `${id}-new`, wc("plus", 13), newTip, onNew, false, 20)).when(Boolean(fold), (x) => x.child(fold)))
       .when(!hovered, (el) => el.child(div().w(20).flex_none()));
   }
 
@@ -1102,12 +1122,12 @@ export default class Spaces extends View {
     const fold = this.rowButton(t, `${id}-fold`, wc(`chevron-${shut ? "right" : "down"}`, 12), shut ? "Show its desks" : "Fold",
       () => this.toggleSpace(r.key), false, 20);
     const start = () => { setShared("desk.start", { folder: r.folder, at: Date.now() }); setShared("desk.route", null); showTerminals(false); };
-    return this.rowBase(t, id, { pl: 10, h: FOLDER_H, tip: r.folder }).pr(4).gap(8)
+    return this.rowBase(t, id, { pl: 5, h: FOLDER_H, tip: r.folder }).pr(4).gap(3)
       // Starting an agent spends tokens, so an empty project's row does nothing; its "+" starts one.
       .on_click(() => { if (desks[0]) this.openDesk(desks[0].space, desks[0].slug); })
       .on_mouse_down("right", () => openOverlay({ mod: "desk-spaces", kind: "popup", width: 200, height: 110, props: { folderMenu: true, folder: r.folder } }))
-      .child(wc("folder", 14).text_color(t.muted))
-      .child(this.headerTail(t, id, { title: this.folderName(r.folder), hint, dot: shut ? DOT[status] : null, shut, count, hovered, fold,
+      .child(fold)
+      .child(this.headerTail(t, id, { title: this.folderName(r.folder), hint, dot: shut ? DOT[status] : status === "blocked" ? "blocked" : null, shut, count, hovered, fold: null,
         onNew: start, newTip: "New desk here" }));
   }
 
