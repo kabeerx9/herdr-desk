@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { runtimeWake, agentSignature, tickEvery } from './poll.js';
+import { runtimeWake, agentSignature, tickEvery, lastLines, due } from './poll.js';
 
 const dir = '/u/.herdr/team';
 
@@ -30,4 +30,23 @@ test('elapsed labels tick every second for a minute, then every 5 s', () => {
   assert.equal(tickEvery(59999), 1000);
   assert.equal(tickEvery(60000), 5000);
   assert.equal(tickEvery(3600000), 5000);
+});
+
+test('lastLines matches tail -n', () => {
+  assert.equal(lastLines('a\nb\nc\n', 2), 'b\nc');
+  assert.equal(lastLines('a\nb\nc', 2), 'b\nc');
+  assert.equal(lastLines('a\n', 60), 'a');
+  assert.equal(lastLines('', 60), '');
+  assert.equal(lastLines(null, 60), '');
+  const many = Array.from({ length: 100 }, (_, i) => JSON.stringify({ at: i + 1, tool: 'Read' })).join('\n') + '\n';
+  assert.deepEqual(lastLines(many, 60).split('\n').map((l) => JSON.parse(l).at), Array.from({ length: 60 }, (_, i) => i + 41));
+});
+
+test('due spaces runs per key', () => {
+  const stamps = {};
+  assert.equal(due(stamps, 'd1', 3000, 10000), true);
+  assert.equal(due(stamps, 'd1', 3000, 12999), false);
+  assert.equal(due(stamps, 'd2', 3000, 12999), true, 'another desk has its own spacing');
+  assert.equal(due(stamps, 'd1', 3000, 13000), true);
+  assert.equal(stamps.d1, 13000);
 });

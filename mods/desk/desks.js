@@ -11,7 +11,7 @@ import { COLUMN, measured, messageRow, liveRows, statusLineRows, headerStrip, ap
 import { routeKey, routeHeader, routeRow, routeEmpty, commandMenu } from "./route.js";
 import { commandsFor, slashQuery, matchCommands, resolveCommand, menuKey, mentionQuery, mentionItems } from "./commands.js";
 import { minimap } from "./minimap.js";
-import { tickEvery } from "./poll.js";
+import { tickEvery, lastLines, due } from "./poll.js";
 import { DIALOG } from "./delete-dialog.js";
 
 // Desks: each one an independent team (its own agents, thread and worktrees) that
@@ -27,8 +27,6 @@ const STATUS = { blocked: "needs you", done: "done", working: "working", idle: "
 const PERMIT_WAIT = 540000;
 const QUESTION_WAIT = 3540000;
 const RANK = { blocked: 0, done: 1, working: 2, idle: 3 };
-// One exec per working agent per wake: its step tail, then (if supported) its timeline.
-const POLL = `tail -n 60 "$1" 2>/dev/null; printf '\\n\\036\\n'; [ "$3" = 1 ] && "$2" timeline --address "$4" 2>/dev/null; exit 0`;
 
 // In the desk-chat layout the center is a stack: the chat, or the shown tab's terminals.
 // Anything that jumps to a terminal switches the stack first; other layouts just focus it.
@@ -1086,9 +1084,10 @@ export class Desks {
   openTerminal(address) { openTerminal(address); }
 
   // ── live turns: steps and timelines ───────────────────────────────────────
-  // Woken by the activity watcher (every hook write) and a 4s fallback; never from render. One
-  // exec per working agent per wake: the tail of its step feed and `team timeline` together.
-  // Only a copy that drew the thread recently polls (the card builds a Desks too).
+  // Woken by the activity watcher (every hook write) and a 4s fallback; never from render. Per
+  // working agent: the tail of its step feed (a file read), and `team timeline` at most every
+  // 3 s per desk (hooks write many times a second). Only a copy that drew the thread recently
+  // polls (the card builds a Desks too).
   pollSteps(cx) {
     const d = this.view !== "list" && this.view !== "new" ? this.desk(this.view) : null;
     if (!d || this.polling || Date.now() - (this.drawnAt ?? 0) > 15000) return;
@@ -1099,17 +1098,21 @@ export class Desks {
     if (ended) cx.notify();
     if (!working.length) return;
     this.polling = true;
+    const timelines = due(this.timelineAt ??= {}, d.slug, 3000, Date.now());
     cx.spawn(async (cx) => {
       let changed = false;
       try {
         for (const a of working) {
-          const ask = Date.now() - (this.noTimeline[a] ?? 0) > 60000;
-          let out = "";
-          try { out = (await exec("sh", ["-c", POLL, "poll", `${DIR()}/.activity/${a}.jsonl`, TEAM(), ask ? "1" : "0", a])).stdout; } catch {}
-          const { steps, timeline } = splitPoll(out);
+          const ask = timelines && Date.now() - (this.noTimeline[a] ?? 0) > 60000;
+          let feed = "";
+          try { feed = (await readTextFile(`${DIR()}/.activity/${a}.jsonl`)) ?? ""; } catch {}
+          const { steps } = splitPoll(lastLines(feed, 60));
           const before = this.steps[a];
           if (!before || before.length !== steps.length || before.at(-1)?.at !== steps.at(-1)?.at) { this.steps[a] = steps; changed = true; }
           if (!ask) continue;
+          let out = "";
+          try { out = (await exec(TEAM(), ["timeline", "--address", a])).stdout; } catch {}
+          const timeline = parseTimeline(out);
           if (!timeline) { this.noTimeline[a] = Date.now(); continue; }
           const sig = JSON.stringify(timeline);
           if (sig !== this.timelineSig[a]) { this.timelineSig[a] = sig; this.timelines[a] = timeline; changed = true; }
