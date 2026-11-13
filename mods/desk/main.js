@@ -1,9 +1,9 @@
 import { View, div } from "gpui-kit";
 import { v_flex, h_flex } from "gpui-base";
-import { exec, spaces, theme, run, props, notify, home, shared, setShared, nextCommand } from "herdr";
+import { exec, spaces, theme, run, props, notify, home, shared, setShared, nextCommand, window } from "herdr";
 import { icon, tileColor, ago, pill, button, section, empty, card, statusMark } from "./ui.js";
 import { GitPanel } from "./git.js";
-import { TABS, currentTab, setOpen } from "./tabs.js";
+import { TABS, currentTab, setOpen, isOpen } from "./tabs.js";
 import { Rail } from "./rail.js";
 import { inboxView } from "./inbox.js";
 import { startRole } from "./roles.js";
@@ -107,7 +107,14 @@ class Panel {
     this.git = new GitPanel(this, cx);
     this.desks = new Desks(this, cx, { toasts: true });
     cx.timer.every(15000, (cx) => this.refreshStatus(cx));
-    cx.timer.every(120000, (cx) => this.refreshGitHub(cx));
+    // GitHub (about a dozen gh calls) only for someone who can see it: every 2 min while the
+    // panel shows a tab that lists PRs or issues, every 10 min for the rail's badges alone, and
+    // not while Herdr is in the back (the first check after it comes forward catches up).
+    cx.timer.every(15000, (cx) => {
+      if (!window().active) return;
+      const listed = isOpen() && ["projects", "prs", "issues"].includes(this.tab);
+      if (Date.now() - (this.fetchedAt ?? 0) >= (listed ? 120000 : 600000)) this.refreshGitHub(cx);
+    });
     cx.timer.every(8000, (cx) => { if (this.tab === "git") this.git.refresh(cx); });
     cx.timer.every(60000, (cx) => { if (this.tab === "pages") this.refreshPages(cx); });
     this.refreshStatus(cx);

@@ -6,7 +6,7 @@
 
 import { View, div, svg, image } from "gpui-kit";
 import { h_flex } from "gpui-base";
-import { panes, spaces, props, run, theme, home, exec, shared } from "herdr";
+import { panes, spaces, props, run, theme, home, exec, shared, window } from "herdr";
 
 function programIcon(p, size, color) {
   if (!p?.icon) return null;
@@ -48,7 +48,9 @@ export default class Pane extends View {
     this.hovered = false;
     this.git = null;
     this.tip = null;
-    cx.timer.every(15000, (cx) => this.refresh(cx));
+    // git status only for a header on screen (its tab shown, Herdr in front); a hidden one
+    // catches up on its next draw.
+    cx.timer.every(15000, (cx) => { if (this.shown()) this.refresh(cx); else this.stale = true; });
     // Redraws the working time; cheap, and only matters while an agent works.
     cx.timer.every(30000, (cx) => { if (this.me()?.status === "working") cx.notify(); });
     this.refresh(cx);
@@ -56,6 +58,11 @@ export default class Pane extends View {
 
   me() {
     return panes().find((p) => p.pane === props()?.pane);
+  }
+
+  shown() {
+    const p = this.me();
+    return Boolean(p) && window().active && spaces().some((s) => s.active && s.tabs.some((x) => x.id === p.tab && x.active));
   }
 
   refresh(cx) {
@@ -85,6 +92,7 @@ export default class Pane extends View {
     const p = this.me();
     if (!p) return div();
     if (p.cwd && this.git && this.git.cwd !== p.cwd) { this.git = null; this.refresh(cx); }
+    else if (this.stale && this.shown()) { this.stale = false; this.refresh(cx); }
     const pane = p.pane, cwd = p.cwd;
     const program = ((p.program?.agent || p.program?.shell) && p.program.name) || p.title || p.program?.name || "shell";
     const title = sessionTitle(props()?.terminal ?? p.terminal);
