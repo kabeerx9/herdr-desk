@@ -11,6 +11,7 @@ import { COLUMN, measured, messageRow, liveRows, statusLineRows, headerStrip, ap
 import { routeKey, routeHeader, routeRow, routeEmpty, commandMenu } from "./route.js";
 import { commandsFor, slashQuery, matchCommands, resolveCommand, menuKey, mentionQuery, mentionItems } from "./commands.js";
 import { minimap } from "./minimap.js";
+import { tickEvery } from "./poll.js";
 import { DIALOG } from "./delete-dialog.js";
 
 // Desks: each one an independent team (its own agents, thread and worktrees) that
@@ -198,12 +199,18 @@ export class Desks {
     this.timelineSig = {}; this.noTimeline = {};       // last JSON seen; when it last failed (retry after a minute)
     this.jobs = {}; this.jobsAt = 0; this.jobsDesk = null;  // address -> running background jobs of the shown desk
     this.snapshots = store.get("desks.turns", {});     // address -> [{ first, ended, steps, summary, subagents }] of finished turns
-    // One shared clock for every elapsed label: only the primary copy ticks, only while a desk
-    // agent works and the window is in front. setShared redraws every copy.
-    cx.timer.every(1000, () => {
-      if (!(this.wide || (!chatLayout() && this.toasts)) || !appWindow().active) return;
-      const desk = new Set(terminals().filter((x) => x.labels?.task && x.labels?.role).map((x) => x.address));
-      if (agents().some((a) => a.status === "working" && desk.has(a.address))) setShared("desk.tick", Math.floor(Date.now() / 1000));
+    // Elapsed labels ("working 12s") redraw only the copy that shows them (it drew the chat in
+    // the last 15 s), only while an agent of its desk works and the window is in front: every
+    // second, every 5 s once the newest turn is a minute old. A setShared would redraw every mod.
+    this.tickAt = 0;
+    cx.timer.every(1000, (cx) => {
+      const d = this.view !== "list" && this.view !== "new" ? this.desk(this.view) : null, now = Date.now();
+      if (!d || !appWindow().active || now - (this.drawnAt ?? 0) > 15000) return;
+      const working = this.members(d.slug).filter((m) => m.status === "working");
+      if (!working.length) return;
+      const started = Math.max(...working.map((m) => this.timelines[m.address]?.turn?.started_ms ?? this.model.open?.[m.role] ?? this.steps[m.address]?.[0]?.at ?? now));
+      if (now - this.tickAt < tickEvery(now - started) - 100) return;
+      this.tickAt = now; cx.notify();
     });
     // Woken by the hook's writes; the slow timer only clears feeds of agents that stopped.
     cx.timer.every(4000, (cx) => { this.pollSteps(cx); this.pollJobs(cx); this.pollRoute(cx); });

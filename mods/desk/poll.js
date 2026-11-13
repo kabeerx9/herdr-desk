@@ -15,3 +15,7 @@ export function runtimeWake(paths, dir) {
 
 // Who is an agent and what it is doing, as one string: a change means team state may differ.
 export const agentSignature = (list) => (list ?? []).map((a) => `${a.address}:${a.status}`).sort().join(",");
+
+// How often an elapsed label ("working 12s") needs a redraw: every second for the first
+// minute, then every 5 s (the labels still show seconds; they step by five).
+export const tickEvery = (elapsedMs) => (elapsedMs < 60000 ? 1000 : 5000);

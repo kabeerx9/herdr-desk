@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { runtimeWake, agentSignature } from './poll.js';
+import { runtimeWake, agentSignature, tickEvery } from './poll.js';
 
 const dir = '/u/.herdr/team';
 
@@ -23,4 +23,11 @@ test('the agent signature changes with status or membership, not with order', ()
   assert.notEqual(agentSignature(a), agentSignature([{ ...a[0], status: 'blocked' }, a[1]]));
   assert.notEqual(agentSignature(a), agentSignature([a[0]]));
   assert.equal(agentSignature(null), '');
+});
+
+test('elapsed labels tick every second for a minute, then every 5 s', () => {
+  assert.equal(tickEvery(0), 1000);
+  assert.equal(tickEvery(59999), 1000);
+  assert.equal(tickEvery(60000), 5000);
+  assert.equal(tickEvery(3600000), 5000);
 });
